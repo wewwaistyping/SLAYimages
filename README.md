@@ -95,7 +95,7 @@ This extension is built upon the work of two original projects:
 - **[notsosillynotsoimages](https://github.com/aceeenvw/notsosillynotsoimages)** by **aceeenvw** — NPC reference system, robust engine with iOS support, recursion protection, lightbox, debug logging
 - **[sillyimages](https://github.com/0xl0cal/sillyimages)** by **0xl0cal** — Wardrobe system, outfit management, auto-analyze, avatar references, image context, video support
 
-Merged and extended by **IVORY**.
+Merged and extended by **WEWWA** and silly claude code.
 
 ---
 
