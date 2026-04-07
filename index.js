@@ -292,7 +292,10 @@
                 }
 
                 if (desc) desc = desc.replace(/^["'`]+|["'`]+$/g, '').replace(/^(Here|This|The image|I see|In this).{0,20}(shows?|features?|depicts?|displays?)\s*/i, '');
-                if (desc && desc.length > 10 && desc.length < 500) { swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc; }
+                if (desc && desc.length > 10 && desc.length < 500) {
+                    desc = `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`;
+                    swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
+                }
                 swLog('WARN', `Direct API: unusable result (len=${desc?.length || 0})`);
             } catch (e) { swLog('WARN', `Direct API failed (${model}):`, e.message); toastr.warning(`Ошибка: ${e.message}`, 'Гардероб', { timeOut: 5000 }); }
             return null;
@@ -313,7 +316,7 @@
                 const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 500) { swLog('INFO', 'Chat API described:', desc.substring(0, 100)); return desc; }
+                if (desc && desc.length > 10 && desc.length < 500) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
@@ -322,7 +325,7 @@
                 const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 500) { swLog('INFO', 'Chat API (quiet) described:', desc.substring(0, 100)); return desc; }
+                if (desc && desc.length > 10 && desc.length < 500) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
@@ -1384,8 +1387,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         const botData = window.slayWardrobe.getActiveOutfitData('bot');
         const userData = window.slayWardrobe.getActiveOutfitData('user');
         const wardrobeParts = [];
-        if (botData?.description) wardrobeParts.push(`[DO NOT USE THIS IMAGE AS POSE REFERENCE] [Character's current outfit: ${botData.description}]`);
-        if (userData?.description) wardrobeParts.push(`[DO NOT USE THIS IMAGE AS POSE REFERENCE] [User's current outfit: ${userData.description}]`);
+        if (botData?.description) wardrobeParts.push(`[Character's current outfit: ${botData.description}]`);
+        if (userData?.description) wardrobeParts.push(`[User's current outfit: ${userData.description}]`);
         if (wardrobeParts.length > 0) {
             prompt = `${wardrobeParts.join(' ')}\n${prompt}`;
             iigLog('INFO', `Wardrobe descriptions injected: ${wardrobeParts.join(', ')}`);
