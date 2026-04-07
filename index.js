@@ -140,6 +140,7 @@
                     <div class="sw-outfit-btns">
                         <div class="sw-btn-activate" title="${a ? 'Снять' : 'Надеть'}"><i class="fa-solid ${a ? 'fa-toggle-on' : 'fa-toggle-off'}"></i></div>
                         <div class="sw-btn-edit" title="Редактировать"><i class="fa-solid fa-pen"></i></div>
+                        <div class="sw-btn-regen" title="Перегенерировать описание"><i class="fa-solid fa-robot"></i></div>
                         <div class="sw-btn-delete" title="Удалить"><i class="fa-solid fa-trash-can"></i></div>
                     </div></div></div>`;
         }
@@ -151,6 +152,7 @@
             card.querySelector('.sw-outfit-img')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
             card.querySelector('.sw-btn-activate')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
             card.querySelector('.sw-btn-edit')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swEdit(cn, swTab, id); });
+            card.querySelector('.sw-btn-regen')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swRegenDescription(cn, swTab, id); });
             card.querySelector('.sw-btn-delete')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (confirm('Удалить?')) { swRemove(cn, swTab, id); swRender(); toastr.info('Удалён', 'Гардероб'); } });
         }
     }
@@ -256,7 +258,7 @@
                     const body = {
                         contents: [{ role: 'user', parts: [
                             { inlineData: { mimeType: 'image/png', data: base64 } },
-                            { text: 'You are a fashion catalog assistant. Describe ONLY the clothing, garments, colors, fabrics, accessories, and shoes visible in this image. 1-2 sentences in English. No narrative, no roleplay.' }
+                            { text: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative.' }
                         ]}],
                         generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: 150 }
                     };
@@ -269,7 +271,7 @@
                     const body = {
                         model, max_tokens: 150,
                         messages: [
-                            { role: 'system', content: 'You are a fashion catalog assistant. Describe ONLY clothing in 1-2 sentences in English.' },
+                            { role: 'system', content: 'Describe the clothing as a costume designer would. Include: garment names, fabric type, texture, fit, silhouette, exact colors, accessories, shoes. 2-3 sentences.' },
                             { role: 'user', content: [
                                 { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
                                 { type: 'text', text: 'Describe the clothing in this image.' }
@@ -295,7 +297,7 @@
         if (typeof ctx.generateRaw === 'function') {
             try {
                 const messages = [
-                    { role: 'system', content: 'You are a fashion catalog assistant. You ONLY describe clothing. Respond with 1-2 sentences in English. Nothing else.' },
+                    { role: 'system', content: 'Describe the clothing as a costume designer would. Include: garment names, fabric type, texture, fit, silhouette, exact colors, accessories, shoes. 2-3 sentences.' },
                     { role: 'user', content: [
                         { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
                         { type: 'text', text: 'Describe the clothing in this image.' },
@@ -342,19 +344,25 @@
         inp.click();
     }
 
-    async function swEdit(cn, type, id) {
+    function swEdit(cn, type, id) {
         const o = swFind(cn, type, id); if (!o) return;
         const n = prompt('Название:', o.name); if (n === null) return;
-        let currentDesc = o.description || '';
-        if (swGetSettings().autoDescribe !== false) {
-            const reAnalyze = confirm('Пере-анализировать образ через ИИ?\n\nОК = да (текущее описание заменится)\nОтмена = редактировать вручную');
-            if (reAnalyze) {
-                const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
-                if (imgBase64) { const autoDesc = await swAnalyzeOutfit(imgBase64); if (autoDesc) currentDesc = autoDesc; }
+        const d = prompt('Описание:', o.description || ''); if (d === null) return;
+        o.name = n.trim() || o.name; o.description = d.trim(); swSave(); swRender(); swUpdatePromptInjection(); toastr.info('Обновлён', 'Гардероб');
+    }
+
+    async function swRegenDescription(cn, type, id) {
+        const o = swFind(cn, type, id); if (!o) return;
+        const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
+        if (!imgBase64) { toastr.error('Картинка не найдена', 'Гардероб'); return; }
+        const autoDesc = await swAnalyzeOutfit(imgBase64);
+        if (autoDesc) {
+            const edited = prompt('Описание (можете отредактировать):', autoDesc);
+            if (edited !== null && edited.trim()) {
+                o.description = edited.trim(); swSave(); swRender(); swUpdatePromptInjection();
+                toastr.success('Описание обновлено', 'Гардероб', { timeOut: 2000 });
             }
         }
-        const d = prompt('Описание:', currentDesc); if (d === null) return;
-        o.name = n.trim() || o.name; o.description = d.trim(); swSave(); swRender(); swUpdatePromptInjection(); toastr.info('Обновлён', 'Гардероб');
     }
 
     // ── Prompt injection ──
