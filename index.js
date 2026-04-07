@@ -592,186 +592,149 @@
         return parts.join(' ');
     }
 
-    // Custom modal for outfit description choice
+    // Description choice — inline in #sw-tab-content
     function swShowDescriptionModal(outfitName) {
         return new Promise((resolve) => {
-                        const ov = document.createElement('div');
-            ov.className = 'sw-desc-overlay';
-            const m = document.createElement('div');
-            m.className = 'sw-desc-modal';
-            m.innerHTML = `
-                <div class="sw-desc-header">
-                    <div class="sw-desc-title">\uD83D\uDC85 Описание отсутствует</div>
-                    <div class="sw-desc-subtitle">\u00AB${esc(outfitName)}\u00BB — для наилучшего результата добавьте описание одежды</div>
-                </div>
-                <div class="sw-desc-body">
-                    <button class="sw-desc-btn sw-desc-btn-secondary" data-choice="skip">
-                        <b>Без описания</b><br><span>Надеть как есть — одежда может не подтянуться</span>
-                    </button>
-                    <button class="sw-desc-btn sw-desc-btn-primary" data-choice="manual">
-                        <b>\u270F\uFE0F Ввести вручную</b><br><span>Описать аутфит своими словами</span>
-                    </button>
-                    <button class="sw-desc-btn sw-desc-btn-primary" data-choice="ai">
-                        <b>\uD83E\uDD16 Сгенерировать ИИ</b><br><span>Отправить картинку на анализ через чат-API</span>
-                    </button>
-                </div>`;
-            ov.appendChild(m);
-            swGetModalContainer().appendChild(ov);
-
-            for (const btn of m.querySelectorAll('.sw-desc-btn')) {
-                btn.addEventListener('click', () => { ov.remove(); resolve(btn.dataset.choice); });
+            const el = swShowInline(`
+                <div style="padding:10px;">
+                    <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:6px;">💅 Описание отсутствует</div>
+                    <div style="font-size:12px;color:#999;margin-bottom:14px;">«${esc(outfitName)}» — для наилучшего результата добавьте описание</div>
+                    <div style="display:flex;flex-direction:column;gap:8px;">
+                        <button class="sw-inline-btn" data-choice="skip" style="padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b>Без описания</b><br><span style="font-size:11px;opacity:0.6;">Надеть как есть</span></button>
+                        <button class="sw-inline-btn" data-choice="manual" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">✏️ Ввести вручную</b><br><span style="font-size:11px;opacity:0.6;">Описать аутфит своими словами</span></button>
+                        <button class="sw-inline-btn" data-choice="ai" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">🤖 Сгенерировать ИИ</b><br><span style="font-size:11px;opacity:0.6;">Отправить картинку на анализ</span></button>
+                    </div>
+                </div>`);
+            if (!el) { resolve(null); return; }
+            for (const btn of el.querySelectorAll('.sw-inline-btn')) {
+                btn.addEventListener('click', () => { swRestoreInline(); resolve(btn.dataset.choice); });
             }
-            ov.addEventListener('click', (e) => { if (e.target === ov) { ov.remove(); resolve(null); } });
-            document.addEventListener('keydown', function escHandler(e) {
-                if (e.key === 'Escape') { ov.remove(); resolve(null); document.removeEventListener('keydown', escHandler); }
-            });
         });
     }
 
     // ── Upload modal (custom, replaces browser prompts) ──
-    function swGetModalContainer() { return document.getElementById('sw-modal-overlay') || document.body; }
+    // Render sub-forms inside #sw-tab-content, replacing the grid temporarily
+    let _savedContent = null;
+    function swShowInline(html) {
+        const el = document.getElementById('sw-tab-content');
+        if (!el) return null;
+        _savedContent = el.innerHTML;
+        el.innerHTML = html;
+        // Hide current outfit preview and filters while sub-form is open
+        const cur = document.getElementById('sw-current-outfit'); if (cur) cur.style.display = 'none';
+        return el;
+    }
+    function swRestoreInline() {
+        const el = document.getElementById('sw-tab-content');
+        if (el && _savedContent !== null) { el.innerHTML = _savedContent; _savedContent = null; }
+        const cur = document.getElementById('sw-current-outfit'); if (cur) cur.style.display = '';
+        swRender(); // re-render to rebind events
+    }
 
     function swShowUploadModal(defaultName) {
         return new Promise((resolve) => {
-            swInjectV4Styles();
-                        const ov = document.createElement('div');
-            ov.className = 'sw-upload-modal-overlay';
-            const m = document.createElement('div');
-            m.className = 'sw-upload-modal';
             let tagsHtml = '';
-            for (const tag of TAG_KEYS) {
-                tagsHtml += `<label class="sw-upload-tag"><input type="checkbox" value="${tag}"> ${esc(TAGS[tag])}</label>`;
-            }
+            for (const tag of TAG_KEYS) { tagsHtml += `<label style="display:inline-flex;align-items:center;gap:3px;font-size:12px;color:#bbb;cursor:pointer;"><input type="checkbox" value="${tag}" style="accent-color:#db7093;"> ${esc(TAGS[tag])}</label> `; }
             let catOptions = '';
-            for (const cat of CAT_KEYS) {
-                catOptions += `<option value="${cat}">${esc(CATEGORIES[cat])}</option>`;
-            }
-            m.innerHTML = `
-                <h3>\uD83D\uDC57 Новый предмет</h3>
-                <label>Название</label>
-                <input type="text" id="sw-upl-name" value="${esc(defaultName)}" placeholder="Название предмета">
-                <label>Категория</label>
-                <select id="sw-upl-cat">${catOptions}</select>
-                <label>Для кого</label>
-                <select id="sw-upl-forwho"><option value="all">Все</option><option value="bot">Бот</option><option value="user">Юзер</option></select>
-                <label>Теги</label>
-                <div class="sw-upload-tags" id="sw-upl-tags">${tagsHtml}</div>
-                <div class="sw-upload-btns">
-                    <button class="sw-upload-btn sw-upload-btn-cancel" id="sw-upl-cancel">Отмена</button>
-                    <button class="sw-upload-btn sw-upload-btn-save" id="sw-upl-save">Сохранить</button>
-                </div>`;
-            ov.appendChild(m);
-            swGetModalContainer().appendChild(ov);
+            for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${cat === swCatTab ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
 
-            // Pre-select current category tab
-            const catSel = m.querySelector('#sw-upl-cat');
-            if (catSel) catSel.value = swCatTab;
+            const el = swShowInline(`
+                <div style="padding:10px;">
+                    <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">👗 Новый предмет</h3>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Название</label>
+                    <input type="text" id="sw-upl-name" value="${esc(defaultName)}" placeholder="Название" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Категория</label>
+                    <select id="sw-upl-cat" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">${catOptions}</select>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Для кого</label>
+                    <select id="sw-upl-forwho" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="all">Все</option><option value="bot" ${swTab === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${swTab === 'user' ? 'selected' : ''}>Юзер</option></select>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Теги</label>
+                    <div id="sw-upl-tags" style="display:flex;flex-wrap:wrap;gap:6px;">${tagsHtml}</div>
+                    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
+                        <button id="sw-upl-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
+                        <button id="sw-upl-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
+                    </div>
+                </div>`);
+            if (!el) { resolve(null); return; }
 
-            const close = (val) => { ov.remove(); resolve(val); };
-            m.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
-            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
-            m.querySelector('#sw-upl-save').addEventListener('click', () => {
-                const name = m.querySelector('#sw-upl-name').value.trim();
+            const close = (val) => { swRestoreInline(); resolve(val); };
+            el.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
+            el.querySelector('#sw-upl-save').addEventListener('click', () => {
+                const name = el.querySelector('#sw-upl-name').value.trim();
                 if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
-                const category = catSel.value;
-                const forWho = m.querySelector('#sw-upl-forwho').value;
-                const tags = [...m.querySelectorAll('#sw-upl-tags input:checked')].map(c => c.value);
+                const category = el.querySelector('#sw-upl-cat').value;
+                const forWho = el.querySelector('#sw-upl-forwho').value;
+                const tags = [...el.querySelectorAll('#sw-upl-tags input:checked')].map(c => c.value);
                 close({ name, category, forWho, tags });
             });
-            document.addEventListener('keydown', function escHandler(e) {
-                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escHandler); }
-            });
-            // Focus name input
-            setTimeout(() => m.querySelector('#sw-upl-name')?.focus(), 50);
+            setTimeout(() => el.querySelector('#sw-upl-name')?.focus(), 50);
         });
     }
 
     // ── Description input modal (replaces browser prompt()) ──
     function swShowDescInput(title, value) {
         return new Promise((resolve) => {
-            swInjectV4Styles();
-                        const ov = document.createElement('div');
-            ov.className = 'sw-desc-input-overlay';
-            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200001;display:flex;align-items:flex-start;justify-content:center;padding:20px;padding-top:10vh;overflow-y:auto;-webkit-overflow-scrolling:touch;';
-            const m = document.createElement('div');
-            m.style.cssText = 'background:rgba(30,30,40,0.98);border-radius:14px;padding:20px;width:420px;max-width:90vw;max-height:80vh;overflow-y:auto;color:#ddd;box-shadow:0 12px 48px rgba(0,0,0,0.5);border:1px solid rgba(244,114,182,0.15);flex-shrink:0;';
-            m.innerHTML = `
-                <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:12px;">${esc(title)}</div>
-                <textarea id="sw-descinput-text" style="width:100%;min-height:100px;max-height:200px;padding:10px;border-radius:8px;border:1px solid rgba(244,114,182,0.2);background:rgba(0,0,0,0.3);color:#eee;font-size:13px;line-height:1.5;resize:vertical;box-sizing:border-box;font-family:inherit;">${esc(value || '')}</textarea>
-                <div style="font-size:11px;color:#888;margin-top:4px;" id="sw-descinput-count">${(value || '').length} символов</div>
-                <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
-                    <button id="sw-descinput-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
-                    <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
-                </div>`;
-            ov.appendChild(m);
-            swGetModalContainer().appendChild(ov);
-
-            const textarea = m.querySelector('#sw-descinput-text');
-            const counter = m.querySelector('#sw-descinput-count');
+            const el = swShowInline(`
+                <div style="padding:10px;">
+                    <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:12px;">${esc(title)}</div>
+                    <textarea id="sw-descinput-text" style="width:100%;min-height:100px;max-height:200px;padding:10px;border-radius:8px;border:1px solid rgba(244,114,182,0.2);background:rgba(0,0,0,0.3);color:#eee;font-size:13px;line-height:1.5;resize:vertical;box-sizing:border-box;font-family:inherit;">${esc(value || '')}</textarea>
+                    <div style="font-size:11px;color:#888;margin-top:4px;" id="sw-descinput-count">${(value || '').length} символов</div>
+                    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+                        <button id="sw-descinput-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
+                        <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
+                    </div>
+                </div>`);
+            if (!el) { resolve(null); return; }
+            const textarea = el.querySelector('#sw-descinput-text');
+            const counter = el.querySelector('#sw-descinput-count');
             textarea.focus();
             textarea.setSelectionRange(textarea.value.length, textarea.value.length);
             textarea.addEventListener('input', () => { counter.textContent = `${textarea.value.length} символов`; });
-
-            const close = (val) => { ov.remove(); resolve(val); };
-            m.querySelector('#sw-descinput-cancel').addEventListener('click', () => close(null));
-            m.querySelector('#sw-descinput-save').addEventListener('click', () => close(textarea.value.trim()));
-            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
-            document.addEventListener('keydown', function escH(e) {
-                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escH); }
-            });
+            const close = (val) => { swRestoreInline(); resolve(val); };
+            el.querySelector('#sw-descinput-cancel').addEventListener('click', () => close(null));
+            el.querySelector('#sw-descinput-save').addEventListener('click', () => close(textarea.value.trim()));
         });
     }
 
     // ── Edit modal (custom, replaces browser prompts) ──
     function swShowEditModal(item) {
         return new Promise((resolve) => {
-            swInjectV4Styles();
-                        const ov = document.createElement('div');
-            ov.className = 'sw-edit-modal-overlay';
-            const m = document.createElement('div');
-            m.className = 'sw-edit-modal';
             let tagsHtml = '';
             for (const tag of TAG_KEYS) {
                 const checked = Array.isArray(item.tags) && item.tags.includes(tag) ? 'checked' : '';
-                tagsHtml += `<label class="sw-upload-tag"><input type="checkbox" value="${tag}" ${checked}> ${esc(TAGS[tag])}</label>`;
+                tagsHtml += `<label style="display:inline-flex;align-items:center;gap:3px;font-size:12px;color:#bbb;cursor:pointer;"><input type="checkbox" value="${tag}" ${checked} style="accent-color:#db7093;"> ${esc(TAGS[tag])}</label> `;
             }
             let catOptions = '';
-            for (const cat of CAT_KEYS) {
-                catOptions += `<option value="${cat}" ${item.category === cat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`;
-            }
-            m.innerHTML = `
-                <h3>\u270F\uFE0F Редактировать</h3>
-                <label>Название</label>
-                <input type="text" id="sw-edit-name" value="${esc(item.name)}">
-                <label>Описание</label>
-                <textarea id="sw-edit-desc">${esc(item.description || '')}</textarea>
-                <label>Категория</label>
-                <select id="sw-edit-cat">${catOptions}</select>
-                <label>Для кого</label>
-                <select id="sw-edit-forwho"><option value="all" ${(item.forWho || 'all') === 'all' ? 'selected' : ''}>Все</option><option value="bot" ${item.forWho === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${item.forWho === 'user' ? 'selected' : ''}>Юзер</option></select>
-                <label>Теги</label>
-                <div class="sw-upload-tags" id="sw-edit-tags">${tagsHtml}</div>
-                <div class="sw-upload-btns">
-                    <button class="sw-upload-btn sw-upload-btn-cancel" id="sw-edit-cancel">Отмена</button>
-                    <button class="sw-upload-btn sw-upload-btn-save" id="sw-edit-save">Сохранить</button>
-                </div>`;
-            ov.appendChild(m);
-            swGetModalContainer().appendChild(ov);
+            for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${item.category === cat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
 
-            const close = (val) => { ov.remove(); resolve(val); };
-            m.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
-            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
-            m.querySelector('#sw-edit-save').addEventListener('click', () => {
-                const name = m.querySelector('#sw-edit-name').value.trim();
+            const el = swShowInline(`
+                <div style="padding:10px;">
+                    <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">✏️ Редактировать</h3>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Название</label>
+                    <input type="text" id="sw-edit-name" value="${esc(item.name)}" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Описание</label>
+                    <textarea id="sw-edit-desc" style="width:100%;min-height:60px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;resize:vertical;">${esc(item.description || '')}</textarea>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Категория</label>
+                    <select id="sw-edit-cat" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">${catOptions}</select>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Для кого</label>
+                    <select id="sw-edit-forwho" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="all" ${(item.forWho || 'all') === 'all' ? 'selected' : ''}>Все</option><option value="bot" ${item.forWho === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${item.forWho === 'user' ? 'selected' : ''}>Юзер</option></select>
+                    <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Теги</label>
+                    <div id="sw-edit-tags" style="display:flex;flex-wrap:wrap;gap:6px;">${tagsHtml}</div>
+                    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
+                        <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
+                        <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
+                    </div>
+                </div>`);
+            if (!el) { resolve(null); return; }
+            const close = (val) => { swRestoreInline(); resolve(val); };
+            el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
+            el.querySelector('#sw-edit-save').addEventListener('click', () => {
+                const name = el.querySelector('#sw-edit-name').value.trim();
                 if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
-                const description = m.querySelector('#sw-edit-desc').value.trim();
-                const category = m.querySelector('#sw-edit-cat').value;
-                const forWho = m.querySelector('#sw-edit-forwho').value;
-                const tags = [...m.querySelectorAll('#sw-edit-tags input:checked')].map(c => c.value);
+                const description = el.querySelector('#sw-edit-desc').value.trim();
+                const category = el.querySelector('#sw-edit-cat').value;
+                const forWho = el.querySelector('#sw-edit-forwho').value;
+                const tags = [...el.querySelectorAll('#sw-edit-tags input:checked')].map(c => c.value);
                 close({ name, description, category, forWho, tags });
-            });
-            document.addEventListener('keydown', function escHandler(e) {
-                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escHandler); }
             });
             setTimeout(() => m.querySelector('#sw-edit-name')?.focus(), 50);
         });
