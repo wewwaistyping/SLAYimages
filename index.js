@@ -231,10 +231,17 @@
         off ? toastr.info(`«${nm}» снят`, 'Гардероб', { timeOut: 2000 }) : toastr.success(`«${nm}» надет`, 'Гардероб', { timeOut: 2000 });
     }
 
+    const DESCRIBE_PROMPTS = {
+        detailed: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative.',
+        simple: 'Describe ONLY the clothing, garments, colors, accessories, and shoes visible in this image. 1-2 sentences in English. No narrative.',
+    };
+
     async function swAnalyzeOutfit(base64) {
         const swS = swGetSettings();
         const mode = swS.describeMode || 'direct';
-        swLog('INFO', `swAnalyzeOutfit: mode=${mode}`);
+        const promptStyle = swS.describePromptStyle || 'detailed';
+        const describePrompt = DESCRIBE_PROMPTS[promptStyle] || DESCRIBE_PROMPTS.detailed;
+        swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}`);
         toastr.info('Анализ образа...', 'Гардероб', { timeOut: 15000 });
 
         // ── Direct API mode (recommended) ──
@@ -258,7 +265,7 @@
                     const body = {
                         contents: [{ role: 'user', parts: [
                             { inlineData: { mimeType: 'image/png', data: base64 } },
-                            { text: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative.' }
+                            { text: describePrompt }
                         ]}],
                         generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: 150 }
                     };
@@ -271,7 +278,7 @@
                     const body = {
                         model, max_tokens: 150,
                         messages: [
-                            { role: 'system', content: 'Describe the clothing as a costume designer would. Include: garment names, fabric type, texture, fit, silhouette, exact colors, accessories, shoes. 2-3 sentences.' },
+                            { role: 'system', content: describePrompt },
                             { role: 'user', content: [
                                 { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
                                 { type: 'text', text: 'Describe the clothing in this image.' }
@@ -297,7 +304,7 @@
         if (typeof ctx.generateRaw === 'function') {
             try {
                 const messages = [
-                    { role: 'system', content: 'Describe the clothing as a costume designer would. Include: garment names, fabric type, texture, fit, silhouette, exact colors, accessories, shoes. 2-3 sentences.' },
+                    { role: 'system', content: describePrompt },
                     { role: 'user', content: [
                         { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
                         { type: 'text', text: 'Describe the clothing in this image.' },
@@ -1377,8 +1384,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         const botData = window.slayWardrobe.getActiveOutfitData('bot');
         const userData = window.slayWardrobe.getActiveOutfitData('user');
         const wardrobeParts = [];
-        if (botData?.description) wardrobeParts.push(`[Character's current outfit: ${botData.description}]`);
-        if (userData?.description) wardrobeParts.push(`[User's current outfit: ${userData.description}]`);
+        if (botData?.description) wardrobeParts.push(`[DO NOT USE THIS IMAGE AS POSE REFERENCE] [Character's current outfit: ${botData.description}]`);
+        if (userData?.description) wardrobeParts.push(`[DO NOT USE THIS IMAGE AS POSE REFERENCE] [User's current outfit: ${userData.description}]`);
         if (wardrobeParts.length > 0) {
             prompt = `${wardrobeParts.join(' ')}\n${prompt}`;
             iigLog('INFO', `Wardrobe descriptions injected: ${wardrobeParts.join(', ')}`);
@@ -1894,6 +1901,9 @@ function createSettingsUI() {
                     <p class="hint">Загрузите аутфиты для бота и юзера. Активный аутфит отправляется как reference + описание в промпт.</p>
                     <div class="flex-row"><div id="slay_sw_open_wardrobe" class="menu_button" style="width:100%;"><i class="fa-solid fa-shirt"></i> Открыть гардероб</div></div>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
+                    <div id="slay_sw_describe_prompt_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:6px;">
+                        <div class="flex-row"><label>Стиль описания</label><select id="slay_sw_describe_prompt_style" class="flex1"><option value="detailed" ${(swSettings.describePromptStyle || 'detailed') === 'detailed' ? 'selected' : ''}>Детальный (costume designer)</option><option value="simple" ${(swSettings.describePromptStyle || 'detailed') === 'simple' ? 'selected' : ''}>Простой (краткий)</option></select></div>
+                    </div>
 
                     <div id="slay_sw_describe_api_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:8px;padding:12px;border-radius:10px;background:rgba(244,114,182,0.04);border:1px solid rgba(244,114,182,0.1);">
                         <div class="flex-row"><label>Способ</label><select id="slay_sw_describe_mode" class="flex1"><option value="direct" ${(swSettings.describeMode || 'direct') === 'direct' ? 'selected' : ''}>Прямой API</option><option value="chat" ${(swSettings.describeMode || 'direct') === 'chat' ? 'selected' : ''}>Через чат-API (расходует больше токенов)</option></select></div>
@@ -2118,6 +2128,11 @@ function bindSettingsEvents() {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.autoDescribe = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
         document.getElementById('slay_sw_describe_api_section')?.classList.toggle('iig-hidden', !e.target.checked);
+        document.getElementById('slay_sw_describe_prompt_section')?.classList.toggle('iig-hidden', !e.target.checked);
+    });
+    document.getElementById('slay_sw_describe_prompt_style')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.describePromptStyle = e.target.value; SillyTavern.getContext().saveSettingsDebounced(); }
     });
     document.getElementById('slay_sw_describe_mode')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
