@@ -595,8 +595,7 @@
     // Custom modal for outfit description choice
     function swShowDescriptionModal(outfitName) {
         return new Promise((resolve) => {
-            swHideGarderob();
-            const ov = document.createElement('div');
+                        const ov = document.createElement('div');
             ov.className = 'sw-desc-overlay';
             const m = document.createElement('div');
             m.className = 'sw-desc-modal';
@@ -617,7 +616,7 @@
                     </button>
                 </div>`;
             ov.appendChild(m);
-            document.body.appendChild(ov);
+            swGetModalContainer().appendChild(ov);
 
             for (const btn of m.querySelectorAll('.sw-desc-btn')) {
                 btn.addEventListener('click', () => { ov.remove(); resolve(btn.dataset.choice); });
@@ -630,14 +629,12 @@
     }
 
     // ── Upload modal (custom, replaces browser prompts) ──
-    function swHideGarderob() { const el = document.getElementById('sw-modal-overlay'); if (el) el.style.display = 'none'; }
-    function swShowGarderob() { const el = document.getElementById('sw-modal-overlay'); if (el) el.style.display = ''; }
+    function swGetModalContainer() { return document.getElementById('sw-modal-overlay') || document.body; }
 
     function swShowUploadModal(defaultName) {
         return new Promise((resolve) => {
             swInjectV4Styles();
-            swHideGarderob();
-            const ov = document.createElement('div');
+                        const ov = document.createElement('div');
             ov.className = 'sw-upload-modal-overlay';
             const m = document.createElement('div');
             m.className = 'sw-upload-modal';
@@ -664,13 +661,13 @@
                     <button class="sw-upload-btn sw-upload-btn-save" id="sw-upl-save">Сохранить</button>
                 </div>`;
             ov.appendChild(m);
-            document.body.appendChild(ov);
+            swGetModalContainer().appendChild(ov);
 
             // Pre-select current category tab
             const catSel = m.querySelector('#sw-upl-cat');
             if (catSel) catSel.value = swCatTab;
 
-            const close = (val) => { ov.remove(); swShowGarderob(); resolve(val); };
+            const close = (val) => { ov.remove(); resolve(val); };
             m.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
             ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
             m.querySelector('#sw-upl-save').addEventListener('click', () => {
@@ -693,8 +690,7 @@
     function swShowDescInput(title, value) {
         return new Promise((resolve) => {
             swInjectV4Styles();
-            swHideGarderob();
-            const ov = document.createElement('div');
+                        const ov = document.createElement('div');
             ov.className = 'sw-desc-input-overlay';
             ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200001;display:flex;align-items:flex-start;justify-content:center;padding:20px;padding-top:10vh;overflow-y:auto;-webkit-overflow-scrolling:touch;';
             const m = document.createElement('div');
@@ -708,7 +704,7 @@
                     <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
                 </div>`;
             ov.appendChild(m);
-            document.body.appendChild(ov);
+            swGetModalContainer().appendChild(ov);
 
             const textarea = m.querySelector('#sw-descinput-text');
             const counter = m.querySelector('#sw-descinput-count');
@@ -716,7 +712,7 @@
             textarea.setSelectionRange(textarea.value.length, textarea.value.length);
             textarea.addEventListener('input', () => { counter.textContent = `${textarea.value.length} символов`; });
 
-            const close = (val) => { ov.remove(); swShowGarderob(); resolve(val); };
+            const close = (val) => { ov.remove(); resolve(val); };
             m.querySelector('#sw-descinput-cancel').addEventListener('click', () => close(null));
             m.querySelector('#sw-descinput-save').addEventListener('click', () => close(textarea.value.trim()));
             ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
@@ -730,8 +726,7 @@
     function swShowEditModal(item) {
         return new Promise((resolve) => {
             swInjectV4Styles();
-            swHideGarderob();
-            const ov = document.createElement('div');
+                        const ov = document.createElement('div');
             ov.className = 'sw-edit-modal-overlay';
             const m = document.createElement('div');
             m.className = 'sw-edit-modal';
@@ -761,9 +756,9 @@
                     <button class="sw-upload-btn sw-upload-btn-save" id="sw-edit-save">Сохранить</button>
                 </div>`;
             ov.appendChild(m);
-            document.body.appendChild(ov);
+            swGetModalContainer().appendChild(ov);
 
-            const close = (val) => { ov.remove(); swShowGarderob(); resolve(val); };
+            const close = (val) => { ov.remove(); resolve(val); };
             m.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
             ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
             m.querySelector('#sw-edit-save').addEventListener('click', () => {
