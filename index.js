@@ -1286,36 +1286,50 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         const charDisplayName = refs.charRef?.name || getActiveCharacterName() || 'Character';
         const userDisplayName = refs.userRef?.name || 'User';
 
-        // 1. Character avatar face
-        if (settings.sendCharAvatar) {
-            const charAvatar = await getCharacterAvatarBase64();
-            if (charAvatar) { referenceImages.push(charAvatar); refLabels.push('char_face'); refNames.push(charDisplayName); }
-        }
-        // 2. User avatar face
-        if (settings.sendUserAvatar) {
-            const userAvatar = await getUserAvatarBase64();
-            if (userAvatar) { referenceImages.push(userAvatar); refLabels.push('user_face'); refNames.push(userDisplayName); }
-        }
-        // 3. Wardrobe outfit images (only if enabled)
-        if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
-            const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-            const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-            if (botB64) { referenceImages.push(botB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); }
-            if (userB64) { referenceImages.push(userB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); }
-            if (botB64 || userB64) iigLog('INFO', `Wardrobe image refs: bot=${!!botB64}, user=${!!userB64}`);
-        }
-        // 4-5. NPC charRef/userRef (skip if avatar already sent — dedup)
+        // Check which characters are mentioned in the prompt
+        const lowerPrompt = prompt.toLowerCase();
+        const charNameWords = charDisplayName.split(/\s+/).filter(w => w.length > 2);
+        const userNameWords = userDisplayName.split(/\s+/).filter(w => w.length > 2);
+        const charInPrompt = charNameWords.length > 0 && charNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
+        const userInPrompt = userNameWords.length > 0 && userNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
+
+        iigLog('INFO', `Prompt mentions: char "${charDisplayName}"=${charInPrompt}, user "${userDisplayName}"=${userInPrompt}`);
+
         const getB64 = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return b64; }
             return ref?.imageBase64 || ref?.imageData || null;
         };
-        if (!settings.sendCharAvatar) {
-            const charB64 = await getB64(refs.charRef);
-            if (charB64) { referenceImages.push(charB64); refLabels.push('npc_char'); refNames.push(charDisplayName); }
+
+        // 1. Character face + outfit (only if mentioned in prompt)
+        if (charInPrompt) {
+            if (settings.sendCharAvatar) {
+                const charAvatar = await getCharacterAvatarBase64();
+                if (charAvatar) { referenceImages.push(charAvatar); refLabels.push('char_face'); refNames.push(charDisplayName); }
+            }
+            if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
+                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
+                if (botB64) { referenceImages.push(botB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); }
+            }
+            if (!settings.sendCharAvatar) {
+                const charB64 = await getB64(refs.charRef);
+                if (charB64) { referenceImages.push(charB64); refLabels.push('npc_char'); refNames.push(charDisplayName); }
+            }
         }
-        if (!settings.sendUserAvatar) {
-            const userB64 = await getB64(refs.userRef);
-            if (userB64) { referenceImages.push(userB64); refLabels.push('npc_user'); refNames.push(userDisplayName); }
+
+        // 2. User face + outfit (only if mentioned in prompt)
+        if (userInPrompt) {
+            if (settings.sendUserAvatar) {
+                const userAvatar = await getUserAvatarBase64();
+                if (userAvatar) { referenceImages.push(userAvatar); refLabels.push('user_face'); refNames.push(userDisplayName); }
+            }
+            if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
+                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+                if (userB64) { referenceImages.push(userB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); }
+            }
+            if (!settings.sendUserAvatar) {
+                const userB64 = await getB64(refs.userRef);
+                if (userB64) { referenceImages.push(userB64); refLabels.push('npc_user'); refNames.push(userDisplayName); }
+            }
         }
         // 6. Matched NPCs
         const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
