@@ -824,7 +824,7 @@
 
 #sw-modal {
     width: min(560px, 92vw);
-    max-height: min(80vh, calc(100dvh - 40px));
+    max-height: min(90vh, calc(100dvh - 20px));
     display: flex; flex-direction: column;
     border-radius: 16px; overflow: hidden;
     background: rgba(20, 20, 30, 0.98);

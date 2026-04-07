@@ -13,16 +13,31 @@ Supports **OpenAI-compatible**, **Gemini / Nano-Banana**, and **Naistera / Grok*
 
 ## Features
 
+### Image Generation
 - **Inline image generation** — LLM generates `<img>` tags, extension auto-generates images
-- **Wardrobe** — upload outfits for bot and user, active outfit is sent as reference + description injected into prompt
-- **NPC references** — upload reference photos for char, user, and up to 4 NPCs for consistent generation
-- **Per-character refs** — reference images are stored per bot, switch characters and your refs switch too
-- **Auto outfit analysis** — uses your connected LLM to auto-describe uploaded outfits
-- **Image context** — optionally send previous generated images as style reference
-- **Video generation** — Naistera video test mode support
+- **NPC references** — upload reference photos for char, user, and up to 4 NPCs
+- **Per-character refs** — each bot remembers its own ref images
+- **Smart ref sending** — refs only sent for characters mentioned in the prompt
 - **Lightbox** — click any generated image to view full-size
 - **iOS support** — XHR fallback with extended timeouts
-- **Regenerate** — regenerate button in message menu for failed/old images
+
+### Wardrobe v4 (Sims-style)
+- **6 categories** — Full outfit, Top, Bottom, Shoes, Accessories, Hair
+- **2 modes** — Full outfit or mix-and-match parts (separate for bot and user)
+- **Tags** — Street, Home, Evening, Sleep, Sport, Beach, Other
+- **For who filter** — All, Bot, User
+- **Global wardrobe** — shared across all characters
+- **Auto outfit description** — AI describes uploaded clothing (Direct API or Chat API)
+- **Hair prompt** — describes hairstyle without mentioning hair color
+- **Description styles** — Detailed (costume designer) or Simple
+- **Outfit injection** — OUTFIT LOCK with depth=0 for reliable LLM compliance
+- **Separate controls** — send outfit image for bot/user independently
+- **🧪 Experimental collage** — merge up to 6 clothing parts into one ref image
+
+### API Support
+- **OpenAI-compatible**, **Gemini / Nano-Banana**, **Naistera / Grok**
+- **Separate describe API** — dedicated endpoint/key/model for outfit descriptions
+- **Video generation** — Naistera video test mode
 
 ---
 

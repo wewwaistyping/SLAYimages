@@ -1,7 +1,7 @@
 /**
  * Slay Inline Image Generation + Wardrobe
  * Merged extension: notsosillynotsoimages (NPC refs) + sillyimages (wardrobe)
- * v3.0.0 by aceeenvw + 0xl0cal + Wewwa
+ * v4.0.0 by aceeenvw + 0xl0cal + Wewwa
  */
 
 /* ╔═══════════════════════════════════════════════════════════════╗
@@ -16,28 +16,181 @@
     function swLog(l, ...a) { (l === 'ERROR' ? console.error : l === 'WARN' ? console.warn : console.log)('[SW]', ...a); }
     function esc(t) { const d = document.createElement('div'); d.textContent = t || ''; return d.innerHTML; }
 
-    const swDefaults = Object.freeze({ wardrobes: {}, activeOutfits: {}, maxDimension: 512, showFloatingBtn: false, autoDescribe: true });
+    // ── Categories & Tags ──
+    const CATEGORIES = Object.freeze({
+        full: 'Полный',
+        top: 'Верх',
+        bottom: 'Низ',
+        shoes: 'Обувь',
+        accessories: 'Аксессуары',
+        hair: 'Причёска',
+    });
+    const CAT_KEYS = Object.keys(CATEGORIES);
+    const TAGS = Object.freeze({
+        street: 'Улица',
+        home: 'Дом',
+        evening: 'Вечер',
+        sleep: 'Сон',
+        sport: 'Спорт',
+        beach: 'Пляж',
+        other: 'Другое',
+    });
+    const TAG_KEYS = Object.keys(TAGS);
+
+    // ── Defaults (v4 — global items, per-character active outfits) ──
+    const swDefaults = Object.freeze({
+        items: [],
+        activeOutfits: {},
+        maxDimension: 512,
+        showFloatingBtn: false,
+        autoDescribe: true,
+        describeMode: 'direct',
+        describeModel: '',
+        describeEndpoint: '',
+        describeKey: '',
+        describePromptStyle: 'detailed',
+        sendOutfitDescription: true,
+        sendOutfitImageBot: true,
+        sendOutfitImageUser: true,
+        experimentalCollage: false,
+        skipDescriptionWarning: false,
+    });
 
     function swGetSettings() {
         const ctx = SillyTavern.getContext();
         if (!ctx.extensionSettings[SW]) ctx.extensionSettings[SW] = structuredClone(swDefaults);
         const s = ctx.extensionSettings[SW];
         for (const k of Object.keys(swDefaults)) if (!Object.hasOwn(s, k)) s[k] = swDefaults[k];
+        if (!Array.isArray(s.items)) s.items = [];
+        if (!s.activeOutfits || typeof s.activeOutfits !== 'object') s.activeOutfits = {};
+        swMigrate(s);
         return s;
     }
     function swSave() { SillyTavern.getContext().saveSettingsDebounced(); }
+
+    // ── Migration from v3 (per-character wardrobes) to v4 (global items) ──
+    function swMigrate(s) {
+        if (!s.wardrobes) return;
+        swLog('INFO', 'Migrating v3 wardrobes to v4 global items...');
+        for (const charName of Object.keys(s.wardrobes)) {
+            const w = s.wardrobes[charName];
+            for (const type of ['bot', 'user']) {
+                if (!Array.isArray(w[type])) continue;
+                for (const old of w[type]) {
+                    if (s.items.find(i => i.id === old.id)) continue;
+                    s.items.push({
+                        id: old.id,
+                        name: old.name || 'Unnamed',
+                        description: old.description || '',
+                        imagePath: old.imagePath || '',
+                        base64: old.base64 || '',
+                        category: 'full',
+                        tags: [],
+                        addedAt: old.addedAt || Date.now(),
+                    });
+                }
+                // Migrate active outfit references
+                const oldActive = s.activeOutfits?.[charName];
+                if (oldActive && (oldActive.bot === undefined || typeof oldActive.bot === 'string' || oldActive.bot === null)) {
+                    const oldBotId = oldActive.bot || null;
+                    const oldUserId = oldActive.user || null;
+                    s.activeOutfits[charName] = swMakeCharOutfit(oldBotId, oldUserId);
+                }
+            }
+        }
+        delete s.wardrobes;
+        swSave();
+        swLog('INFO', 'Migration complete');
+    }
+
+    function swMakeCharOutfit(botFullId, userFullId) {
+        return {
+            mode: 'full',
+            bot: { full: botFullId || null, top: null, bottom: null, shoes: null, accessories: null, hair: null },
+            user: { full: userFullId || null, top: null, bottom: null, shoes: null, accessories: null, hair: null },
+        };
+    }
 
     function swCharName() {
         const ctx = SillyTavern.getContext();
         return (ctx.characterId !== undefined && ctx.characters?.[ctx.characterId]) ? (ctx.characters[ctx.characterId].name || '') : '';
     }
 
-    function swGetWardrobe(cn) { const s = swGetSettings(); if (!s.wardrobes[cn]) s.wardrobes[cn] = { bot: [], user: [] }; return s.wardrobes[cn]; }
-    function swGetActive() { const cn = swCharName(); if (!cn) return { bot: null, user: null }; const s = swGetSettings(); if (!s.activeOutfits[cn]) s.activeOutfits[cn] = { bot: null, user: null }; return s.activeOutfits[cn]; }
-    function swSetActive(type, id) { const cn = swCharName(); if (!cn) { toastr.error('Персонаж не выбран', 'Гардероб'); return false; } const s = swGetSettings(); if (!s.activeOutfits[cn]) s.activeOutfits[cn] = { bot: null, user: null }; s.activeOutfits[cn][type] = id; swSave(); return true; }
-    function swFind(cn, type, id) { return swGetWardrobe(cn)[type].find(o => o.id === id) || null; }
-    function swAdd(cn, type, o) { swGetWardrobe(cn)[type].push(o); swSave(); }
-    function swRemove(cn, type, id) { const w = swGetWardrobe(cn); w[type] = w[type].filter(o => o.id !== id); swSave(); if (swGetActive()[type] === id) { swSetActive(type, null); swUpdatePromptInjection(); } }
+    // ── Item accessors (global) ──
+    function swFindItem(id) { return swGetSettings().items.find(o => o.id === id) || null; }
+    function swAddItem(item) { swGetSettings().items.push(item); swSave(); }
+    function swRemoveItem(id) {
+        const s = swGetSettings();
+        s.items = s.items.filter(o => o.id !== id);
+        // Clear from all active outfits
+        for (const cn of Object.keys(s.activeOutfits)) {
+            const co = s.activeOutfits[cn];
+            for (const type of ['bot', 'user']) {
+                if (!co[type]) continue;
+                for (const cat of CAT_KEYS) {
+                    if (co[type][cat] === id) co[type][cat] = null;
+                }
+            }
+        }
+        swSave();
+        swUpdatePromptInjection();
+    }
+
+    // ── Per-character active outfit ──
+    function swGetCharOutfit() {
+        const cn = swCharName();
+        if (!cn) return null;
+        const s = swGetSettings();
+        if (!s.activeOutfits[cn]) s.activeOutfits[cn] = swMakeCharOutfit(null, null);
+        const co = s.activeOutfits[cn];
+        // Ensure structure
+        if (!co.bot) co.bot = { full: null, top: null, bottom: null, shoes: null, accessories: null, hair: null };
+        if (!co.user) co.user = { full: null, top: null, bottom: null, shoes: null, accessories: null, hair: null };
+        if (!co.botMode) co.botMode = co.mode || 'full';
+        if (!co.userMode) co.userMode = co.mode || 'full';
+        return co;
+    }
+
+    function swGetSlot(type, cat) {
+        const co = swGetCharOutfit();
+        return co ? (co[type]?.[cat] || null) : null;
+    }
+
+    function swSetSlot(type, cat, id) {
+        const cn = swCharName();
+        if (!cn) { toastr.error('Персонаж не выбран', 'Гардероб'); return false; }
+        const co = swGetCharOutfit();
+        co[type][cat] = id;
+        swSave();
+        return true;
+    }
+
+    function swSetMode(mode) {
+        const co = swGetCharOutfit();
+        if (!co) return;
+        // Per-type mode: bot and user can have different modes
+        const modeKey = swTab === 'bot' ? 'botMode' : 'userMode';
+        co[modeKey] = mode;
+        swSave();
+    }
+
+    function swGetMode() {
+        const co = swGetCharOutfit();
+        if (!co) return 'full';
+        return swTab === 'bot' ? (co.botMode || 'full') : (co.userMode || 'full');
+    }
+
+    function swGetModeFor(type) {
+        const co = swGetCharOutfit();
+        if (!co) return 'full';
+        return type === 'bot' ? (co.botMode || 'full') : (co.userMode || 'full');
+    }
+
+    function swIsCatBlocked(mode, cat) {
+        if (mode === 'full') return ['top', 'bottom', 'shoes'].includes(cat);
+        if (mode === 'parts') return cat === 'full';
+        return false;
+    }
 
     function swResize(file, maxDim) {
         return new Promise((res, rej) => {
@@ -62,7 +215,7 @@
         return result.path;
     }
 
-    // ── Load wardrobe image from server path → base64 ──
+    // ── Load wardrobe image from server path -> base64 ──
     async function swLoadImageAsBase64(path) {
         try {
             const response = await fetch(path);
@@ -84,11 +237,140 @@
         return '';
     }
 
-    // ── Modal ──
-    let swOpen = false, swTab = 'bot';
+    // ── Collage builder: merge parts into one image ──
+    // Get all parts images for a type (bot/user). Returns array of base64 strings.
+    async function swGetPartsImages(type) {
+        const co = swGetCharOutfit();
+        if (!co) return [];
+        const mode = swGetModeFor(type);
+        if (mode !== 'parts') return [];
+
+        const slots = ['top', 'bottom', 'shoes', 'accessories', 'hair'];
+        const images = [];
+        for (const cat of slots) {
+            const itemId = co[type]?.[cat];
+            if (!itemId) continue;
+            const item = swFindItem(itemId);
+            if (!item) continue;
+            let b64 = null;
+            if (item.imagePath) b64 = await swLoadImageAsBase64(item.imagePath);
+            if (!b64 && item.base64) b64 = item.base64;
+            if (b64) images.push(b64);
+        }
+        return images;
+    }
+
+    async function swBuildCollage(type) {
+        const images = await swGetPartsImages(type);
+        if (images.length < 2) return null; // 1 item = send as single ref, not collage
+        const collageImages = images.slice(0, 6); // max 6
+
+        return new Promise((resolve) => {
+            const size = 512;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, size, size);
+            const count = collageImages.length;
+            let cols, rows;
+            if (count <= 2) { cols = 2; rows = 1; }
+            else if (count <= 4) { cols = 2; rows = 2; }
+            else { cols = 3; rows = 2; }
+            const cellW = Math.floor(size / cols);
+            const cellH = Math.floor(size / rows);
+            let loaded = 0;
+            collageImages.forEach((b64, idx) => {
+                const img = new Image();
+                img.onload = () => {
+                    const col = idx % cols; const row = Math.floor(idx / cols);
+                    const x = col * cellW; const y = row * cellH;
+                    const scale = Math.max(cellW / img.width, cellH / img.height);
+                    const sw = cellW / scale; const sh = cellH / scale;
+                    const sx = (img.width - sw) / 2; const sy = (img.height - sh) / 2;
+                    ctx.drawImage(img, sx, sy, sw, sh, x, y, cellW, cellH);
+                    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1;
+                    ctx.strokeRect(x, y, cellW, cellH);
+                    loaded++;
+                    if (loaded === collageImages.length) {
+                        const result = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+                        swLog('INFO', `Collage built: ${count} images, ${cols}x${rows}, ~${Math.round(result.length / 1024)}KB`);
+                        resolve(result);
+                    }
+                };
+                img.onerror = () => { loaded++; if (loaded === collageImages.length) resolve(canvas.toDataURL('image/jpeg', 0.85).split(',')[1]); };
+                img.src = `data:image/png;base64,${b64}`;
+            });
+        });
+    }
+
+    // ── Inline styles for new v4 elements ──
+    function swInjectV4Styles() {
+        if (document.getElementById('sw-v4-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'sw-v4-styles';
+        style.textContent = `
+            .sw-mode-switch { display:flex; gap:6px; padding:4px 12px; }
+            .sw-mode-btn { padding:5px 14px; border-radius:16px; cursor:pointer; font-size:13px; border:1px solid rgba(255,255,255,0.15); background:rgba(255,255,255,0.05); color:#ccc; transition:all .2s; user-select:none; }
+            .sw-mode-btn:hover { background:rgba(255,255,255,0.1); }
+            .sw-mode-btn-active { background:rgba(219,112,147,0.25); color:#f0a0c0; border-color:rgba(219,112,147,0.5); }
+            .sw-mode-btn-active:hover { background:rgba(219,112,147,0.35); }
+
+            .sw-cat-tabs { display:flex; gap:4px; padding:4px 12px; flex-wrap:wrap; }
+            .sw-cat-tab { position:relative; padding:4px 12px; border-radius:14px; cursor:pointer; font-size:12px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.04); color:#aaa; transition:all .2s; user-select:none; }
+            .sw-cat-tab:hover { background:rgba(255,255,255,0.08); }
+            .sw-cat-tab-active { background:rgba(219,112,147,0.2); color:#f0a0c0; border-color:rgba(219,112,147,0.4); }
+            .sw-cat-tab-blocked { opacity:0.35; pointer-events:none; }
+            .sw-cat-dot { position:absolute; top:2px; right:4px; width:6px; height:6px; border-radius:50%; background:#db7093; display:none; }
+            .sw-cat-dot-visible { display:block; }
+
+            .sw-tag-filter { display:flex; gap:4px; padding:4px 12px; flex-wrap:wrap; }
+            .sw-tag-chip { padding:3px 10px; border-radius:12px; cursor:pointer; font-size:11px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.03); color:#999; transition:all .2s; user-select:none; }
+            .sw-tag-chip:hover { background:rgba(255,255,255,0.07); }
+            .sw-tag-chip-active { background:rgba(147,197,219,0.2); color:#a0d0f0; border-color:rgba(147,197,219,0.4); }
+
+            .sw-current-outfit { padding:8px 12px; border-top:1px solid rgba(255,255,255,0.08); flex-shrink:0; }
+            .sw-current-title { font-size:12px; color:#888; margin-bottom:6px; }
+            .sw-current-slots { display:flex; gap:6px; flex-wrap:wrap; align-items:flex-start; }
+            .sw-current-slot { display:flex; flex-direction:column; align-items:center; gap:2px; min-width:52px; }
+            .sw-current-slot-img { width:44px; height:44px; border-radius:8px; object-fit:cover; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.2); }
+            .sw-current-slot-empty { width:44px; height:44px; border-radius:8px; border:1px dashed rgba(255,255,255,0.15); background:rgba(0,0,0,0.1); display:flex; align-items:center; justify-content:center; font-size:10px; color:#555; }
+            .sw-current-slot-label { font-size:10px; color:#777; text-align:center; max-width:56px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .sw-current-desc { font-size:11px; color:#999; margin-top:6px; line-height:1.4; max-height:60px; overflow-y:auto; }
+
+            .sw-upload-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100001; display:flex; align-items:center; justify-content:center; }
+            .sw-upload-modal { background:#2a2a2e; border-radius:14px; padding:20px; width:360px; max-width:90vw; color:#ddd; box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+            .sw-upload-modal h3 { margin:0 0 14px; font-size:15px; color:#f0a0c0; }
+            .sw-upload-modal label { display:block; font-size:12px; color:#aaa; margin:10px 0 4px; }
+            .sw-upload-modal input[type="text"] { width:100%; padding:7px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.2); color:#eee; font-size:13px; box-sizing:border-box; }
+            .sw-upload-modal select { width:100%; padding:7px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.2); color:#eee; font-size:13px; box-sizing:border-box; }
+            .sw-upload-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+            .sw-upload-tag { display:flex; align-items:center; gap:3px; font-size:12px; color:#bbb; cursor:pointer; user-select:none; }
+            .sw-upload-tag input { accent-color:#db7093; }
+            .sw-upload-btns { display:flex; gap:8px; margin-top:16px; justify-content:flex-end; }
+            .sw-upload-btn { padding:7px 18px; border-radius:10px; border:none; cursor:pointer; font-size:13px; }
+            .sw-upload-btn-cancel { background:rgba(255,255,255,0.08); color:#aaa; }
+            .sw-upload-btn-cancel:hover { background:rgba(255,255,255,0.14); }
+            .sw-upload-btn-save { background:rgba(219,112,147,0.3); color:#f0a0c0; }
+            .sw-upload-btn-save:hover { background:rgba(219,112,147,0.45); }
+
+            .sw-edit-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100001; display:flex; align-items:center; justify-content:center; }
+            .sw-edit-modal { background:#2a2a2e; border-radius:14px; padding:20px; width:380px; max-width:90vw; color:#ddd; box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+            .sw-edit-modal h3 { margin:0 0 14px; font-size:15px; color:#f0a0c0; }
+            .sw-edit-modal label { display:block; font-size:12px; color:#aaa; margin:10px 0 4px; }
+            .sw-edit-modal input[type="text"], .sw-edit-modal textarea { width:100%; padding:7px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.2); color:#eee; font-size:13px; box-sizing:border-box; }
+            .sw-edit-modal textarea { min-height:60px; resize:vertical; }
+            .sw-edit-modal select { width:100%; padding:7px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.2); color:#eee; font-size:13px; box-sizing:border-box; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // ── Modal state ──
+    let swOpen = false, swTab = 'bot', swCatTab = 'full', swTagFilter = null, swForWhoFilter = null;
 
     function swOpenModal() {
         swCloseModal();
+        swInjectV4Styles();
         swOpen = true;
         const cn = swCharName();
         if (!cn) { toastr.warning('Выберите персонажа', 'Гардероб'); swOpen = false; return; }
@@ -96,23 +378,30 @@
         const ov = document.createElement('div'); ov.id = 'sw-modal-overlay';
         ov.addEventListener('click', (e) => { if (e.target === ov) swCloseModal(); });
 
+        const co = swGetCharOutfit();
         const m = document.createElement('div'); m.id = 'sw-modal';
         m.innerHTML = `
             <div class="sw-modal-header">
-                <span>Гардероб — <b>${esc(cn)}</b></span>
+                <span>\uD83D\uDC85 Гардероб — <b>${esc(cn)}</b></span>
                 <div class="sw-modal-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></div>
             </div>
-            <div class="sw-tabs">
+            <div class="sw-tabs" id="sw-type-tabs">
                 <div class="sw-tab ${swTab === 'bot' ? 'sw-tab-active' : ''}" data-tab="bot">Бот</div>
                 <div class="sw-tab ${swTab === 'user' ? 'sw-tab-active' : ''}" data-tab="user">Юзер</div>
             </div>
-            <div class="sw-active-info" id="sw-active-info"></div>
-            <div class="sw-tab-content" id="sw-tab-content"></div>`;
+            <div class="sw-mode-switch" id="sw-mode-switch"></div>
+            <div class="sw-cat-tabs" id="sw-cat-tabs"></div>
+            <div class="sw-tag-filter" id="sw-tag-filter"></div>
+            <div class="sw-tag-filter" id="sw-forwho-filter"></div>
+            <div class="sw-tab-content" id="sw-tab-content"></div>
+            <div class="sw-current-outfit" id="sw-current-outfit"></div>`;
 
         ov.appendChild(m); document.body.appendChild(ov);
         m.querySelector('.sw-modal-close').addEventListener('click', swCloseModal);
-        for (const t of m.querySelectorAll('.sw-tab')) t.addEventListener('click', () => {
-            swTab = t.dataset.tab; m.querySelectorAll('.sw-tab').forEach(x => x.classList.toggle('sw-tab-active', x.dataset.tab === swTab)); swRender();
+        for (const t of m.querySelectorAll('#sw-type-tabs .sw-tab')) t.addEventListener('click', () => {
+            swTab = t.dataset.tab;
+            m.querySelectorAll('#sw-type-tabs .sw-tab').forEach(x => x.classList.toggle('sw-tab-active', x.dataset.tab === swTab));
+            swRender();
         });
         swRender();
         document.addEventListener('keydown', swEsc);
@@ -121,19 +410,108 @@
     function swCloseModal() { swOpen = false; document.getElementById('sw-modal-overlay')?.remove(); document.removeEventListener('keydown', swEsc); }
 
     function swRender() {
-        const c = document.getElementById('sw-tab-content'), ib = document.getElementById('sw-active-info');
-        if (!c) return;
-        const cn = swCharName(), outfits = swGetWardrobe(cn)[swTab] || [], aid = swGetActive()[swTab];
+        const content = document.getElementById('sw-tab-content');
+        const modeWrap = document.getElementById('sw-mode-switch');
+        const catWrap = document.getElementById('sw-cat-tabs');
+        const tagWrap = document.getElementById('sw-tag-filter');
+        const currentWrap = document.getElementById('sw-current-outfit');
+        if (!content) return;
+        const cn = swCharName();
+        const co = swGetCharOutfit();
+        if (!co) return;
+        const mode = swGetMode();
 
-        if (ib) {
-            const ao = aid ? swFind(cn, swTab, aid) : null;
-            ib.innerHTML = ao ? `Активно: <b>${esc(ao.name)}</b>${ao.description ? ` — <i>${esc(ao.description.length > 60 ? ao.description.slice(0, 60) + '...' : ao.description)}</i>` : ''}` : 'Ничего не надето';
-            ib.classList.toggle('sw-active-visible', !!ao);
+        // ── Mode switch ──
+        if (modeWrap) {
+            modeWrap.innerHTML = `
+                <div class="sw-mode-btn ${mode === 'full' ? 'sw-mode-btn-active' : ''}" data-mode="full">\uD83D\uDC57 Полный комплект</div>
+                <div class="sw-mode-btn ${mode === 'parts' ? 'sw-mode-btn-active' : ''}" data-mode="parts">\uD83E\uDDE9 По частям</div>`;
+            for (const btn of modeWrap.querySelectorAll('.sw-mode-btn')) {
+                btn.addEventListener('click', () => {
+                    swSetMode(btn.dataset.mode);
+                    swRender();
+                    swUpdatePromptInjection();
+                    swInjectFloatingBtn();
+                });
+            }
         }
 
+        // ── Category tabs with dots ──
+        if (catWrap) {
+            let catHtml = '';
+            for (const cat of CAT_KEYS) {
+                const blocked = swIsCatBlocked(mode, cat);
+                const active = swCatTab === cat;
+                const equipped = !!(co[swTab]?.[cat]);
+                catHtml += `<div class="sw-cat-tab ${active ? 'sw-cat-tab-active' : ''} ${blocked ? 'sw-cat-tab-blocked' : ''}" data-cat="${cat}">
+                    ${esc(CATEGORIES[cat])}
+                    <span class="sw-cat-dot ${equipped && !blocked ? 'sw-cat-dot-visible' : ''}"></span>
+                </div>`;
+            }
+            catWrap.innerHTML = catHtml;
+            // If current cat is blocked, switch to first available
+            if (swIsCatBlocked(mode, swCatTab)) {
+                swCatTab = CAT_KEYS.find(c => !swIsCatBlocked(mode, c)) || 'full';
+                // Re-render cat tabs with corrected active
+                swRender();
+                return;
+            }
+            for (const tab of catWrap.querySelectorAll('.sw-cat-tab:not(.sw-cat-tab-blocked)')) {
+                tab.addEventListener('click', () => {
+                    swCatTab = tab.dataset.cat;
+                    swRender();
+                });
+            }
+        }
+
+        // ── Tag filter ──
+        if (tagWrap) {
+            let tagHtml = `<div class="sw-tag-chip ${swTagFilter === null ? 'sw-tag-chip-active' : ''}" data-tag="">Все</div>`;
+            for (const tag of TAG_KEYS) {
+                tagHtml += `<div class="sw-tag-chip ${swTagFilter === tag ? 'sw-tag-chip-active' : ''}" data-tag="${tag}">${esc(TAGS[tag])}</div>`;
+            }
+            tagWrap.innerHTML = tagHtml;
+            for (const chip of tagWrap.querySelectorAll('.sw-tag-chip')) {
+                chip.addEventListener('click', () => {
+                    swTagFilter = chip.dataset.tag || null;
+                    swRender();
+                });
+            }
+        }
+
+        // ── For who filter ──
+        const forWhoWrap = document.getElementById('sw-forwho-filter');
+        if (forWhoWrap) {
+            const fwLabels = { '': 'Все', 'bot': '🤖 Бот', 'user': '👤 Юзер' };
+            let fwHtml = '';
+            for (const [key, label] of Object.entries(fwLabels)) {
+                const active = (swForWhoFilter || '') === key;
+                fwHtml += `<div class="sw-tag-chip ${active ? 'sw-tag-chip-active' : ''}" data-fw="${key}">${label}</div>`;
+            }
+            forWhoWrap.innerHTML = fwHtml;
+            for (const chip of forWhoWrap.querySelectorAll('.sw-tag-chip')) {
+                chip.addEventListener('click', () => {
+                    swForWhoFilter = chip.dataset.fw || null;
+                    swRender();
+                });
+            }
+        }
+
+        // ── Filter items by category + tag + forWho ──
+        const allItems = swGetSettings().items;
+        const filtered = allItems.filter(o => {
+            if (o.category !== swCatTab) return false;
+            if (swTagFilter && (!Array.isArray(o.tags) || !o.tags.includes(swTagFilter))) return false;
+            if (swForWhoFilter && o.forWho && o.forWho !== 'all' && o.forWho !== swForWhoFilter) return false;
+            return true;
+        });
+
+        const equippedId = co[swTab]?.[swCatTab] || null;
+
+        // ── Grid ──
         let h = '<div class="sw-outfit-grid"><div class="sw-outfit-card sw-upload-card" id="sw-upload-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-plus"></i></div><span>Загрузить</span></div>';
-        for (const o of outfits) {
-            const a = o.id === aid;
+        for (const o of filtered) {
+            const a = o.id === equippedId;
             h += `<div class="sw-outfit-card ${a ? 'sw-outfit-active' : ''}" data-id="${o.id}">
                 <div class="sw-outfit-img-wrap"><img src="${swGetOutfitSrc(o)}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy">${a ? '<div class="sw-active-badge"><i class="fa-solid fa-check"></i></div>' : ''}</div>
                 <div class="sw-outfit-footer"><span class="sw-outfit-name" title="${esc(o.description || o.name)}">${esc(o.name)}</span>
@@ -144,17 +522,70 @@
                         <div class="sw-btn-delete" title="Удалить"><i class="fa-solid fa-trash-can"></i></div>
                     </div></div></div>`;
         }
-        h += '</div>'; c.innerHTML = h;
+        h += '</div>';
+        content.innerHTML = h;
 
         document.getElementById('sw-upload-trigger')?.addEventListener('click', swUpload);
-        for (const card of c.querySelectorAll('.sw-outfit-card[data-id]')) {
+        for (const card of content.querySelectorAll('.sw-outfit-card[data-id]')) {
             const id = card.dataset.id;
             card.querySelector('.sw-outfit-img')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
             card.querySelector('.sw-btn-activate')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            card.querySelector('.sw-btn-edit')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swEdit(cn, swTab, id); });
-            card.querySelector('.sw-btn-regen')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swRegenDescription(cn, swTab, id); });
-            card.querySelector('.sw-btn-delete')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (confirm('Удалить?')) { swRemove(cn, swTab, id); swRender(); toastr.info('Удалён', 'Гардероб'); } });
+            card.querySelector('.sw-btn-edit')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swEdit(id); });
+            card.querySelector('.sw-btn-regen')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swRegenDescription(id); });
+            card.querySelector('.sw-btn-delete')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (confirm('Удалить?')) { swRemoveItem(id); swRender(); toastr.info('Удалён', 'Гардероб'); } });
         }
+
+        // ── Current outfit preview ──
+        swRenderCurrentOutfit(currentWrap, co, cn);
+    }
+
+    function swRenderCurrentOutfit(wrap, co, cn) {
+        if (!wrap) return;
+        const mode = swGetMode();
+        const slots = mode === 'full' ? ['full', 'accessories', 'hair'] : ['top', 'bottom', 'shoes', 'accessories', 'hair'];
+        const type = swTab;
+
+        let slotsHtml = '';
+        for (const cat of slots) {
+            const itemId = co[type]?.[cat] || null;
+            const item = itemId ? swFindItem(itemId) : null;
+            if (item) {
+                const src = swGetOutfitSrc(item);
+                slotsHtml += `<div class="sw-current-slot">
+                    <img src="${src}" class="sw-current-slot-img" alt="${esc(item.name)}" title="${esc(item.name)}">
+                    <span class="sw-current-slot-label">${esc(CATEGORIES[cat])}</span>
+                </div>`;
+            } else {
+                slotsHtml += `<div class="sw-current-slot">
+                    <div class="sw-current-slot-empty">${esc(CATEGORIES[cat]?.[0] || '?')}</div>
+                    <span class="sw-current-slot-label">${esc(CATEGORIES[cat])}</span>
+                </div>`;
+            }
+        }
+
+        const descText = swBuildDescription(type, cn);
+        wrap.innerHTML = `
+            <div class="sw-current-title">Сейчас надето (${type === 'bot' ? esc(cn) : '{{user}}'})</div>
+            <div class="sw-current-slots">${slotsHtml}</div>
+            ${descText ? `<div class="sw-current-desc">${esc(descText)}</div>` : ''}`;
+    }
+
+    // ── Build combined description from all active slots ──
+    function swBuildDescription(type, cn) {
+        const co = swGetCharOutfit();
+        if (!co) return '';
+        const mode = swGetModeFor(type);
+        const slots = mode === 'full' ? ['full', 'accessories', 'hair'] : ['top', 'bottom', 'shoes', 'accessories', 'hair'];
+        const SLOT_LABELS = { full: 'FULL', top: 'TOP', bottom: 'BOTTOM', shoes: 'SHOES', accessories: 'ACCESSORIES', hair: 'HAIR' };
+        const parts = [];
+        for (const cat of slots) {
+            const itemId = co[type]?.[cat] || null;
+            const item = itemId ? swFindItem(itemId) : null;
+            if (item?.description) {
+                if (item.description.trim()) parts.push(`${SLOT_LABELS[cat]}: ${item.description.trim()}`);
+            }
+        }
+        return parts.join(' ');
     }
 
     // Custom modal for outfit description choice
@@ -166,18 +597,18 @@
             m.className = 'sw-desc-modal';
             m.innerHTML = `
                 <div class="sw-desc-header">
-                    <div class="sw-desc-title">💅 Описание отсутствует</div>
-                    <div class="sw-desc-subtitle">«${esc(outfitName)}» — для наилучшего результата добавьте описание одежды</div>
+                    <div class="sw-desc-title">\uD83D\uDC85 Описание отсутствует</div>
+                    <div class="sw-desc-subtitle">\u00AB${esc(outfitName)}\u00BB — для наилучшего результата добавьте описание одежды</div>
                 </div>
                 <div class="sw-desc-body">
                     <button class="sw-desc-btn sw-desc-btn-secondary" data-choice="skip">
                         <b>Без описания</b><br><span>Надеть как есть — одежда может не подтянуться</span>
                     </button>
                     <button class="sw-desc-btn sw-desc-btn-primary" data-choice="manual">
-                        <b>✏️ Ввести вручную</b><br><span>Описать аутфит своими словами</span>
+                        <b>\u270F\uFE0F Ввести вручную</b><br><span>Описать аутфит своими словами</span>
                     </button>
                     <button class="sw-desc-btn sw-desc-btn-primary" data-choice="ai">
-                        <b>🤖 Сгенерировать ИИ</b><br><span>Отправить картинку на анализ через чат-API</span>
+                        <b>\uD83E\uDD16 Сгенерировать ИИ</b><br><span>Отправить картинку на анализ через чат-API</span>
                     </button>
                 </div>`;
             ov.appendChild(m);
@@ -193,27 +624,189 @@
         });
     }
 
+    // ── Upload modal (custom, replaces browser prompts) ──
+    function swShowUploadModal(defaultName) {
+        return new Promise((resolve) => {
+            swInjectV4Styles();
+            const ov = document.createElement('div');
+            ov.className = 'sw-upload-modal-overlay';
+            const m = document.createElement('div');
+            m.className = 'sw-upload-modal';
+            let tagsHtml = '';
+            for (const tag of TAG_KEYS) {
+                tagsHtml += `<label class="sw-upload-tag"><input type="checkbox" value="${tag}"> ${esc(TAGS[tag])}</label>`;
+            }
+            let catOptions = '';
+            for (const cat of CAT_KEYS) {
+                catOptions += `<option value="${cat}">${esc(CATEGORIES[cat])}</option>`;
+            }
+            m.innerHTML = `
+                <h3>\uD83D\uDC57 Новый предмет</h3>
+                <label>Название</label>
+                <input type="text" id="sw-upl-name" value="${esc(defaultName)}" placeholder="Название предмета">
+                <label>Категория</label>
+                <select id="sw-upl-cat">${catOptions}</select>
+                <label>Для кого</label>
+                <select id="sw-upl-forwho"><option value="all">Все</option><option value="bot">Бот</option><option value="user">Юзер</option></select>
+                <label>Теги</label>
+                <div class="sw-upload-tags" id="sw-upl-tags">${tagsHtml}</div>
+                <div class="sw-upload-btns">
+                    <button class="sw-upload-btn sw-upload-btn-cancel" id="sw-upl-cancel">Отмена</button>
+                    <button class="sw-upload-btn sw-upload-btn-save" id="sw-upl-save">Сохранить</button>
+                </div>`;
+            ov.appendChild(m);
+            document.body.appendChild(ov);
+
+            // Pre-select current category tab
+            const catSel = m.querySelector('#sw-upl-cat');
+            if (catSel) catSel.value = swCatTab;
+
+            const close = (val) => { ov.remove(); resolve(val); };
+            m.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
+            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
+            m.querySelector('#sw-upl-save').addEventListener('click', () => {
+                const name = m.querySelector('#sw-upl-name').value.trim();
+                if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
+                const category = catSel.value;
+                const forWho = m.querySelector('#sw-upl-forwho').value;
+                const tags = [...m.querySelectorAll('#sw-upl-tags input:checked')].map(c => c.value);
+                close({ name, category, forWho, tags });
+            });
+            document.addEventListener('keydown', function escHandler(e) {
+                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escHandler); }
+            });
+            // Focus name input
+            setTimeout(() => m.querySelector('#sw-upl-name')?.focus(), 50);
+        });
+    }
+
+    // ── Description input modal (replaces browser prompt()) ──
+    function swShowDescInput(title, value) {
+        return new Promise((resolve) => {
+            swInjectV4Styles();
+            const ov = document.createElement('div');
+            ov.className = 'sw-desc-input-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100002;display:flex;align-items:center;justify-content:center;padding:16px;animation:sw-fade-in 0.2s ease-out;';
+            const m = document.createElement('div');
+            m.style.cssText = 'background:rgba(30,30,40,0.98);border-radius:14px;padding:20px;width:420px;max-width:90vw;color:#ddd;box-shadow:0 12px 48px rgba(0,0,0,0.5);border:1px solid rgba(244,114,182,0.15);animation:sw-modal-in 0.25s cubic-bezier(0.34,1.56,0.64,1);';
+            m.innerHTML = `
+                <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:12px;">${esc(title)}</div>
+                <textarea id="sw-descinput-text" style="width:100%;min-height:100px;max-height:200px;padding:10px;border-radius:8px;border:1px solid rgba(244,114,182,0.2);background:rgba(0,0,0,0.3);color:#eee;font-size:13px;line-height:1.5;resize:vertical;box-sizing:border-box;font-family:inherit;">${esc(value || '')}</textarea>
+                <div style="font-size:11px;color:#888;margin-top:4px;" id="sw-descinput-count">${(value || '').length} символов</div>
+                <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+                    <button id="sw-descinput-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
+                    <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
+                </div>`;
+            ov.appendChild(m);
+            document.body.appendChild(ov);
+
+            const textarea = m.querySelector('#sw-descinput-text');
+            const counter = m.querySelector('#sw-descinput-count');
+            textarea.focus();
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            textarea.addEventListener('input', () => { counter.textContent = `${textarea.value.length} символов`; });
+
+            const close = (val) => { ov.remove(); resolve(val); };
+            m.querySelector('#sw-descinput-cancel').addEventListener('click', () => close(null));
+            m.querySelector('#sw-descinput-save').addEventListener('click', () => close(textarea.value.trim()));
+            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
+            document.addEventListener('keydown', function escH(e) {
+                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escH); }
+            });
+        });
+    }
+
+    // ── Edit modal (custom, replaces browser prompts) ──
+    function swShowEditModal(item) {
+        return new Promise((resolve) => {
+            swInjectV4Styles();
+            const ov = document.createElement('div');
+            ov.className = 'sw-edit-modal-overlay';
+            const m = document.createElement('div');
+            m.className = 'sw-edit-modal';
+            let tagsHtml = '';
+            for (const tag of TAG_KEYS) {
+                const checked = Array.isArray(item.tags) && item.tags.includes(tag) ? 'checked' : '';
+                tagsHtml += `<label class="sw-upload-tag"><input type="checkbox" value="${tag}" ${checked}> ${esc(TAGS[tag])}</label>`;
+            }
+            let catOptions = '';
+            for (const cat of CAT_KEYS) {
+                catOptions += `<option value="${cat}" ${item.category === cat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`;
+            }
+            m.innerHTML = `
+                <h3>\u270F\uFE0F Редактировать</h3>
+                <label>Название</label>
+                <input type="text" id="sw-edit-name" value="${esc(item.name)}">
+                <label>Описание</label>
+                <textarea id="sw-edit-desc">${esc(item.description || '')}</textarea>
+                <label>Категория</label>
+                <select id="sw-edit-cat">${catOptions}</select>
+                <label>Для кого</label>
+                <select id="sw-edit-forwho"><option value="all" ${(item.forWho || 'all') === 'all' ? 'selected' : ''}>Все</option><option value="bot" ${item.forWho === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${item.forWho === 'user' ? 'selected' : ''}>Юзер</option></select>
+                <label>Теги</label>
+                <div class="sw-upload-tags" id="sw-edit-tags">${tagsHtml}</div>
+                <div class="sw-upload-btns">
+                    <button class="sw-upload-btn sw-upload-btn-cancel" id="sw-edit-cancel">Отмена</button>
+                    <button class="sw-upload-btn sw-upload-btn-save" id="sw-edit-save">Сохранить</button>
+                </div>`;
+            ov.appendChild(m);
+            document.body.appendChild(ov);
+
+            const close = (val) => { ov.remove(); resolve(val); };
+            m.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
+            ov.addEventListener('click', (e) => { if (e.target === ov) close(null); });
+            m.querySelector('#sw-edit-save').addEventListener('click', () => {
+                const name = m.querySelector('#sw-edit-name').value.trim();
+                if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
+                const description = m.querySelector('#sw-edit-desc').value.trim();
+                const category = m.querySelector('#sw-edit-cat').value;
+                const forWho = m.querySelector('#sw-edit-forwho').value;
+                const tags = [...m.querySelectorAll('#sw-edit-tags input:checked')].map(c => c.value);
+                close({ name, description, category, forWho, tags });
+            });
+            document.addEventListener('keydown', function escHandler(e) {
+                if (e.key === 'Escape') { close(null); document.removeEventListener('keydown', escHandler); }
+            });
+            setTimeout(() => m.querySelector('#sw-edit-name')?.focus(), 50);
+        });
+    }
+
     async function swToggle(id) {
-        const a = swGetActive(), cn = swCharName(), o = swFind(cn, swTab, id), nm = o?.name || id;
-        const off = a[swTab] === id;
+        const co = swGetCharOutfit();
+        if (!co) return;
+        const cn = swCharName();
+        const o = swFindItem(id);
+        if (!o) return;
+        const nm = o.name || id;
+        const cat = o.category || 'full';
+        const mode = swGetMode();
+
+        // Check category+mode compatibility
+        if (swIsCatBlocked(mode, cat)) {
+            toastr.warning(`Категория "${CATEGORIES[cat]}" недоступна в режиме "${mode === 'full' ? 'Полный комплект' : 'По частям'}"`, 'Гардероб');
+            return;
+        }
+
+        const currentId = co[swTab]?.[cat] || null;
+        const off = currentId === id;
 
         // If putting ON and no description — show custom modal (unless user opted out)
         if (!off && o && !o.description?.trim() && !swGetSettings().skipDescriptionWarning) {
             const choice = await swShowDescriptionModal(nm);
 
-            if (choice === null) return; // closed modal
+            if (choice === null) return;
 
             if (choice === 'manual') {
-                const desc = prompt('Описание аутфита:', '');
-                if (desc !== null && desc.trim()) { o.description = desc.trim(); swSave(); swRender(); }
+                const desc = await swShowDescInput('✏️ Описание аутфита', '');
+                if (desc) { o.description = desc; swSave(); swRender(); }
                 if (!o.description?.trim()) return;
             } else if (choice === 'ai') {
                 const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
                 if (imgBase64) {
-                    const autoDesc = await swAnalyzeOutfit(imgBase64);
+                    const autoDesc = await swAnalyzeOutfit(imgBase64, cat);
                     if (autoDesc) {
-                        const edited = prompt('Описание (можете отредактировать):', autoDesc);
-                        if (edited !== null && edited.trim()) { o.description = edited.trim(); swSave(); swRender(); }
+                        const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
+                        if (edited) { o.description = edited; swSave(); swRender(); }
                     } else {
                         toastr.warning('Не удалось сгенерировать. Попробуйте вручную.', 'Гардероб');
                         return;
@@ -224,24 +817,40 @@
             // 'skip' — proceed without description
         }
 
-        if (swSetActive(swTab, off ? null : id) === false) return;
+        if (off) {
+            // Un-equip
+            swSetSlot(swTab, cat, null);
+        } else {
+            // Equip — handle mode rules
+            if (mode === 'full' && cat === 'full') {
+                // Clear top/bottom/shoes (shouldn't have them, but just in case)
+                co[swTab].top = null;
+                co[swTab].bottom = null;
+                co[swTab].shoes = null;
+            }
+            swSetSlot(swTab, cat, id);
+        }
+
         swRender();
         swUpdatePromptInjection();
         swInjectFloatingBtn();
-        off ? toastr.info(`«${nm}» снят`, 'Гардероб', { timeOut: 2000 }) : toastr.success(`«${nm}» надет`, 'Гардероб', { timeOut: 2000 });
+        off ? toastr.info(`\u00AB${nm}\u00BB снят`, 'Гардероб', { timeOut: 2000 }) : toastr.success(`\u00AB${nm}\u00BB надет`, 'Гардероб', { timeOut: 2000 });
     }
 
     const DESCRIBE_PROMPTS = {
-        detailed: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative. Keep under 550 characters total.',
-        simple: 'Describe ONLY the clothing, garments, colors, accessories, and shoes visible in this image. 1-2 sentences in English. No narrative. Keep under 550 characters total.',
+        detailed: 'Reply IMMEDIATELY with a clothing description. Skip any thinking, reasoning, or preamble. Start directly with the garment name. Max 3 sentences, max 500 characters. Include: garment names, fabric, texture, fit, colors. Avoid mentioning what is absent or missing. English only.',
+        simple: 'Reply IMMEDIATELY with a brief clothing description. Skip any thinking or preamble. Max 2 sentences, max 300 characters. List garments, colors. Avoid mentioning what is absent or missing. English only.',
+        hair: 'Reply IMMEDIATELY with a short hairstyle description. Skip any thinking or preamble. Max 15 words. Format: "[style], [length], [texture]". Avoid mentioning hair color. Avoid mentioning what is absent or missing. Keep to one sentence only.',
     };
 
-    async function swAnalyzeOutfit(base64) {
+    async function swAnalyzeOutfit(base64, category) {
         const swS = swGetSettings();
         const mode = swS.describeMode || 'direct';
-        const promptStyle = swS.describePromptStyle || 'detailed';
+        const promptStyle = (category === 'hair') ? 'hair' : (swS.describePromptStyle || 'detailed');
         const describePrompt = DESCRIBE_PROMPTS[promptStyle] || DESCRIBE_PROMPTS.detailed;
-        swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}`);
+        const maxDescLen = (category === 'hair') ? 250 : (promptStyle === 'simple' ? 400 : 600);
+        const maxTokens = (category === 'hair') ? 60 : 150;
+        swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}, maxLen=${maxDescLen}`);
         toastr.info('Анализ образа...', 'Гардероб', { timeOut: 15000 });
 
         // ── Direct API mode (recommended) ──
@@ -267,7 +876,7 @@
                             { inlineData: { mimeType: 'image/png', data: base64 } },
                             { text: describePrompt }
                         ]}],
-                        generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: 150 }
+                        generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
                     };
                     const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                     if (!response.ok) throw new Error(`API ${response.status}`);
@@ -276,7 +885,7 @@
                 } else {
                     const url = `${endpoint}/v1/chat/completions`;
                     const body = {
-                        model, max_tokens: 150,
+                        model, max_tokens: maxTokens,
                         messages: [
                             { role: 'system', content: describePrompt },
                             { role: 'user', content: [
@@ -291,9 +900,27 @@
                     desc = result.choices?.[0]?.message?.content?.trim() || '';
                 }
 
-                if (desc) desc = desc.replace(/^["'`]+|["'`]+$/g, '').replace(/^(Here|This|The image|I see|In this).{0,20}(shows?|features?|depicts?|displays?)\s*/i, '');
-                if (desc && desc.length > 10 && desc.length < 600) {
-                    desc = `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`;
+                if (desc) {
+                    // Strip thinking/reasoning preamble if model outputs it
+                    // Strip thinking/reasoning: find where actual description starts
+                    desc = desc.replace(/^\*\*.*?\*\*\s*/s, '');
+                    if (/^(My Thought|Okay|Let me|I need to|First|Here's|Here is|Alright|So,|Right|Looking|I'm seeing|The prompt|Let's|I see)/i.test(desc)) {
+                        const parts = desc.split(/\n\n/);
+                        if (parts.length > 1) { desc = parts[parts.length - 1]; }
+                        else {
+                            const clothingMatch = desc.match(/(?:^|[.!]\s+)((?:A |An |The |Fitted |Loose |Soft |Thick |Thin |Dark |Light |Black |White |Red |Blue |Pink |Green |Long |Short |High |Low |Cropped |Oversized |Slim |Wide |Strapless |Off-shoulder |V-neck )[A-Z]?[a-z].*)/i);
+                            if (clothingMatch) desc = clothingMatch[1];
+                        }
+                    }
+                    desc = desc.replace(/^["'`]+|["'`]+$/g, '').replace(/^(Here|This|The image|I see|In this).{0,20}(shows?|features?|depicts?|displays?)\s*/i, '');
+                }
+                // Truncate to maxDescLen if model ignores token limits
+                if (desc && desc.length > maxDescLen) {
+                    const lastDot = desc.lastIndexOf('.', maxDescLen);
+                    desc = lastDot > 50 ? desc.substring(0, lastDot + 1) : desc.substring(0, maxDescLen);
+                    swLog('INFO', `Description truncated to ${desc.length} chars`);
+                }
+                if (desc && desc.length > 10) {
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
                 swLog('WARN', `Direct API: unusable result (len=${desc?.length || 0})`);
@@ -313,19 +940,21 @@
                         { type: 'text', text: 'Describe the clothing in this image.' },
                     ]},
                 ];
-                const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: 150 });
+                const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: maxTokens });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
-                const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 600) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
+                if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
+                if (desc && desc.length > 10) { return desc; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
         if (typeof ctx.generateQuietPrompt === 'function') {
             try {
-                const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: 150 });
+                const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: maxTokens });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
-                const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 600) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
+                if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
+                if (desc && desc.length > 10) { return desc; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
@@ -337,39 +966,67 @@
         const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
         inp.addEventListener('change', async () => {
             const f = inp.files?.[0]; if (!f) return;
-            const name = prompt('Название:', f.name.replace(/\.[^.]+$/, '')); if (!name?.trim()) return;
+            const defaultName = f.name.replace(/\.[^.]+$/, '');
+
+            // Show upload modal
+            const result = await swShowUploadModal(defaultName);
+            if (!result) return;
+
             try {
                 const { base64 } = await swResize(f, swGetSettings().maxDimension);
                 let autoDesc = null;
                 if (swGetSettings().autoDescribe !== false) {
-                    autoDesc = await swAnalyzeOutfit(base64);
+                    autoDesc = await swAnalyzeOutfit(base64, result.category);
                 }
-                const desc = prompt('Описание образа:', autoDesc || '') || '';
-                // Save image to server file, store only path
-                const imagePath = await swSaveImageToFile(base64, `${swCharName()}_${swTab}_${name.trim()}`);
-                swAdd(swCharName(), swTab, { id: uid(), name: name.trim(), description: desc.trim(), base64: '', imagePath, addedAt: Date.now() });
-                swRender(); toastr.success(`«${name.trim()}» добавлен`, 'Гардероб');
+                if (autoDesc) {
+                    const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
+                    if (edited !== null) autoDesc = edited;
+                }
+                const imagePath = await swSaveImageToFile(base64, `wardrobe_${result.name}`);
+                swAddItem({
+                    id: uid(),
+                    name: result.name,
+                    description: (autoDesc || '').trim(),
+                    imagePath,
+                    base64: '',
+                    category: result.category,
+                    forWho: result.forWho || 'all',
+                    tags: result.tags,
+                    addedAt: Date.now(),
+                });
+                // Switch to the uploaded item's category
+                swCatTab = result.category;
+                swRender();
+                toastr.success(`\u00AB${result.name}\u00BB добавлен`, 'Гардероб');
             } catch (e) { toastr.error('Ошибка: ' + e.message, 'Гардероб'); }
         });
         inp.click();
     }
 
-    function swEdit(cn, type, id) {
-        const o = swFind(cn, type, id); if (!o) return;
-        const n = prompt('Название:', o.name); if (n === null) return;
-        const d = prompt('Описание:', o.description || ''); if (d === null) return;
-        o.name = n.trim() || o.name; o.description = d.trim(); swSave(); swRender(); swUpdatePromptInjection(); toastr.info('Обновлён', 'Гардероб');
+    async function swEdit(id) {
+        const o = swFindItem(id); if (!o) return;
+        const result = await swShowEditModal(o);
+        if (!result) return;
+        o.name = result.name || o.name;
+        o.description = result.description ?? o.description;
+        o.category = result.category || o.category;
+        o.forWho = result.forWho || 'all';
+        o.tags = result.tags || o.tags;
+        swSave();
+        swRender();
+        swUpdatePromptInjection();
+        toastr.info('Обновлён', 'Гардероб');
     }
 
-    async function swRegenDescription(cn, type, id) {
-        const o = swFind(cn, type, id); if (!o) return;
+    async function swRegenDescription(id) {
+        const o = swFindItem(id); if (!o) return;
         const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
         if (!imgBase64) { toastr.error('Картинка не найдена', 'Гардероб'); return; }
-        const autoDesc = await swAnalyzeOutfit(imgBase64);
+        const autoDesc = await swAnalyzeOutfit(imgBase64, o.category);
         if (autoDesc) {
-            const edited = prompt('Описание (можете отредактировать):', autoDesc);
-            if (edited !== null && edited.trim()) {
-                o.description = edited.trim(); swSave(); swRender(); swUpdatePromptInjection();
+            const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
+            if (edited) {
+                o.description = edited; swSave(); swRender(); swUpdatePromptInjection();
                 toastr.success('Описание обновлено', 'Гардероб', { timeOut: 2000 });
             }
         }
@@ -384,11 +1041,18 @@
             if (typeof ctx.setExtensionPrompt !== 'function') { swLog('WARN', 'setExtensionPrompt not available'); return; }
             const cn = swCharName();
             if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
-            const botData = swGetActive().bot ? swFind(cn, 'bot', swGetActive().bot) : null;
-            const userData = swGetActive().user ? swFind(cn, 'user', swGetActive().user) : null;
+            const co = swGetCharOutfit();
+            if (!co) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
+
             const lines = [];
-            if (botData?.description) lines.push(`[MANDATORY OUTFIT — DO NOT CHANGE OR IGNORE: ${cn} is currently wearing: ${botData.description}. Use this EXACT outfit in any image prompt you generate for ${cn}.]`);
-            if (userData?.description) lines.push(`[MANDATORY OUTFIT — DO NOT CHANGE OR IGNORE: {{user}} is currently wearing: ${userData.description}. Use this EXACT outfit in any image prompt you generate for {{user}}.]`);
+            for (const type of ['bot', 'user']) {
+                const who = type === 'bot' ? cn : '{{user}}';
+                const desc = swBuildDescription(type, cn);
+                if (desc) {
+                    lines.push(`[OUTFIT LOCK \u2014 keep unchanged: ${who} is currently wearing: ${desc}. Always use this exact outfit when writing image prompts for ${who}.]`);
+                }
+            }
+
             const injectionText = lines.length > 0 ? lines.join('\n') : '';
             ctx.setExtensionPrompt(SW_PROMPT_KEY, injectionText, 1, 0);
             if (injectionText) { swLog('INFO', `Prompt injection updated (MANDATORY depth=0): ${lines.length} outfit(s)`); }
@@ -405,11 +1069,17 @@
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
         }
-        const active = swGetActive();
-        const hasActive = !!(active.bot || active.user);
-        $btn.toggleClass('sw-bar-active', hasActive);
-        if (hasActive) {
-            let count = 0; if (active.bot) count++; if (active.user) count++;
+        const co = swGetCharOutfit();
+        let count = 0;
+        if (co) {
+            for (const type of ['bot', 'user']) {
+                for (const cat of CAT_KEYS) {
+                    if (co[type]?.[cat]) count++;
+                }
+            }
+        }
+        $btn.toggleClass('sw-bar-active', count > 0);
+        if (count > 0) {
             $btn.html(`<i class="fa-solid fa-shirt"></i><span class="sw-bar-count">${count}</span>`);
         } else { $btn.html('<i class="fa-solid fa-shirt"></i>'); }
         $btn.show();
@@ -419,17 +1089,39 @@
     window.slayWardrobe = {
         async getActiveOutfitBase64(type) {
             const cn = swCharName(); if (!cn) return null;
-            const a = swGetActive(); if (!a[type]) return null;
-            const outfit = swFind(cn, type, a[type]); if (!outfit) return null;
-            // Prefer server path, fallback to inline base64
+            const co = swGetCharOutfit(); if (!co) return null;
+            const mode = swGetModeFor(type);
+            // Only return base64 if mode=full and full item equipped
+            if (mode !== 'full') return null;
+            const fullId = co[type]?.full;
+            if (!fullId) return null;
+            const outfit = swFindItem(fullId);
+            if (!outfit) return null;
             if (outfit.imagePath) return await swLoadImageAsBase64(outfit.imagePath);
             return outfit.base64 || null;
         },
-        async getActiveOutfitDataUrl(type) {
-            const b = await this.getActiveOutfitBase64(type);
-            return b ? `data:image/png;base64,${b}` : null;
+        getActiveOutfitDescription(type) {
+            const cn = swCharName(); if (!cn) return '';
+            return swBuildDescription(type, cn);
         },
-        getActiveOutfitData(type) { const cn = swCharName(); if (!cn) return null; const a = swGetActive(); return a[type] ? swFind(cn, type, a[type]) : null; },
+        async getCollageBase64(type) {
+            if (!swGetSettings().experimentalCollage) return null;
+            // 1 item = return as single ref; 2+ = collage
+            const images = await swGetPartsImages(type);
+            if (images.length === 1) return images[0]; // single item, no collage needed
+            if (images.length >= 2) return await swBuildCollage(type);
+            return null;
+        },
+        getActiveOutfitData(type) {
+            const cn = swCharName(); if (!cn) return null;
+            const co = swGetCharOutfit(); if (!co) return null;
+            const result = {};
+            for (const cat of CAT_KEYS) {
+                const itemId = co[type]?.[cat] || null;
+                result[cat] = itemId ? swFindItem(itemId) : null;
+            }
+            return result;
+        },
         openModal: () => swOpenModal(),
         isReady: () => true,
     };
@@ -442,7 +1134,7 @@
     ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
         setTimeout(() => { swUpdatePromptInjection(); swInjectFloatingBtn(); }, 300);
     });
-    swLog('INFO', 'SlayWardrobe initialized');
+    swLog('INFO', 'SlayWardrobe v4 initialized');
 })();
 
 
@@ -1147,13 +1839,13 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         const name = refNames[i] || '';
 
         let instruction = '';
-        if (label === 'char_face') instruction = `Image ${i + 1} is ${name}'s FACE — copy this face exactly.`;
-        else if (label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — copy this face exactly.`;
-        else if (label === 'char_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — dress ${name} in exactly this clothing.`;
-        else if (label === 'user_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — dress ${name} in exactly this clothing.`;
-        else if (label === 'npc_char') instruction = `Image ${i + 1} is ${name} — copy this appearance exactly.`;
-        else if (label === 'npc_user') instruction = `Image ${i + 1} is ${name} — copy this appearance exactly.`;
-        else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — copy this appearance exactly.`;
+        if (label === 'char_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
+        else if (label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
+        else if (label === 'char_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
+        else if (label === 'user_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
+        else if (label === 'npc_char') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
+        else if (label === 'npc_user') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
+        else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — preserve this appearance exactly.`;
         else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
 
         if (instruction) instructions.push(instruction);
@@ -1163,7 +1855,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
 
     if (instructions.length > 0) {
-        const refBlock = instructions.join('\n') + '\nGenerate the scene below using these faces and outfits. Do not change or ignore any of them.';
+        const refBlock = instructions.join('\n') + '\nGenerate the scene below. Keep all faces and outfits faithful to the references.';
         fullPrompt = `${refBlock}\n\n${fullPrompt}`;
     }
 
@@ -1306,9 +1998,14 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 const charAvatar = await getCharacterAvatarBase64();
                 if (charAvatar) { referenceImages.push(charAvatar); refLabels.push('char_face'); refNames.push(charDisplayName); }
             }
-            if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
+            let charOutfitSent = false;
+            if (swS.sendOutfitImageBot !== false && window.slayWardrobe?.isReady()) {
                 const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-                if (botB64) { referenceImages.push(botB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); }
+                if (botB64) { referenceImages.push(botB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); charOutfitSent = true; }
+            }
+            if (!charOutfitSent && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
+                if (collageB64) { referenceImages.push(collageB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); iigLog('INFO', 'Collage sent for char'); }
             }
             if (!settings.sendCharAvatar) {
                 const charB64 = await getB64(refs.charRef);
@@ -1322,9 +2019,14 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 const userAvatar = await getUserAvatarBase64();
                 if (userAvatar) { referenceImages.push(userAvatar); refLabels.push('user_face'); refNames.push(userDisplayName); }
             }
-            if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
+            let userOutfitSent = false;
+            if (swS.sendOutfitImageUser !== false && window.slayWardrobe?.isReady()) {
                 const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-                if (userB64) { referenceImages.push(userB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); }
+                if (userB64) { referenceImages.push(userB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); userOutfitSent = true; }
+            }
+            if (!userOutfitSent && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                const collageB64 = await window.slayWardrobe.getCollageBase64('user');
+                if (collageB64) { referenceImages.push(collageB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); iigLog('INFO', 'Collage sent for user'); }
             }
             if (!settings.sendUserAvatar) {
                 const userB64 = await getB64(refs.userRef);
@@ -1350,11 +2052,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     if (settings.apiType === 'naistera') {
         if (settings.naisteraSendCharAvatar) { const d = await getCharacterAvatarDataUrl(); if (d) referenceDataUrls.push(d); }
         if (settings.naisteraSendUserAvatar) { const d = await getUserAvatarDataUrl(); if (d) referenceDataUrls.push(d); }
-        if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
-            const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-            const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-            if (botB64) referenceDataUrls.push(`data:image/png;base64,${botB64}`);
-            if (userB64) referenceDataUrls.push(`data:image/png;base64,${userB64}`);
+        if (window.slayWardrobe?.isReady()) {
+            if (swS.sendOutfitImageBot !== false) { const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot'); if (botB64) referenceDataUrls.push(`data:image/png;base64,${botB64}`); }
+            if (swS.sendOutfitImageUser !== false) { const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user'); if (userB64) referenceDataUrls.push(`data:image/png;base64,${userB64}`); }
         }
         const refs = getCurrentCharacterRefs();
         const getDataUrl = async (ref) => {
@@ -1378,11 +2078,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── OpenAI: wardrobe + NPC refs ──
     if (settings.apiType !== 'gemini' && !isGeminiModel(settings.model) && settings.apiType !== 'naistera') {
-        if (swS.sendOutfitImage !== false && window.slayWardrobe?.isReady()) {
-            const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-            const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-            if (botB64) referenceImages.push(botB64);
-            if (userB64) referenceImages.push(userB64);
+        if (window.slayWardrobe?.isReady()) {
+            if (swS.sendOutfitImageBot !== false) { const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot'); if (botB64) referenceImages.push(botB64); }
+            if (swS.sendOutfitImageUser !== false) { const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user'); if (userB64) referenceImages.push(userB64); }
         }
     }
 
@@ -1398,14 +2096,16 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── Inject wardrobe outfit descriptions into prompt (only if enabled) ──
     if (swS.sendOutfitDescription !== false && window.slayWardrobe?.isReady()) {
-        const botData = window.slayWardrobe.getActiveOutfitData('bot');
-        const userData = window.slayWardrobe.getActiveOutfitData('user');
+        const botDesc = window.slayWardrobe.getActiveOutfitDescription('bot');
+        const userDesc = window.slayWardrobe.getActiveOutfitDescription('user');
+        iigLog('INFO', `Wardrobe bot desc (${botDesc.length} chars): ${botDesc.substring(0, 150)}`);
+        iigLog('INFO', `Wardrobe user desc (${userDesc.length} chars): ${userDesc.substring(0, 150)}`);
         const wardrobeParts = [];
-        if (botData?.description) wardrobeParts.push(`[Character's current outfit: ${botData.description}]`);
-        if (userData?.description) wardrobeParts.push(`[User's current outfit: ${userData.description}]`);
+        if (botDesc) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [Character's current outfit: ${botDesc}]`);
+        if (userDesc) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [User's current outfit: ${userDesc}]`);
         if (wardrobeParts.length > 0) {
             prompt = `${wardrobeParts.join(' ')}\n${prompt}`;
-            iigLog('INFO', `Wardrobe descriptions injected: ${wardrobeParts.join(', ')}`);
+            iigLog('INFO', `Wardrobe v4 descriptions injected: ${wardrobeParts.join(' | ').substring(0, 200)}`);
         }
     }
 
@@ -1558,7 +2258,9 @@ function getErrorImagePath() {
         }
     }
     const possiblePaths = [
-        '/scripts/extensions/third-party/sillyandSLAYimages/error.svg',
+        '/scripts/extensions/third-party/SLAYImages/error.svg',
+        '/scripts/extensions/third-party/SLAYImages_v4_draft/error.svg',
+        '/scripts/extensions/third-party/SLAYImages_v4_collage/error.svg',
         '/scripts/extensions/third-party/notsosillynotsoimages/error.svg',
         '/scripts/extensions/third-party/sillyimages/error.svg',
     ];
@@ -1936,7 +2638,9 @@ function createSettingsUI() {
 
                     <p class="hint" style="margin-top:10px;font-weight:600;color:var(--slay-pink,#f472b6);">Настройки гардероба:</p>
                     <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_desc" ${swSettings.sendOutfitDescription !== false ? 'checked' : ''}><span>Отправлять текстовое описание аутфита</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image" ${swSettings.sendOutfitImage !== false ? 'checked' : ''}><span>Отправлять картинку аутфита как ref-image</span></label>
+                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image_bot" ${swSettings.sendOutfitImageBot !== false ? 'checked' : ''}><span>Отправлять картинку одежды бота</span></label>
+                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image_user" ${swSettings.sendOutfitImageUser !== false ? 'checked' : ''}><span>Отправлять картинку одежды юзера</span></label>
+                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
                     <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Плавающая кнопка в чате</span></label>
                     <div class="flex-row" style="margin-top:6px;"><label>Макс. размер (px)</label><input type="number" id="slay_sw_max_dim" class="text_pole flex1" value="${swSettings.maxDimension || 512}" min="128" max="1024" step="64"></div>
@@ -1975,7 +2679,7 @@ function createSettingsUI() {
 
                 <div id="slay_manual_save" class="menu_button" style="width:100%;text-align:center;margin-bottom:6px;background:#2a6a2a;"><i class="fa-solid fa-floppy-disk"></i> Сохранить настройки</div>
                 <p id="slay_save_status" class="hint" style="text-align:center;font-size:0.85em;min-height:1.2em;"></p>
-                <p class="hint" style="text-align:center;opacity:0.5;margin-top:4px;">v3.0.0 by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a> + <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a> + Wewwa</p>
+                <p class="hint" style="text-align:center;opacity:0.5;margin-top:4px;">v4.0.0 by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a> + <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a> + Wewwa</p>
                 <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
         </div>
@@ -2219,9 +2923,17 @@ function bindSettingsEvents() {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.sendOutfitDescription = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
     });
-    document.getElementById('slay_sw_send_outfit_image')?.addEventListener('change', (e) => {
+    document.getElementById('slay_sw_send_outfit_image_bot')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
-        if (s) { s.sendOutfitImage = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+        if (s) { s.sendOutfitImageBot = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+    });
+    document.getElementById('slay_sw_send_outfit_image_user')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.sendOutfitImageUser = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+    });
+    document.getElementById('slay_sw_collage')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.experimentalCollage = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
     });
     document.getElementById('slay_sw_skip_desc_warn')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
@@ -2271,7 +2983,7 @@ function updateHeaderStatusDot() {
 // ── Initialization ──
 (function init() {
     const context = SillyTavern.getContext();
-    iigLog('INFO', 'Initializing Slay Images v3.0.0');
+    iigLog('INFO', 'Initializing Slay Images v4.0.0');
 
     // Settings migration
     if (context.extensionSettings.silly_wardrobe && !context.extensionSettings.slay_wardrobe) {
@@ -2280,6 +2992,7 @@ function updateHeaderStatusDot() {
     }
     if (context.extensionSettings.inline_image_gen && !context.extensionSettings.slay_image_gen) {
         context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings.inline_image_gen);
+        // Force disable avatar sending — SLAY uses ref slots, not ST avatars
         context.extensionSettings.slay_image_gen.sendCharAvatar = false;
         context.extensionSettings.slay_image_gen.sendUserAvatar = false;
         context.extensionSettings.slay_image_gen.naisteraSendCharAvatar = false;
