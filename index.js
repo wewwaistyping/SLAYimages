@@ -338,7 +338,7 @@
             .sw-current-slot-label { font-size:10px; color:#777; text-align:center; max-width:56px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
             .sw-current-desc { font-size:11px; color:#999; margin-top:6px; line-height:1.4; max-height:60px; overflow-y:auto; }
 
-            .sw-upload-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100001; display:flex; align-items:center; justify-content:center; overflow-y:auto; padding:16px; }
+            .sw-upload-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200000; display:flex; align-items:center; justify-content:center; overflow-y:auto; padding:16px; }
             @media (max-width:600px) { .sw-upload-modal-overlay { align-items:flex-start; padding-top:40px; } .sw-upload-modal { max-height:calc(100dvh - 60px); overflow-y:auto; } }
             @media (max-width:600px) { .sw-edit-modal-overlay { align-items:flex-start; padding:16px; padding-top:40px; } .sw-edit-modal { max-height:calc(100dvh - 60px); overflow-y:auto; } }
             .sw-upload-modal { background:#2a2a2e; border-radius:14px; padding:20px; width:360px; max-width:90vw; color:#ddd; box-shadow:0 8px 32px rgba(0,0,0,0.5); }
@@ -356,7 +356,7 @@
             .sw-upload-btn-save { background:rgba(219,112,147,0.3); color:#f0a0c0; }
             .sw-upload-btn-save:hover { background:rgba(219,112,147,0.45); }
 
-            .sw-edit-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100001; display:flex; align-items:center; justify-content:center; }
+            .sw-edit-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200000; display:flex; align-items:center; justify-content:center; }
             .sw-edit-modal { background:#2a2a2e; border-radius:14px; padding:20px; width:380px; max-width:90vw; color:#ddd; box-shadow:0 8px 32px rgba(0,0,0,0.5); }
             .sw-edit-modal h3 { margin:0 0 14px; font-size:15px; color:#f0a0c0; }
             .sw-edit-modal label { display:block; font-size:12px; color:#aaa; margin:10px 0 4px; }
@@ -402,9 +402,11 @@
         m.querySelector('.sw-modal-close').addEventListener('click', swCloseModal);
         for (const t of m.querySelectorAll('#sw-type-tabs .sw-tab')) t.addEventListener('click', () => {
             swTab = t.dataset.tab;
+            swForWhoFilter = swTab; // Auto-filter: Бот tab → show bot items, Юзер tab → show user items
             m.querySelectorAll('#sw-type-tabs .sw-tab').forEach(x => x.classList.toggle('sw-tab-active', x.dataset.tab === swTab));
             swRender();
         });
+        swForWhoFilter = swTab; // Default filter to current tab
         swRender();
         document.addEventListener('keydown', swEsc);
     }
@@ -688,7 +690,7 @@
             swInjectV4Styles();
             const ov = document.createElement('div');
             ov.className = 'sw-desc-input-overlay';
-            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100002;display:flex;align-items:center;justify-content:center;padding:16px;overflow-y:auto;animation:sw-fade-in 0.2s ease-out;';
+            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200001;display:flex;align-items:center;justify-content:center;padding:16px;overflow-y:auto;animation:sw-fade-in 0.2s ease-out;';
             if (window.innerWidth <= 600) ov.style.alignItems = 'flex-start';
             const m = document.createElement('div');
             m.style.cssText = 'background:rgba(30,30,40,0.98);border-radius:14px;padding:20px;width:420px;max-width:90vw;color:#ddd;box-shadow:0 12px 48px rgba(0,0,0,0.5);border:1px solid rgba(244,114,182,0.15);animation:sw-modal-in 0.25s cubic-bezier(0.34,1.56,0.64,1);';
