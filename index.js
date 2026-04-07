@@ -383,15 +383,15 @@
             const ctx = SillyTavern.getContext();
             if (typeof ctx.setExtensionPrompt !== 'function') { swLog('WARN', 'setExtensionPrompt not available'); return; }
             const cn = swCharName();
-            if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 1); return; }
+            if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const botData = swGetActive().bot ? swFind(cn, 'bot', swGetActive().bot) : null;
             const userData = swGetActive().user ? swFind(cn, 'user', swGetActive().user) : null;
             const lines = [];
-            if (botData?.description) lines.push(`[${cn} сейчас одет(а): ${botData.description}]`);
-            if (userData?.description) lines.push(`[{{user}} сейчас одет(а): ${userData.description}]`);
+            if (botData?.description) lines.push(`[MANDATORY OUTFIT — DO NOT CHANGE OR IGNORE: ${cn} is currently wearing: ${botData.description}. Use this EXACT outfit in any image prompt you generate for ${cn}.]`);
+            if (userData?.description) lines.push(`[MANDATORY OUTFIT — DO NOT CHANGE OR IGNORE: {{user}} is currently wearing: ${userData.description}. Use this EXACT outfit in any image prompt you generate for {{user}}.]`);
             const injectionText = lines.length > 0 ? lines.join('\n') : '';
-            ctx.setExtensionPrompt(SW_PROMPT_KEY, injectionText, 1, 1);
-            if (injectionText) { swLog('INFO', `Prompt injection updated: ${lines.length} outfit(s)`); }
+            ctx.setExtensionPrompt(SW_PROMPT_KEY, injectionText, 1, 0);
+            if (injectionText) { swLog('INFO', `Prompt injection updated (MANDATORY depth=0): ${lines.length} outfit(s)`); }
             else { swLog('INFO', 'Prompt injection cleared (no active outfits)'); }
         } catch (e) { swLog('ERROR', 'Failed to update prompt injection:', e.message); }
     }
