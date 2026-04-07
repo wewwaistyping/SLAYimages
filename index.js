@@ -292,7 +292,7 @@
                 }
 
                 if (desc) desc = desc.replace(/^["'`]+|["'`]+$/g, '').replace(/^(Here|This|The image|I see|In this).{0,20}(shows?|features?|depicts?|displays?)\s*/i, '');
-                if (desc && desc.length > 10 && desc.length < 500) {
+                if (desc && desc.length > 10 && desc.length < 2000) {
                     desc = `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`;
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
@@ -316,7 +316,7 @@
                 const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 500) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                if (desc && desc.length > 10 && desc.length < 2000) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
@@ -325,7 +325,7 @@
                 const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 500) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                if (desc && desc.length > 10 && desc.length < 2000) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
