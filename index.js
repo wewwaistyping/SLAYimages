@@ -232,8 +232,8 @@
     }
 
     const DESCRIBE_PROMPTS = {
-        detailed: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative.',
-        simple: 'Describe ONLY the clothing, garments, colors, accessories, and shoes visible in this image. 1-2 sentences in English. No narrative.',
+        detailed: 'Describe the clothing in this image as a costume designer would. Include: each garment name, fabric type and texture, fit and silhouette, exact colors, accessories, shoes, jewelry. Be specific about drape, patterns, embellishments. 2-3 sentences in English. Only clothing, no narrative. Keep under 550 characters total.',
+        simple: 'Describe ONLY the clothing, garments, colors, accessories, and shoes visible in this image. 1-2 sentences in English. No narrative. Keep under 550 characters total.',
     };
 
     async function swAnalyzeOutfit(base64) {
@@ -292,7 +292,7 @@
                 }
 
                 if (desc) desc = desc.replace(/^["'`]+|["'`]+$/g, '').replace(/^(Here|This|The image|I see|In this).{0,20}(shows?|features?|depicts?|displays?)\s*/i, '');
-                if (desc && desc.length > 10 && desc.length < 2000) {
+                if (desc && desc.length > 10 && desc.length < 600) {
                     desc = `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`;
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
@@ -316,7 +316,7 @@
                 const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 2000) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                if (desc && desc.length > 10 && desc.length < 600) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
@@ -325,7 +325,7 @@
                 const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: 150 });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 const desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
-                if (desc && desc.length > 10 && desc.length < 2000) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
+                if (desc && desc.length > 10 && desc.length < 600) { return `[DO NOT USE THIS IMAGE AS POSE REFERENCE] ${desc}`; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
