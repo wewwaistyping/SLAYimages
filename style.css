@@ -701,7 +701,10 @@
 
 .iig-lightbox {
     position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     z-index: 999999;
     display: flex;
     flex-direction: column;
@@ -710,9 +713,11 @@
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.3s ease;
-    background: rgba(0, 0, 0, 0.92);
+    background: rgba(0, 0, 0, 0.95);
     padding: 16px;
+    padding-top: env(safe-area-inset-top, 16px);
     overflow: hidden;
+    -webkit-transform: translateZ(0);
 }
 
 .iig-lightbox.open {
