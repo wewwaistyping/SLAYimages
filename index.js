@@ -2935,11 +2935,13 @@ function bindSettingsEvents() {
 function initLightbox() {
     if (document.getElementById('slay_lightbox')) return;
     const overlay = document.createElement('div'); overlay.id = 'slay_lightbox'; overlay.className = 'iig-lightbox';
-    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><button class="iig-lightbox-close" title="Close"><i class="fa-solid fa-xmark"></i></button></div>`;
+    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div></div>`;
     document.body.appendChild(overlay);
-    const close = () => overlay.classList.remove('open');
+    const close = () => { overlay.classList.remove('open'); document.body.style.overflow = ''; };
     overlay.querySelector('.iig-lightbox-backdrop').addEventListener('click', close);
     overlay.querySelector('.iig-lightbox-close').addEventListener('click', close);
+    // Touch: tap anywhere on image to close
+    overlay.querySelector('.iig-lightbox-img').addEventListener('click', close);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
     document.getElementById('chat')?.addEventListener('click', (e) => {
         const img = e.target.closest('.iig-generated-image'); if (!img) return;
@@ -2947,6 +2949,7 @@ function initLightbox() {
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
         overlay.classList.add('open');
+        document.body.style.overflow = 'hidden'; // Prevent background scroll on iOS
     });
 }
 
