@@ -1314,11 +1314,22 @@ function getSettings() {
     return context.extensionSettings[MODULE_NAME];
 }
 
+// Capture ST's original window.saveSettings lazily to avoid infinite recursion
+// if our function shadows it in global scope
+let _stSaveSettings = null;
+let _stSaveSettingsCaptured = false;
+
 function saveSettings() {
+    if (!_stSaveSettingsCaptured) {
+        _stSaveSettings = window.saveSettings;
+        _stSaveSettingsCaptured = true;
+    }
     const context = SillyTavern.getContext();
-    if (typeof window.saveSettings === 'function') {
-        try { window.saveSettings(); } catch(e) { context.saveSettingsDebounced(); }
-    } else { context.saveSettingsDebounced(); }
+    if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) {
+        try { _stSaveSettings(); } catch(e) { context.saveSettingsDebounced(); }
+    } else {
+        context.saveSettingsDebounced();
+    }
     persistRefsToLocalStorage();
 }
 function saveSettingsNow() { saveSettings(); }
@@ -1349,7 +1360,7 @@ function initMobileSaveListeners() {
     const flush = () => {
         persistRefsToLocalStorage();
         try { SillyTavern.getContext().saveSettingsDebounced(); } catch(e) {}
-        if (typeof window.saveSettings === 'function') { try { window.saveSettings(); } catch(e) {} }
+        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { _stSaveSettings(); } catch(e) {} }
     };
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
     window.addEventListener('pagehide', flush);
@@ -2778,7 +2789,7 @@ function bindSettingsEvents() {
         const btn = document.getElementById('slay_manual_save'); const status = document.getElementById('slay_save_status');
         btn.style.opacity = '0.6'; status.textContent = 'Сохраняю...';
         let ok = false; const errors = [];
-        if (typeof window.saveSettings === 'function') { try { await window.saveSettings(); ok = true; } catch(e) { errors.push(e.message); } }
+        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { await _stSaveSettings(); ok = true; } catch(e) { errors.push(e.message); } }
         try { SillyTavern.getContext().saveSettingsDebounced(); } catch(e) {}
         persistRefsToLocalStorage();
         if (!ok) { try { const ctx = SillyTavern.getContext(); const payload = { extension_settings: ctx.extensionSettings }; const resp = await fetch('/api/settings/save', { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(payload) }); if (resp.ok) ok = true; else errors.push('HTTP ' + resp.status); } catch(e) { errors.push(e.message); } }
