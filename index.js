@@ -839,7 +839,7 @@
         const promptStyle = (category === 'hair') ? 'hair' : (swS.describePromptStyle || 'detailed');
         const describePrompt = DESCRIBE_PROMPTS[promptStyle] || DESCRIBE_PROMPTS.detailed;
         const maxDescLen = (category === 'hair') ? 250 : (promptStyle === 'simple' ? 400 : 600);
-        const maxTokens = (category === 'hair') ? 60 : 150;
+        const maxTokens = (category === 'hair') ? 80 : 300;
         swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}, maxLen=${maxDescLen}`);
         toastr.info('Анализ образа...', 'Гардероб', { timeOut: 15000 });
 
