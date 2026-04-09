@@ -2985,12 +2985,19 @@ function updateHeaderStatusDot() {
     }
     if (context.extensionSettings.inline_image_gen && !context.extensionSettings.slay_image_gen) {
         context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings.inline_image_gen);
-        // Force disable avatar sending — SLAY uses ref slots, not ST avatars
-        context.extensionSettings.slay_image_gen.sendCharAvatar = false;
-        context.extensionSettings.slay_image_gen.sendUserAvatar = false;
-        context.extensionSettings.slay_image_gen.naisteraSendCharAvatar = false;
-        context.extensionSettings.slay_image_gen.naisteraSendUserAvatar = false;
-        iigLog('INFO', 'Migrated inline_image_gen -> slay_image_gen (avatar sending disabled)');
+        iigLog('INFO', 'Migrated inline_image_gen -> slay_image_gen');
+    }
+    // ALWAYS force disable avatar sending — SLAY uses ref slots, not ST avatars
+    // This catches settings that migrated before the fix was added
+    if (context.extensionSettings.slay_image_gen) {
+        const s = context.extensionSettings.slay_image_gen;
+        if (s.sendCharAvatar || s.sendUserAvatar || s.naisteraSendCharAvatar || s.naisteraSendUserAvatar) {
+            s.sendCharAvatar = false;
+            s.sendUserAvatar = false;
+            s.naisteraSendCharAvatar = false;
+            s.naisteraSendUserAvatar = false;
+            iigLog('INFO', 'Force disabled avatar sending (legacy settings cleanup)');
+        }
     }
 
     getSettings();
