@@ -1252,7 +1252,7 @@ const defaultSettings = Object.freeze({
 });
 
 const MAX_CONTEXT_IMAGES = 3;
-const MAX_GENERATION_REFERENCE_IMAGES = 5;
+const MAX_GENERATION_REFERENCE_IMAGES = 7;
 
 const IMAGE_MODEL_KEYWORDS = [
     'dall-e', 'midjourney', 'mj', 'journey', 'stable-diffusion', 'sdxl', 'flux',
@@ -2057,30 +2057,58 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     }
 
     // ── Naistera: data URL refs ──
+    // Priority order: user face → char face → NPC faces → user wardrobe → char wardrobe → context
     if (settings.apiType === 'naistera') {
-        if (settings.naisteraSendCharAvatar) { const d = await getCharacterAvatarDataUrl(); if (d) referenceDataUrls.push(d); }
-        if (settings.naisteraSendUserAvatar) { const d = await getUserAvatarDataUrl(); if (d) referenceDataUrls.push(d); }
-        if (window.slayWardrobe?.isReady()) {
-            if (swS.sendOutfitImageBot !== false) { const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot'); if (botB64) referenceDataUrls.push(`data:image/png;base64,${botB64}`); }
-            if (swS.sendOutfitImageUser !== false) { const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user'); if (userB64) referenceDataUrls.push(`data:image/png;base64,${userB64}`); }
-        }
-        const refs = getCurrentCharacterRefs();
         const getDataUrl = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return 'data:image/jpeg;base64,' + b64; }
             const b64 = ref?.imageBase64 || ref?.imageData;
             return b64 ? 'data:image/jpeg;base64,' + b64 : null;
         };
-        if (!settings.naisteraSendCharAvatar) { const u = await getDataUrl(refs.charRef); if (u) referenceDataUrls.push(u); }
-        if (!settings.naisteraSendUserAvatar) { const u = await getDataUrl(refs.userRef); if (u) referenceDataUrls.push(u); }
+        const canPush = () => referenceDataUrls.length < MAX_GENERATION_REFERENCE_IMAGES;
+        // 1. User face (ONLY if mentioned in prompt)
+        if (userInPrompt && canPush()) {
+            if (settings.naisteraSendUserAvatar) {
+                const d = await getUserAvatarDataUrl();
+                if (d) referenceDataUrls.push(d);
+            } else {
+                const u = await getDataUrl(refs.userRef);
+                if (u) referenceDataUrls.push(u);
+            }
+        }
+        // 2. Character face (ONLY if mentioned in prompt)
+        if (charInPrompt && canPush()) {
+            if (settings.naisteraSendCharAvatar) {
+                const d = await getCharacterAvatarDataUrl();
+                if (d) referenceDataUrls.push(d);
+            } else {
+                const u = await getDataUrl(refs.charRef);
+                if (u) referenceDataUrls.push(u);
+            }
+        }
+        // 3. NPC faces (matched against prompt)
         const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
-            if (referenceDataUrls.length >= MAX_GENERATION_REFERENCE_IMAGES) break;
+            if (!canPush()) break;
             const url = await getDataUrl(npc);
             if (url) { referenceDataUrls.push(url); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
         }
+        // 4. Wardrobe user outfit (ONLY if user in prompt)
+        if (userInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageUser !== false) {
+            const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+            if (userB64) referenceDataUrls.push(`data:image/png;base64,${userB64}`);
+        }
+        // 5. Wardrobe bot outfit (ONLY if char in prompt)
+        if (charInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageBot !== false) {
+            const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
+            if (botB64) referenceDataUrls.push(`data:image/png;base64,${botB64}`);
+        }
+        // 6. Context refs (previous images)
         if (settings.imageContextEnabled) {
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'dataUrl', normalizeImageContextCount(settings.imageContextCount));
-            referenceDataUrls.push(...contextRefs);
+            for (const cr of contextRefs) {
+                if (!canPush()) break;
+                referenceDataUrls.push(cr);
+            }
         }
     }
 
