@@ -1890,10 +1890,17 @@ async function generateImageNaistera(prompt, style, options = {}) {
     const settings = getSettings();
     const endpoint = getEffectiveEndpoint(settings);
     const url = endpoint.endsWith('/api/generate') ? endpoint : `${endpoint}/api/generate`;
-    const fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
     const aspectRatio = options.aspectRatio || settings.naisteraAspectRatio || '1:1';
     const model = normalizeNaisteraModel(options.model || settings.naisteraModel || 'grok');
     const referenceImages = options.referenceImages || [];
+    const referenceLabels = options.referenceLabels || [];
+    let labelPrefix = '';
+    if (referenceImages.length > 0 && referenceLabels.length > 0) {
+        const labelList = referenceImages.map((_, i) => `${i + 1}=${referenceLabels[i] || 'reference'}`).join(', ');
+        labelPrefix = `[Reference images attached, in order: ${labelList}. Use each reference for ITS OWN named subject only — do not mix attributes between subjects.] `;
+        iigLog('INFO', `Naistera ref labels: ${labelList}`);
+    }
+    const fullPrompt = labelPrefix + (style ? `[Style: ${style}] ${prompt}` : prompt);
     const wantsVideoTest = Boolean(options.videoTestMode);
     const videoEveryN = normalizeNaisteraVideoFrequency(options.videoEveryN ?? settings.naisteraVideoEveryN);
 
@@ -2058,6 +2065,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── Naistera: data URL refs ──
     // Priority order: user face → char face → NPC faces → user wardrobe → char wardrobe → context
+    const naisteraRefLabels = [];
     if (settings.apiType === 'naistera') {
         const getDataUrl = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return 'data:image/jpeg;base64,' + b64; }
@@ -2065,24 +2073,25 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             return b64 ? 'data:image/jpeg;base64,' + b64 : null;
         };
         const canPush = () => referenceDataUrls.length < MAX_GENERATION_REFERENCE_IMAGES;
+        const pushRef = (url, label) => { referenceDataUrls.push(url); naisteraRefLabels.push(label); };
         // 1. User face (ONLY if mentioned in prompt)
         if (userInPrompt && canPush()) {
             if (settings.naisteraSendUserAvatar) {
                 const d = await getUserAvatarDataUrl();
-                if (d) referenceDataUrls.push(d);
+                if (d) pushRef(d, `${userDisplayName} (user)`);
             } else {
                 const u = await getDataUrl(refs.userRef);
-                if (u) referenceDataUrls.push(u);
+                if (u) pushRef(u, `${userDisplayName} (user)`);
             }
         }
         // 2. Character face (ONLY if mentioned in prompt)
         if (charInPrompt && canPush()) {
             if (settings.naisteraSendCharAvatar) {
                 const d = await getCharacterAvatarDataUrl();
-                if (d) referenceDataUrls.push(d);
+                if (d) pushRef(d, `${charDisplayName} (character)`);
             } else {
                 const u = await getDataUrl(refs.charRef);
-                if (u) referenceDataUrls.push(u);
+                if (u) pushRef(u, `${charDisplayName} (character)`);
             }
         }
         // 3. NPC faces (matched against prompt)
@@ -2090,24 +2099,24 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
-            if (url) { referenceDataUrls.push(url); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
+            if (url) { pushRef(url, `${npc.name} (NPC)`); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
         }
         // 4. Wardrobe user outfit (ONLY if user in prompt)
         if (userInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageUser !== false) {
             const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-            if (userB64) referenceDataUrls.push(`data:image/png;base64,${userB64}`);
+            if (userB64) pushRef(`data:image/png;base64,${userB64}`, `${userDisplayName} outfit`);
         }
         // 5. Wardrobe bot outfit (ONLY if char in prompt)
         if (charInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageBot !== false) {
             const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-            if (botB64) referenceDataUrls.push(`data:image/png;base64,${botB64}`);
+            if (botB64) pushRef(`data:image/png;base64,${botB64}`, `${charDisplayName} outfit`);
         }
         // 6. Context refs (previous images)
         if (settings.imageContextEnabled) {
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'dataUrl', normalizeImageContextCount(settings.imageContextCount));
             for (const cr of contextRefs) {
                 if (!canPush()) break;
-                referenceDataUrls.push(cr);
+                pushRef(cr, 'previous scene');
             }
         }
     }
@@ -2122,7 +2131,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // Trim
     if (referenceImages.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceImages.length = MAX_GENERATION_REFERENCE_IMAGES; refLabels.length = MAX_GENERATION_REFERENCE_IMAGES; }
-    if (referenceDataUrls.length > MAX_GENERATION_REFERENCE_IMAGES) referenceDataUrls.length = MAX_GENERATION_REFERENCE_IMAGES;
+    if (referenceDataUrls.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceDataUrls.length = MAX_GENERATION_REFERENCE_IMAGES; naisteraRefLabels.length = MAX_GENERATION_REFERENCE_IMAGES; }
 
     // Video test mode
     const enableVideoTest = settings.apiType === 'naistera'
@@ -2151,7 +2160,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             onStatusUpdate?.(`Генерация${attempt > 0 ? ` (повтор ${attempt}/${maxRetries})` : ''}...`);
             let generated;
             if (settings.apiType === 'naistera') {
-                generated = await generateImageNaistera(prompt, style, { ...options, referenceImages: referenceDataUrls, videoTestMode: enableVideoTest, videoEveryN: settings.naisteraVideoEveryN });
+                generated = await generateImageNaistera(prompt, style, { ...options, referenceImages: referenceDataUrls, referenceLabels: naisteraRefLabels, videoTestMode: enableVideoTest, videoEveryN: settings.naisteraVideoEveryN });
             } else if (settings.apiType === 'gemini' || isGeminiModel(settings.model)) {
                 generated = await generateImageGemini(prompt, style, referenceImages, { ...options, refLabels, refNames });
             } else {
