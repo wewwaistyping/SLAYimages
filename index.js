@@ -2259,13 +2259,40 @@ function attachRegenButton(imgEl) {
         const origOpacity = imgEl.style.opacity;
         imgEl.style.opacity = '0.35';
 
+        // Floating overlay with spinner + status + live timer, placed inside the img wrap
+        // above the dimmed image. Matches the loading-placeholder timer format for consistency.
+        const overlay = document.createElement('div');
+        overlay.className = 'iig-regen-overlay';
+        overlay.innerHTML = `
+            <div class="iig-spinner-wrap"><div class="iig-spinner"></div></div>
+            <div class="iig-status">
+                <span class="iig-status-label">Перегенерация...</span>
+                <span class="iig-status-timer"></span>
+            </div>
+        `;
+        wrap.appendChild(overlay);
+        const overlayLabel = overlay.querySelector('.iig-status-label');
+        const overlayTimer = overlay.querySelector('.iig-status-timer');
+        const regenStart = Date.now();
+        const regenTSec = FETCH_TIMEOUT / 1000;
+        overlayTimer.textContent = `(0:00 / ${Math.floor(regenTSec/60)}:00${IS_IOS ? ', iOS' : ''})`;
+        const regenTimerId = setInterval(() => {
+            if (!overlayTimer.isConnected) { clearInterval(regenTimerId); return; }
+            const el = Math.floor((Date.now() - regenStart) / 1000);
+            if (el >= regenTSec) { overlayTimer.textContent = '(Timeout)'; clearInterval(regenTimerId); return; }
+            const m = Math.floor(el/60), s = el%60;
+            overlayTimer.textContent = `(${m}:${String(s).padStart(2,'0')} / ${Math.floor(regenTSec/60)}:00${IS_IOS ? ', iOS' : ''})`;
+        }, 1000);
+
         let newImagePath = null;
         let errorMsg = null;
         try {
-            const result = await generateImageWithRetry(data.prompt, data.style, () => {}, {
+            const result = await generateImageWithRetry(data.prompt, data.style, (s) => { if (overlayLabel?.isConnected) overlayLabel.textContent = s; }, {
                 aspectRatio: data.aspect_ratio, imageSize: data.image_size,
                 quality: data.quality, preset: data.preset, messageId,
             });
+            if (overlayLabel?.isConnected) overlayLabel.textContent = 'Сохранение...';
+            if (overlayTimer?.isConnected) overlayTimer.textContent = '';
             newImagePath = isGeneratedVideoResult(result)
                 ? await saveNaisteraMediaToFile(result.dataUrl, 'video')
                 : await saveImageToFile(result);
@@ -2273,6 +2300,8 @@ function attachRegenButton(imgEl) {
             errorMsg = err?.message || String(err);
             iigLog('ERROR', `Regen failed: ${errorMsg}`);
         }
+        clearInterval(regenTimerId);
+        overlay.remove();
 
         // The img may have been replaced in DOM by a swipe/edit during the await.
         // Always re-resolve to a live element before touching .src.
@@ -2764,10 +2793,13 @@ async function processMessageTags(messageId) {
         else mesTextEl.appendChild(loadingPlaceholder);
 
         const statusEl = loadingPlaceholder.querySelector('.iig-status');
+        const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
+        const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
         try {
-            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { statusEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
 
-            statusEl.textContent = 'Сохранение...';
+            labelEl.textContent = 'Сохранение...';
+            if (timerEl) timerEl.textContent = '';
 
             if (isGeneratedVideoResult(result)) {
                 const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
@@ -2852,8 +2884,11 @@ async function regenerateMessageImages(messageId) {
                 const loadingPlaceholder = createLoadingPlaceholder(tagId);
                 existingEl.replaceWith(loadingPlaceholder);
                 const statusEl = loadingPlaceholder.querySelector('.iig-status');
-                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { statusEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
-                statusEl.textContent = 'Сохранение...';
+                const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
+                const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
+                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+                labelEl.textContent = 'Сохранение...';
+                if (timerEl) timerEl.textContent = '';
 
                 if (isGeneratedVideoResult(result)) {
                     const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
