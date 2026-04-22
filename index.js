@@ -1806,24 +1806,87 @@ const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
 
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
-    const url = `${settings.endpoint.replace(/\/$/, '')}/v1/images/generations`;
-    const fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
-    let size = settings.size;
-    if (options.aspectRatio) {
-        if (options.aspectRatio === '16:9') size = '1792x1024';
-        else if (options.aspectRatio === '9:16') size = '1024x1792';
-        else if (options.aspectRatio === '1:1') size = '1024x1024';
+    const endpoint = settings.endpoint.replace(/\/$/, '');
+    const model = settings.model;
+    const aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
+    const imageSize = options.imageSize || settings.imageSize || '1K';
+
+    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
+    fullPrompt = `${fullPrompt}\n\n[aspect_ratio: ${aspectRatio}] [image_size: ${imageSize}]`;
+
+    // Build multimodal content with text + all reference images
+    const refLabels = options.refLabels || [];
+    const refNames = options.refNames || [];
+    const imgCount = Math.min(referenceImages.length, MAX_GENERATION_REFERENCE_IMAGES);
+
+    const instructions = [];
+    const imageParts = [];
+    for (let i = 0; i < imgCount; i++) {
+        const label = refLabels[i] || 'reference';
+        const name = refNames[i] || '';
+        let instruction = '';
+        if (label === 'char_face' || label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
+        else if (label === 'char_outfit' || label === 'user_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
+        else if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
+        else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
+        if (instruction) instructions.push(instruction);
+        imageParts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${referenceImages[i]}` } });
     }
-    const body = { model: settings.model, prompt: fullPrompt, n: 1, size, quality: options.quality || settings.quality, response_format: 'b64_json' };
-    if (referenceImages.length > 0) body.image = `data:image/png;base64,${referenceImages[0]}`;
+    if (instructions.length > 0) {
+        fullPrompt = `${instructions.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n${fullPrompt}`;
+    }
+
+    const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
+    const body = {
+        model,
+        messages: [{ role: 'user', content }],
+        modalities: ['image', 'text'],
+        stream: false,
+    };
+
+    const url = `${endpoint}/v1/chat/completions`;
+    iigLog('INFO', `OpenAI chat.completions: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
     const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
-    const dataList = result.data || [];
-    if (dataList.length === 0) { if (result.url) return result.url; throw new Error('No image data in response'); }
-    const imageObj = dataList[0];
-    if (imageObj.b64_json) return `data:image/png;base64,${imageObj.b64_json}`;
-    return imageObj.url;
+
+    // Parse — try multiple response shapes (OpenRouter, api.navy, Fireworks, OpenAI):
+    const msg = result?.choices?.[0]?.message;
+    if (msg) {
+        // 1. OpenRouter/api.navy style — images array with image_url.url
+        if (Array.isArray(msg.images) && msg.images.length > 0) {
+            const img = msg.images[0];
+            if (img?.image_url?.url) return img.image_url.url;
+            if (typeof img === 'string') return img;
+            if (img?.url) return img.url;
+            if (img?.b64_json) return `data:image/png;base64,${img.b64_json}`;
+        }
+        // 2. content array — look for image_url part
+        if (Array.isArray(msg.content)) {
+            for (const part of msg.content) {
+                if (part?.type === 'image_url' && part?.image_url?.url) return part.image_url.url;
+                if (part?.type === 'image' && part?.source?.data) return `data:${part.source.media_type || 'image/png'};base64,${part.source.data}`;
+            }
+        }
+        // 3. content string — may contain data URL or markdown image
+        if (typeof msg.content === 'string' && msg.content) {
+            const dataUrlMatch = msg.content.match(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+/);
+            if (dataUrlMatch) return dataUrlMatch[0];
+            const mdMatch = msg.content.match(/!\[[^\]]*\]\((https?:\/\/[^)]+|data:image\/[^)]+)\)/);
+            if (mdMatch) return mdMatch[1];
+            const urlMatch = msg.content.match(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?/i);
+            if (urlMatch) return urlMatch[0];
+        }
+        // 4. direct image_url on message
+        if (msg.image_url?.url) return msg.image_url.url;
+    }
+    // 5. legacy /v1/images/generations shape (in case a proxy still returns this)
+    if (Array.isArray(result?.data) && result.data.length > 0) {
+        const d = result.data[0];
+        if (d.b64_json) return `data:image/png;base64,${d.b64_json}`;
+        if (d.url) return d.url;
+    }
+    throw new Error('No image data in response (tried chat.completions message.images, content parts, content string, data[])');
 }
 
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
