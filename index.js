@@ -1804,6 +1804,43 @@ async function saveNaisteraMediaToFile(dataUrl, mediaKind = 'video', debugMeta =
 const VALID_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
 const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
 
+// Convert an external https URL to a data URL. Some proxies (linkapi, OpenAI DALL-E with response_format=url)
+// return image URLs instead of base64. Our saveImageToFile expects data URLs, so we download + encode first.
+async function fetchUrlAsDataUrl(url) {
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`fetch ${resp.status}`);
+        const blob = await resp.blob();
+        const buf = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+        }
+        return `data:${blob.type || 'image/png'};base64,${btoa(binary)}`;
+    } catch (e) {
+        iigLog('WARN', `fetchUrlAsDataUrl fetch failed (${e.message}), trying canvas fallback`);
+        // Canvas fallback — works if img CORS is allowed even when fetch is blocked
+        return await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+                    canvas.getContext('2d').drawImage(img, 0, 0);
+                    resolve(canvas.toDataURL('image/png'));
+                } catch (canvasErr) {
+                    reject(new Error(`Cannot save external image — CORS blocked both fetch and canvas. URL: ${String(url).slice(0, 120)}`));
+                }
+            };
+            img.onerror = () => reject(new Error(`Cannot load image from ${String(url).slice(0, 120)}`));
+            img.src = url;
+        });
+    }
+}
+
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const endpoint = settings.endpoint.replace(/\/$/, '');
@@ -1849,8 +1886,19 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
+    const found = extractImageFromChatResponse(result);
+    if (!found) throw new Error('No image data in response (tried chat.completions message.images, content parts, content string, data[])');
+    // If we got a bare https URL (some proxies hand back CDN links, e.g. linkapi→Alibaba OSS) — download and re-encode as data URL
+    if (typeof found === 'string' && /^https?:\/\//i.test(found)) {
+        iigLog('INFO', `Response was URL, fetching and encoding: ${found.slice(0, 80)}`);
+        return await fetchUrlAsDataUrl(found);
+    }
+    return found;
+}
 
-    // Parse — try multiple response shapes (OpenRouter, api.navy, Fireworks, OpenAI):
+// Extract image payload from a chat.completions-style response. Returns either a data URL or a bare URL,
+// or null if nothing found. Tries 5 common shapes used by different proxies.
+function extractImageFromChatResponse(result) {
     const msg = result?.choices?.[0]?.message;
     if (msg) {
         // 1. OpenRouter/api.navy style — images array with image_url.url
@@ -1868,7 +1916,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
                 if (part?.type === 'image' && part?.source?.data) return `data:${part.source.media_type || 'image/png'};base64,${part.source.data}`;
             }
         }
-        // 3. content string — may contain data URL or markdown image
+        // 3. content string — may contain data URL or markdown image or bare URL
         if (typeof msg.content === 'string' && msg.content) {
             const dataUrlMatch = msg.content.match(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+/);
             if (dataUrlMatch) return dataUrlMatch[0];
@@ -1886,7 +1934,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         if (d.b64_json) return `data:image/png;base64,${d.b64_json}`;
         if (d.url) return d.url;
     }
-    throw new Error('No image data in response (tried chat.completions message.images, content parts, content string, data[])');
+    return null;
 }
 
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
@@ -2023,6 +2071,98 @@ function createGeneratedMediaElement(result, tag) {
     img.className = 'iig-generated-image';
     img.src = result; img.alt = tag.prompt; img.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
     return img;
+}
+
+// Wrap a generated <img> (with data-iig-instruction) in a container and attach a top-left regen button.
+// Idempotent — safe to call multiple times on the same img. Works for newly-generated images AND
+// already-rendered ones (e.g. after page reload, chat swipe).
+function attachRegenButton(imgEl) {
+    if (!imgEl || imgEl.tagName !== 'IMG') return;
+    if (imgEl.dataset.iigRegenBound === '1') return;
+    const instr = imgEl.getAttribute('data-iig-instruction');
+    if (!instr) return;
+    if (!imgEl.parentNode) return;
+
+    // Wrap img in a span so we can position the button absolutely relative to it
+    const wrap = document.createElement('span');
+    wrap.className = 'iig-img-wrap';
+    imgEl.parentNode.insertBefore(wrap, imgEl);
+    wrap.appendChild(imgEl);
+
+    const btn = document.createElement('button');
+    btn.className = 'iig-regen-btn';
+    btn.type = 'button';
+    btn.title = 'Перегенерировать';
+    btn.innerHTML = '<i class="fa-solid fa-rotate"></i>';
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (btn.classList.contains('iig-regen-busy')) return;
+        btn.classList.add('iig-regen-busy');
+        const icon = btn.querySelector('i');
+        const origIconClass = icon.className;
+        icon.className = 'fa-solid fa-spinner iig-spin-anim';
+
+        // Parse the stored data-iig-instruction — robust against HTML-escaped quotes
+        let data;
+        try {
+            const decoded = String(imgEl.getAttribute('data-iig-instruction') || '')
+                .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+                .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
+            try { data = JSON.parse(decoded); }
+            catch(_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+        } catch (err) {
+            toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
+            icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
+        }
+
+        const mesEl = imgEl.closest('.mes');
+        const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : undefined;
+        const ctx = SillyTavern.getContext();
+        const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+        const origSrc = imgEl.src;
+        const origOpacity = imgEl.style.opacity;
+        imgEl.style.opacity = '0.35';
+
+        try {
+            const result = await generateImageWithRetry(data.prompt, data.style, () => {}, {
+                aspectRatio: data.aspect_ratio, imageSize: data.image_size,
+                quality: data.quality, preset: data.preset, messageId,
+            });
+            const imagePath = isGeneratedVideoResult(result)
+                ? await saveNaisteraMediaToFile(result.dataUrl, 'video')
+                : await saveImageToFile(result);
+            imgEl.src = imagePath;
+            imgEl.style.opacity = origOpacity;
+            // Persist the new src in the message so it survives page reloads
+            if (message && typeof message.mes === 'string' && origSrc) {
+                const escapedOrig = origSrc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const updatedMes = message.mes.replace(new RegExp(escapedOrig, 'g'), imagePath);
+                if (updatedMes !== message.mes) {
+                    message.mes = updatedMes;
+                    ctx.saveChatDebounced?.();
+                }
+            }
+            toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
+        } catch (err) {
+            imgEl.src = origSrc;
+            imgEl.style.opacity = origOpacity;
+            iigLog('ERROR', `Regen failed: ${err.message}`);
+            toastr.error(`Перегенерация упала: ${err.message}`, 'SLAY Images');
+        } finally {
+            icon.className = origIconClass;
+            btn.classList.remove('iig-regen-busy');
+        }
+    });
+    wrap.appendChild(btn);
+    imgEl.dataset.iigRegenBound = '1';
+}
+
+// Scan a message element (or root) for generated images and attach regen buttons to them.
+// Safe to call on already-bound images (attachRegenButton is idempotent).
+function attachRegenButtonsInRoot(root) {
+    if (!root) return;
+    const imgs = root.querySelectorAll('img.iig-generated-image[data-iig-instruction], img[data-iig-instruction]');
+    for (const img of imgs) attachRegenButton(img);
 }
 
 function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
@@ -2487,6 +2627,8 @@ async function processMessageTags(messageId) {
                 }
                 if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
                 loadingPlaceholder.replaceWith(img);
+                // Attach regen button (only meaningful when there's data-iig-instruction, i.e. new format)
+                if (img.getAttribute('data-iig-instruction')) attachRegenButton(img);
                 if (tag.isNewFormat) {
                     const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
                     replaceTagInMessageSource(message, tag, updatedTag);
@@ -3126,6 +3268,8 @@ function updateHeaderStatusDot() {
         initLightbox();
         updateHeaderStatusDot();
         initMobileSaveListeners();
+        // Attach regen buttons to pre-existing generated images in chat
+        setTimeout(() => attachRegenButtonsInRoot(document.getElementById('chat') || document.body), 400);
         iigLog('INFO', 'Slay Images extension loaded');
     });
 
@@ -3134,11 +3278,16 @@ function updateHeaderStatusDot() {
             restoreRefsFromLocalStorage();
             addButtonsToExistingMessages();
             renderRefSlots();
+            attachRegenButtonsInRoot(document.getElementById('chat') || document.body);
         }, 300);
     });
 
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, async (messageId) => {
         await onMessageReceived(messageId);
+        // After processing, attach regen buttons to any pre-existing images in THIS message
+        // (covers swipes, edits, reloaded messages)
+        const mesEl = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+        if (mesEl) attachRegenButtonsInRoot(mesEl);
     });
 
     iigLog('INFO', 'Slay Images initialized');

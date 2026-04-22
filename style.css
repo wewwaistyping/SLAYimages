@@ -319,6 +319,66 @@
     color: var(--slay-pink);
 }
 
+/* ── Regenerate button overlay on generated images ── */
+.iig-img-wrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
+}
+.iig-img-wrap > img,
+.iig-img-wrap > .iig-generated-image {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    transition: opacity .2s;
+}
+.iig-regen-btn {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .2s, background .2s, transform .15s;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    padding: 0;
+    z-index: 3;
+    line-height: 1;
+}
+.iig-img-wrap:hover .iig-regen-btn,
+.iig-img-wrap:focus-within .iig-regen-btn,
+.iig-regen-btn.iig-regen-busy {
+    opacity: 1;
+}
+.iig-regen-btn:hover {
+    background: rgba(244, 114, 182, 0.9);
+    transform: scale(1.08);
+    border-color: rgba(255, 255, 255, 0.45);
+}
+.iig-regen-btn.iig-regen-busy {
+    background: rgba(60, 60, 70, 0.8);
+    cursor: wait;
+}
+.iig-spin-anim {
+    animation: iig-spin 0.8s linear infinite;
+}
+/* On touch devices (no hover capability), keep the button faintly visible so tap is discoverable */
+@media (hover: none) {
+    .iig-regen-btn { opacity: 0.55; }
+    .iig-regen-btn:active { opacity: 1; transform: scale(0.95); }
+}
+
 .iig-key-toggle {
     padding: 5px 10px;
     cursor: pointer;
