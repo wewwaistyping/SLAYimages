@@ -66,10 +66,10 @@
     // Map preset -> pixel width (used as CSS var --sw-modal-width)
     const MODAL_WIDTH_MAP = Object.freeze({
         compact: '480px',
-        normal:  '560px',
-        wide:    '800px',
-        xwide:   '1100px',
-        full:    '96vw',
+        normal: '560px',
+        wide: '800px',
+        xwide: '1100px',
+        full: '96vw',
     });
     function swApplyModalWidth() {
         const s = swGetSettings();
@@ -258,7 +258,7 @@
                 reader.onerror = reject;
                 reader.readAsDataURL(blob);
             });
-        } catch(e) { swLog('WARN', `swLoadImageAsBase64 failed: ${path}`, e.message); return null; }
+        } catch (e) { swLog('WARN', `swLoadImageAsBase64 failed: ${path}`, e.message); return null; }
     }
 
     // ── Get outfit image src for display (path preferred, base64 fallback) ──
@@ -953,10 +953,12 @@
                 if (useGeminiFormat) {
                     const url = `${endpoint}/v1beta/models/${model}:generateContent`;
                     const body = {
-                        contents: [{ role: 'user', parts: [
-                            { inlineData: { mimeType: 'image/png', data: base64 } },
-                            { text: describePrompt }
-                        ]}],
+                        contents: [{
+                            role: 'user', parts: [
+                                { inlineData: { mimeType: 'image/png', data: base64 } },
+                                { text: describePrompt }
+                            ]
+                        }],
                         generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
                     };
                     const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -969,10 +971,12 @@
                         model, max_tokens: maxTokens,
                         messages: [
                             { role: 'system', content: describePrompt },
-                            { role: 'user', content: [
-                                { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                                { type: 'text', text: 'Describe the clothing in this image.' }
-                            ]}
+                            {
+                                role: 'user', content: [
+                                    { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+                                    { type: 'text', text: 'Describe the clothing in this image.' }
+                                ]
+                            }
                         ]
                     };
                     const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1016,10 +1020,12 @@
             try {
                 const messages = [
                     { role: 'system', content: describePrompt },
-                    { role: 'user', content: [
-                        { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                        { type: 'text', text: 'Describe the clothing in this image.' },
-                    ]},
+                    {
+                        role: 'user', content: [
+                            { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+                            { type: 'text', text: 'Describe the clothing in this image.' },
+                        ]
+                    },
                 ];
                 const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: maxTokens });
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
@@ -1148,7 +1154,7 @@
         let $btn = $('#sw-bar-btn');
         if ($btn.length === 0) {
             $btn = $('<div id="sw-bar-btn" title="Гардероб"><i class="fa-solid fa-shirt"></i></div>');
-            $btn.on('click touchend', function(e) { e.preventDefault(); e.stopPropagation(); swOpenModal(); });
+            $btn.on('click touchend', function (e) { e.preventDefault(); e.stopPropagation(); swOpenModal(); });
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
         }
@@ -1319,8 +1325,10 @@ const defaultSettings = Object.freeze({
     maxRetries: 0,
     retryDelay: 1000,
     // Gemini/nano-banana
-    sendCharAvatar: false,
-    sendUserAvatar: false,
+    sendCharAvatar: true,
+    sendUserAvatar: true,
+    sendCharRefOnlyIfMentioned: false,
+    sendUserRefOnlyIfMentioned: false,
     userAvatarFile: '',
     aspectRatio: '1:1',
     imageSize: '1K',
@@ -1342,7 +1350,7 @@ const defaultSettings = Object.freeze({
 });
 
 const MAX_CONTEXT_IMAGES = 3;
-const MAX_GENERATION_REFERENCE_IMAGES = 7;
+const MAX_GENERATION_REFERENCE_IMAGES = 5;
 const STYLE_BLOCK_RE = /\[\s*style\s*:\s*[^\]]*\]/gi;
 
 function injectStyleBlock(prompt, styleValue) {
@@ -1395,7 +1403,7 @@ function isGeminiModel(modelId) {
 }
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
-const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana']);
+const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
 const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org' });
 
@@ -1466,7 +1474,7 @@ function saveSettings() {
     }
     const context = SillyTavern.getContext();
     if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) {
-        try { _stSaveSettings(); } catch(e) { context.saveSettingsDebounced(); }
+        try { _stSaveSettings(); } catch (e) { context.saveSettingsDebounced(); }
     } else {
         context.saveSettingsDebounced();
     }
@@ -1481,7 +1489,7 @@ function persistRefsToLocalStorage() {
         const settings = getSettings();
         const refs = JSON.parse(JSON.stringify(settings.npcReferences || {}));
         localStorage.setItem(LS_KEY, JSON.stringify(refs));
-    } catch(e) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e.message); }
+    } catch (e) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e.message); }
 }
 
 function restoreRefsFromLocalStorage() {
@@ -1493,14 +1501,14 @@ function restoreRefsFromLocalStorage() {
         const settings = getSettings();
         settings.npcReferences = backup;
         iigLog('INFO', 'Refs restored from localStorage');
-    } catch(e) { iigLog('WARN', 'restoreRefsFromLocalStorage failed:', e.message); }
+    } catch (e) { iigLog('WARN', 'restoreRefsFromLocalStorage failed:', e.message); }
 }
 
 function initMobileSaveListeners() {
     const flush = () => {
         persistRefsToLocalStorage();
-        try { SillyTavern.getContext().saveSettingsDebounced(); } catch(e) {}
-        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { _stSaveSettings(); } catch(e) {} }
+        try { SillyTavern.getContext().saveSettingsDebounced(); } catch (e) { }
+        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { _stSaveSettings(); } catch (e) { } }
     };
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
     window.addEventListener('pagehide', flush);
@@ -1514,6 +1522,25 @@ function getActiveCharacterName() {
         return ctx.characters[ctx.characterId].name || '';
     }
     return '';
+}
+
+function getActiveUserName() {
+    const ctx = SillyTavern.getContext();
+    return String(
+        ctx.name1
+        || ctx.user_name
+        || ctx.chatMetadata?.user_name
+        || ctx.groups?.find?.(g => g.id === ctx.groupId)?.name
+        || ''
+    ).trim();
+}
+
+function getDefaultCharRefName(refs = getCurrentCharacterRefs()) {
+    return String(refs?.charRef?.name || getActiveCharacterName() || 'Character').trim();
+}
+
+function getDefaultUserRefName(refs = getCurrentCharacterRefs()) {
+    return String(refs?.userRef?.name || getActiveUserName() || 'User').trim();
 }
 
 const EMPTY_REFS = () => ({
@@ -1746,7 +1773,7 @@ async function loadRefImageAsBase64(path) {
             reader.onerror = reject;
             reader.readAsDataURL(blob);
         });
-    } catch(e) { iigLog('WARN', `loadRefImageAsBase64 failed for ${path}:`, e.message); return null; }
+    } catch (e) { iigLog('WARN', `loadRefImageAsBase64 failed for ${path}:`, e.message); return null; }
 }
 
 // ── Avatar helpers (from sillyimages-master) ──
@@ -1805,6 +1832,46 @@ async function getUserAvatarDataUrl() {
         if (settings.userAvatarFile) return await imageUrlToDataUrl(`/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`);
         return null;
     } catch (error) { console.error('[IIG] getUserAvatarDataUrl error:', error); return null; }
+}
+
+function hasManualReference(ref) {
+    return Boolean(ref?.imagePath || ref?.imageBase64 || ref?.imageData);
+}
+
+async function getPreferredCharacterReferenceBase64(refs, settings) {
+    if (!settings.sendCharAvatar) return null;
+    if (hasManualReference(refs?.charRef)) {
+        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
+        if (manual) return manual;
+    }
+    return await getCharacterAvatarBase64();
+}
+
+async function getPreferredUserReferenceBase64(refs, settings) {
+    if (!settings.sendUserAvatar) return null;
+    if (hasManualReference(refs?.userRef)) {
+        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
+        if (manual) return manual;
+    }
+    return await getUserAvatarBase64();
+}
+
+async function getPreferredCharacterReferenceDataUrl(refs, settings) {
+    if (!settings.sendCharAvatar) return null;
+    if (hasManualReference(refs?.charRef)) {
+        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
+        if (manual) return `data:image/jpeg;base64,${manual}`;
+    }
+    return await getCharacterAvatarDataUrl();
+}
+
+async function getPreferredUserReferenceDataUrl(refs, settings) {
+    if (!settings.sendUserAvatar) return null;
+    if (hasManualReference(refs?.userRef)) {
+        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
+        if (manual) return `data:image/jpeg;base64,${manual}`;
+    }
+    return await getUserAvatarDataUrl();
 }
 
 async function fetchUserAvatars() {
@@ -1893,7 +1960,7 @@ async function saveImageToFile(dataUrl, debugMeta = {}) {
     });
     if (!response.ok) {
         const raw = await response.text().catch(() => '');
-        let pe = {}; try { pe = raw ? JSON.parse(raw) : {}; } catch(_) {}
+        let pe = {}; try { pe = raw ? JSON.parse(raw) : {}; } catch (_) { }
         throw new Error(pe?.error || pe?.detail || raw || `Upload failed: ${response.status}`);
     }
     const result = await response.json();
@@ -1962,7 +2029,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const settings = getSettings();
     const endpoint = settings.endpoint.replace(/\/$/, '');
     const model = settings.model;
-    const aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
+    const aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     const imageSize = options.imageSize || settings.imageSize || '1K';
 
     let fullPrompt = injectStyleBlock(prompt, style);
@@ -2058,8 +2125,8 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const settings = getSettings();
     const model = settings.model;
     const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent`;
-    let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
-    if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) aspectRatio = VALID_ASPECT_RATIOS.includes(settings.aspectRatio) ? settings.aspectRatio : '1:1';
+    let aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
+    if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) aspectRatio = '1:1';
     let imageSize = options.imageSize || settings.imageSize || '1K';
     if (!VALID_IMAGE_SIZES.includes(imageSize)) imageSize = VALID_IMAGE_SIZES.includes(settings.imageSize) ? settings.imageSize : '1K';
 
@@ -2118,7 +2185,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
     const settings = getSettings();
     const endpoint = getEffectiveEndpoint(settings);
     const url = endpoint.endsWith('/api/generate') ? endpoint : `${endpoint}/api/generate`;
-    const aspectRatio = options.aspectRatio || settings.naisteraAspectRatio || '1:1';
+    const aspectRatio = settings.naisteraAspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.naisteraAspectRatio || '1:1');
     const model = normalizeNaisteraModel(options.model || settings.naisteraModel || 'grok');
     const referenceImages = options.referenceImages || [];
     const referenceLabels = options.referenceLabels || [];
@@ -2143,7 +2210,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
     } catch (error) {
         const pageOrigin = window.location.origin;
         let endpointOrigin = endpoint;
-        try { endpointOrigin = new URL(url, window.location.href).origin; } catch (pe) {}
+        try { endpointOrigin = new URL(url, window.location.href).origin; } catch (pe) { }
         throw new Error(`Network/CORS error requesting ${endpointOrigin} from ${pageOrigin}. Original: ${error?.message || 'Failed to fetch'}`);
     }
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
@@ -2270,7 +2337,7 @@ function attachRegenButton(imgEl) {
                 .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
                 .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
             try { data = JSON.parse(decoded); }
-            catch(_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+            catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
         } catch (err) {
             toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
             icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
@@ -2305,13 +2372,13 @@ function attachRegenButton(imgEl) {
         const overlayTimer = overlay.querySelector('.iig-status-timer');
         const regenStart = Date.now();
         const regenTSec = FETCH_TIMEOUT / 1000;
-        overlayTimer.textContent = `(0:00 / ${Math.floor(regenTSec/60)}:00${IS_IOS ? ', iOS' : ''})`;
+        overlayTimer.textContent = `(0:00 / ${Math.floor(regenTSec / 60)}:00${IS_IOS ? ', iOS' : ''})`;
         const regenTimerId = setInterval(() => {
             if (!overlayTimer.isConnected) { clearInterval(regenTimerId); return; }
             const el = Math.floor((Date.now() - regenStart) / 1000);
             if (el >= regenTSec) { overlayTimer.textContent = '(Timeout)'; clearInterval(regenTimerId); return; }
-            const m = Math.floor(el/60), s = el%60;
-            overlayTimer.textContent = `(${m}:${String(s).padStart(2,'0')} / ${Math.floor(regenTSec/60)}:00${IS_IOS ? ', iOS' : ''})`;
+            const m = Math.floor(el / 60), s = el % 60;
+            overlayTimer.textContent = `(${m}:${String(s).padStart(2, '0')} / ${Math.floor(regenTSec / 60)}:00${IS_IOS ? ', iOS' : ''})`;
         }, 1000);
 
         let newImagePath = null;
@@ -2408,128 +2475,136 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── Determine which characters are mentioned in the prompt (used for refs AND descriptions) ──
     const refs = getCurrentCharacterRefs();
-    const charDisplayName = refs.charRef?.name || getActiveCharacterName() || 'Character';
-    const userDisplayName = refs.userRef?.name || 'User';
+    const charDisplayName = getDefaultCharRefName(refs);
+    const userDisplayName = getDefaultUserRefName(refs);
     const lowerPrompt = prompt.toLowerCase();
     const charNameWords = charDisplayName.split(/\s+/).filter(w => w.length > 2);
     const userNameWords = userDisplayName.split(/\s+/).filter(w => w.length > 2);
     const charInPrompt = charNameWords.length > 0 && charNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
     const userInPrompt = userNameWords.length > 0 && userNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
+    const shouldSendCharReference = settings.sendCharAvatar && (!settings.sendCharRefOnlyIfMentioned || charInPrompt);
+    const shouldSendUserReference = settings.sendUserAvatar && (!settings.sendUserRefOnlyIfMentioned || userInPrompt);
     iigLog('INFO', `Prompt mentions: char "${charDisplayName}"=${charInPrompt}, user "${userDisplayName}"=${userInPrompt}`);
 
     // ── Multimodal refs (base64 + labels) for Gemini AND OpenAI-compatible chat.completions ──
     if (settings.apiType !== 'naistera') {
-
-        const getB64 = async (ref) => {
-            if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return b64; }
-            return ref?.imageBase64 || ref?.imageData || null;
+        const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
+        const pushRef = (image, label, name = '') => {
+            if (!image || !canPush()) return false;
+            referenceImages.push(image);
+            refLabels.push(label);
+            refNames.push(name);
+            return true;
         };
 
-        // 1. Character face + outfit (only if mentioned in prompt)
-        if (charInPrompt) {
-            if (settings.sendCharAvatar) {
-                const charAvatar = await getCharacterAvatarBase64();
-                if (charAvatar) { referenceImages.push(charAvatar); refLabels.push('char_face'); refNames.push(charDisplayName); }
-            }
-            let charOutfitSent = false;
-            if (swS.sendOutfitImageBot !== false && window.slayWardrobe?.isReady()) {
+        // 1. Character avatar
+        if (canPush()) {
+            const charReference = shouldSendCharReference ? await getPreferredCharacterReferenceBase64(refs, settings) : null;
+            pushRef(charReference, 'char_face', charDisplayName);
+        }
+
+        // 2. User avatar
+        if (canPush()) {
+            const userReference = shouldSendUserReference ? await getPreferredUserReferenceBase64(refs, settings) : null;
+            pushRef(userReference, 'user_face', userDisplayName);
+        }
+
+        // 3. Wardrobe
+        if (window.slayWardrobe?.isReady()) {
+            if (canPush() && swS.sendOutfitImageBot !== false) {
+                let pushed = false;
                 const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-                if (botB64) { referenceImages.push(botB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); charOutfitSent = true; }
+                if (botB64) pushed = pushRef(botB64, 'char_outfit', charDisplayName);
+                if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
+                    if (pushRef(collageB64, 'char_outfit', charDisplayName)) iigLog('INFO', 'Collage sent for char');
+                }
             }
-            if (!charOutfitSent && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
-                if (collageB64) { referenceImages.push(collageB64); refLabels.push('char_outfit'); refNames.push(charDisplayName); iigLog('INFO', 'Collage sent for char'); }
-            }
-            if (!settings.sendCharAvatar) {
-                const charB64 = await getB64(refs.charRef);
-                if (charB64) { referenceImages.push(charB64); refLabels.push('npc_char'); refNames.push(charDisplayName); }
+            if (canPush() && swS.sendOutfitImageUser !== false) {
+                let pushed = false;
+                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+                if (userB64) pushed = pushRef(userB64, 'user_outfit', userDisplayName);
+                if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('user');
+                    if (pushRef(collageB64, 'user_outfit', userDisplayName)) iigLog('INFO', 'Collage sent for user');
+                }
             }
         }
 
-        // 2. User face + outfit (only if mentioned in prompt)
-        if (userInPrompt) {
-            if (settings.sendUserAvatar) {
-                const userAvatar = await getUserAvatarBase64();
-                if (userAvatar) { referenceImages.push(userAvatar); refLabels.push('user_face'); refNames.push(userDisplayName); }
-            }
-            let userOutfitSent = false;
-            if (swS.sendOutfitImageUser !== false && window.slayWardrobe?.isReady()) {
-                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-                if (userB64) { referenceImages.push(userB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); userOutfitSent = true; }
-            }
-            if (!userOutfitSent && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                const collageB64 = await window.slayWardrobe.getCollageBase64('user');
-                if (collageB64) { referenceImages.push(collageB64); refLabels.push('user_outfit'); refNames.push(userDisplayName); iigLog('INFO', 'Collage sent for user'); }
-            }
-            if (!settings.sendUserAvatar) {
-                const userB64 = await getB64(refs.userRef);
-                if (userB64) { referenceImages.push(userB64); refLabels.push('npc_user'); refNames.push(userDisplayName); }
-            }
-        }
-        // 6. Matched NPCs
+        // 4. Matched NPCs
         const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
-            if (referenceImages.length >= MAX_GENERATION_REFERENCE_IMAGES) break;
+            if (!canPush()) break;
             const b64 = npc.imagePath ? await loadRefImageAsBase64(npc.imagePath) : (npc.imageBase64 || npc.imageData);
-            if (b64) { referenceImages.push(b64); refLabels.push('npc_matched'); refNames.push(npc.name || 'NPC'); iigLog('INFO', `NPC matched: ${npc.name}`); }
+            if (pushRef(b64, 'npc_matched', npc.name || 'NPC')) iigLog('INFO', `NPC matched: ${npc.name}`);
         }
-        // 7. Context images
+        // 5. Context images
         if (settings.imageContextEnabled) {
             const contextCount = normalizeImageContextCount(settings.imageContextCount);
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'base64', contextCount);
-            for (const cr of contextRefs) { referenceImages.push(cr); refLabels.push('context'); refNames.push(''); }
+            for (const cr of contextRefs) {
+                if (!pushRef(cr, 'context', '')) break;
+            }
         }
     }
 
     // ── Naistera: data URL refs ──
-    // Priority order: user face → char face → NPC faces → user wardrobe → char wardrobe → context
+    // Priority order: char face → user face → wardrobe → NPC faces → context
     const naisteraRefLabels = [];
-    if (settings.apiType === 'naistera') {
+    const currentNaisteraModelForRefs = normalizeNaisteraModel(options.model || settings.naisteraModel);
+    const supportsNaisteraRefs = currentNaisteraModelForRefs === 'grok' || currentNaisteraModelForRefs === 'nano banana';
+    if (settings.apiType === 'naistera' && supportsNaisteraRefs) {
         const getDataUrl = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return 'data:image/jpeg;base64,' + b64; }
             const b64 = ref?.imageBase64 || ref?.imageData;
             return b64 ? 'data:image/jpeg;base64,' + b64 : null;
         };
         const canPush = () => referenceDataUrls.length < MAX_GENERATION_REFERENCE_IMAGES;
-        const pushRef = (url, label) => { referenceDataUrls.push(url); naisteraRefLabels.push(label); };
-        // 1. User face (ONLY if mentioned in prompt)
-        if (userInPrompt && canPush()) {
-            if (settings.naisteraSendUserAvatar) {
-                const d = await getUserAvatarDataUrl();
-                if (d) pushRef(d, `${userDisplayName} (user)`);
-            } else {
-                const u = await getDataUrl(refs.userRef);
-                if (u) pushRef(u, `${userDisplayName} (user)`);
+        const pushRef = (url, label) => {
+            if (!url || !canPush()) return false;
+            referenceDataUrls.push(url);
+            naisteraRefLabels.push(label);
+            return true;
+        };
+        // 1. Character avatar
+        if (canPush()) {
+            const u = shouldSendCharReference ? await getPreferredCharacterReferenceDataUrl(refs, settings) : null;
+            if (u) pushRef(u, `${charDisplayName} (character)`);
+        }
+        // 2. User avatar
+        if (canPush()) {
+            const u = shouldSendUserReference ? await getPreferredUserReferenceDataUrl(refs, settings) : null;
+            if (u) pushRef(u, `${userDisplayName} (user)`);
+        }
+        // 3. Wardrobe
+        if (window.slayWardrobe?.isReady()) {
+            if (canPush() && swS.sendOutfitImageBot !== false) {
+                let pushed = false;
+                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
+                if (botB64) pushed = pushRef(`data:image/png;base64,${botB64}`, `${charDisplayName} outfit`);
+                if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
+                    if (pushRef(collageB64 ? `data:image/png;base64,${collageB64}` : null, `${charDisplayName} outfit`)) iigLog('INFO', 'Collage sent for char');
+                }
+            }
+            if (canPush() && swS.sendOutfitImageUser !== false) {
+                let pushed = false;
+                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+                if (userB64) pushed = pushRef(`data:image/png;base64,${userB64}`, `${userDisplayName} outfit`);
+                if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('user');
+                    if (pushRef(collageB64 ? `data:image/png;base64,${collageB64}` : null, `${userDisplayName} outfit`)) iigLog('INFO', 'Collage sent for user');
+                }
             }
         }
-        // 2. Character face (ONLY if mentioned in prompt)
-        if (charInPrompt && canPush()) {
-            if (settings.naisteraSendCharAvatar) {
-                const d = await getCharacterAvatarDataUrl();
-                if (d) pushRef(d, `${charDisplayName} (character)`);
-            } else {
-                const u = await getDataUrl(refs.charRef);
-                if (u) pushRef(u, `${charDisplayName} (character)`);
-            }
-        }
-        // 3. NPC faces (matched against prompt)
+        // 4. NPC faces (matched against prompt)
         const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
             if (url) { pushRef(url, `${npc.name} (NPC)`); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
         }
-        // 4. Wardrobe user outfit (ONLY if user in prompt)
-        if (userInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageUser !== false) {
-            const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
-            if (userB64) pushRef(`data:image/png;base64,${userB64}`, `${userDisplayName} outfit`);
-        }
-        // 5. Wardrobe bot outfit (ONLY if char in prompt)
-        if (charInPrompt && canPush() && window.slayWardrobe?.isReady() && swS.sendOutfitImageBot !== false) {
-            const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
-            if (botB64) pushRef(`data:image/png;base64,${botB64}`, `${charDisplayName} outfit`);
-        }
-        // 6. Context refs (previous images)
+        // 5. Context refs (previous images)
         if (settings.imageContextEnabled) {
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'dataUrl', normalizeImageContextCount(settings.imageContextCount));
             for (const cr of contextRefs) {
@@ -2542,7 +2617,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // (OpenAI refs now collected in the unified multimodal block above)
 
     // Trim
-    if (referenceImages.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceImages.length = MAX_GENERATION_REFERENCE_IMAGES; refLabels.length = MAX_GENERATION_REFERENCE_IMAGES; }
+    if (referenceImages.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceImages.length = MAX_GENERATION_REFERENCE_IMAGES; refLabels.length = MAX_GENERATION_REFERENCE_IMAGES; refNames.length = MAX_GENERATION_REFERENCE_IMAGES; }
     if (referenceDataUrls.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceDataUrls.length = MAX_GENERATION_REFERENCE_IMAGES; naisteraRefLabels.length = MAX_GENERATION_REFERENCE_IMAGES; }
 
     // Video test mode
@@ -2582,7 +2657,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             if (isGeneratedVideoResult(generated)) {
                 iigLog('INFO', `Result: video, mime=${generated.contentType}`);
             } else if (typeof generated === 'string' && generated.startsWith('data:')) {
-                try { const p = parseImageDataUrl(generated); iigLog('INFO', `Result: mime=${p.mimeType} b64len=${p.base64Data.length}`); } catch (e) {}
+                try { const p = parseImageDataUrl(generated); iigLog('INFO', `Result: mime=${p.mimeType} b64len=${p.base64Data.length}`); } catch (e) { }
             }
             return generated;
         } catch (error) {
@@ -2692,7 +2767,7 @@ async function parseImageTags(text, options = {}) {
     return tags;
 }
 
-async function checkFileExists(path) { try { const r = await fetch(path, { method: 'HEAD' }); return r.ok; } catch(e) { return false; } }
+async function checkFileExists(path) { try { const r = await fetch(path, { method: 'HEAD' }); return r.ok; } catch (e) { return false; } }
 
 // ── Error image path ──
 let _cachedErrorImagePath = null;
@@ -2724,7 +2799,7 @@ function getErrorImagePath() {
     _cachedErrorImagePath = possiblePaths[0];
     (async () => {
         for (const path of possiblePaths) {
-            try { const resp = await fetch(path, { method: 'HEAD' }); if (resp.ok) { _cachedErrorImagePath = path; return; } } catch(e) {}
+            try { const resp = await fetch(path, { method: 'HEAD' }); if (resp.ok) { _cachedErrorImagePath = path; return; } } catch (e) { }
         }
     })();
     return _cachedErrorImagePath;
@@ -2749,11 +2824,11 @@ function createLoadingPlaceholder(tagId) {
         if (!timerEl.isConnected) { clearInterval(placeholder._timerInterval); return; }
         const el = Math.floor((Date.now() - startTime) / 1000);
         if (el >= tSec) { timerEl.textContent = "(Timeout)"; clearInterval(placeholder._timerInterval); return; }
-        const m = Math.floor(el/60), s = el%60;
-        timerEl.textContent = `(${m}:${String(s).padStart(2,"0")} / ${Math.floor(tSec/60)}:00${IS_IOS ? ", iOS" : ""})`;
+        const m = Math.floor(el / 60), s = el % 60;
+        timerEl.textContent = `(${m}:${String(s).padStart(2, "0")} / ${Math.floor(tSec / 60)}:00${IS_IOS ? ", iOS" : ""})`;
     }, 1000);
     // Seed with initial value so the user sees the timer immediately (before first tick)
-    timerEl.textContent = `(0:00 / ${Math.floor(tSec/60)}:00${IS_IOS ? ", iOS" : ""})`;
+    timerEl.textContent = `(0:00 / ${Math.floor(tSec / 60)}:00${IS_IOS ? ", iOS" : ""})`;
     return placeholder;
 }
 
@@ -2805,7 +2880,7 @@ async function processMessageTags(messageId) {
                     const decoded = instruction.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
                     const normalizedSearch = searchPrompt.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
                     if (decoded.includes(normalizedSearch)) { targetElement = img; break; }
-                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (d.prompt?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch(e) {}
+                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (d.prompt?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
                     if (instruction.includes(searchPrompt)) { targetElement = img; break; }
                 }
             }
@@ -2838,7 +2913,7 @@ async function processMessageTags(messageId) {
             if (isGeneratedVideoResult(result)) {
                 const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
                 let posterPath = '';
-                if (result.posterDataUrl) { try { posterPath = await saveImageToFile(result.posterDataUrl); } catch(e) {} }
+                if (result.posterDataUrl) { try { posterPath = await saveImageToFile(result.posterDataUrl); } catch (e) { } }
                 const videoEl = createGeneratedMediaElement({ ...result, dataUrl: videoPath }, tag);
                 if (posterPath) videoEl.poster = posterPath;
                 if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
@@ -2997,6 +3072,8 @@ async function onMessageReceived(messageId) {
 
 function renderRefSlots() {
     const settings = getCurrentCharacterRefs();
+    const charDisplayName = getActiveCharacterName() || 'Character';
+    const userDisplayName = getActiveUserName() || 'User';
     const setThumb = (slot, ref) => {
         const thumb = slot?.querySelector('.iig-ref-thumb');
         const wrap = slot?.querySelector('.iig-ref-thumb-wrap');
@@ -3008,9 +3085,19 @@ function renderRefSlots() {
         if (wrap) wrap.classList.toggle('has-image', !!(ref?.imagePath || ref?.imageBase64 || ref?.imageData));
     };
     const charSlot = document.querySelector('.iig-ref-slot[data-ref-type="char"]');
-    if (charSlot) { setThumb(charSlot, settings.charRef); charSlot.querySelector('.iig-ref-name').value = settings.charRef?.name || ''; }
+    if (charSlot) {
+        setThumb(charSlot, settings.charRef);
+        charSlot.querySelector('.iig-ref-name').value = settings.charRef?.name || '';
+        const label = charSlot.querySelector('.iig-ref-label');
+        if (label) label.textContent = charDisplayName;
+    }
     const userSlot = document.querySelector('.iig-ref-slot[data-ref-type="user"]');
-    if (userSlot) { setThumb(userSlot, settings.userRef); userSlot.querySelector('.iig-ref-name').value = settings.userRef?.name || ''; }
+    if (userSlot) {
+        setThumb(userSlot, settings.userRef);
+        userSlot.querySelector('.iig-ref-name').value = settings.userRef?.name || '';
+        const label = userSlot.querySelector('.iig-ref-label');
+        if (label) label.textContent = userDisplayName;
+    }
     for (let i = 0; i < 4; i++) {
         const slot = document.querySelector(`.iig-ref-slot[data-ref-type="npc"][data-npc-index="${i}"]`);
         if (!slot) continue;
@@ -3045,16 +3132,17 @@ function createSettingsUI() {
         <div class="inline-drawer-content">
             <div class="iig-settings">
                 <label class="checkbox_label"><input type="checkbox" id="slay_enabled" ${settings.enabled ? 'checked' : ''}><span>Включить генерацию</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="slay_external_blocks" ${settings.externalBlocks ? 'checked' : ''}><span>External blocks (extblocks)</span></label>
-                <hr>
+                <div id="slay_settings_body" class="${settings.enabled ? '' : 'iig-hidden'}">
+                    <label class="checkbox_label"><input type="checkbox" id="slay_external_blocks" ${settings.externalBlocks ? 'checked' : ''}><span>External blocks (extblocks)</span></label>
+                    <hr>
 
-                <!-- API -->
+                    <!-- API -->
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-plug"></i> API</h4>
-                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini / Nano-Banana</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera / Grok</option></select></div>
+                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option></select></div>
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                    <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera/Grok: вставьте токен из Telegram-бота.</p>
+                    <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
                     <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model" class="flex1">${settings.model ? `<option value="${sanitizeForHtml(settings.model)}" selected>${sanitizeForHtml(settings.model)}</option>` : '<option value="">-- Выберите --</option>'}</select><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить"><i class="fa-solid fa-sync"></i></div></div>
                     <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
                 </div>
@@ -3066,18 +3154,26 @@ function createSettingsUI() {
                     <div class="flex-row ${settings.apiType !== 'openai' ? 'iig-hidden' : ''}" id="slay_size_row"><label>Размер</label><select id="slay_size" class="flex1"><option value="1024x1024" ${settings.size === '1024x1024' ? 'selected' : ''}>1024x1024</option><option value="1792x1024" ${settings.size === '1792x1024' ? 'selected' : ''}>1792x1024</option><option value="1024x1792" ${settings.size === '1024x1792' ? 'selected' : ''}>1024x1792</option><option value="512x512" ${settings.size === '512x512' ? 'selected' : ''}>512x512</option></select></div>
                     <div class="flex-row ${settings.apiType !== 'openai' ? 'iig-hidden' : ''}" id="slay_quality_row"><label>Качество</label><select id="slay_quality" class="flex1"><option value="standard" ${settings.quality === 'standard' ? 'selected' : ''}>Standard</option><option value="hd" ${settings.quality === 'hd' ? 'selected' : ''}>HD</option></select></div>
                     <div id="slay_gemini_params" class="${settings.apiType !== 'gemini' ? 'iig-hidden' : ''}">
-                        <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
+                        <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="auto" ${(settings.aspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
                         <div class="flex-row"><label>Разрешение</label><select id="slay_image_size" class="flex1"><option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K</option><option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option><option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option></select></div>
                     </div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option></select></div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
                     <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;"><i class="fa-solid fa-palette"></i> Выбрать</div></div></div>
                 </div>
 
                 <!-- NPC refs -->
                 <div id="slay_refs_section" class="iig-refs">
                     <h4><i class="fa-solid fa-user-group"></i> Референсы персонажей</h4>
-                    <p class="hint">Загрузите фото для консистентной генерации. Макс 5 на запрос. Char и User отправляются всегда; NPC — если имя в промпте.</p>
+                    <label class="checkbox_label"><input type="checkbox" id="slay_send_char_ref" ${settings.sendCharAvatar !== false ? 'checked' : ''}><span>Отправлять референс бота</span></label>
+                    <div id="slay_send_char_ref_if_mentioned_row" class="${settings.sendCharAvatar !== false ? '' : 'iig-hidden'}">
+                        <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_send_char_ref_if_mentioned" ${settings.sendCharRefOnlyIfMentioned ? 'checked' : ''}><span>Отправлять, если имя бота есть в промпте картинки</span></label>
+                    </div>
+                    <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_send_user_ref" ${settings.sendUserAvatar !== false ? 'checked' : ''}><span>Отправлять референс пользователя</span></label>
+                    <div id="slay_send_user_ref_if_mentioned_row" class="${settings.sendUserAvatar !== false ? '' : 'iig-hidden'}">
+                        <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_send_user_ref_if_mentioned" ${settings.sendUserRefOnlyIfMentioned ? 'checked' : ''}><span>Отправлять, если имя пользователя есть в промпте картинки</span></label>
+                    </div>
+                    <p class="hint">По умолчанию, для {{char}} и {{user}} отправляются картинки из карточек. Можно загрузить кастомные, чтобы отправлялись они.<br><br>Референсы NPC будут отправляться только когда в промпте на генерацию картинки упомянуто их имя.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
                             <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
@@ -3091,7 +3187,7 @@ function createSettingsUI() {
                 <!-- Wardrobe -->
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-shirt"></i> Гардероб</h4>
-                    <p class="hint">Загрузите аутфиты для бота и юзера. Активный аутфит отправляется как reference + описание в промпт.</p>
+                    <p class="hint" id="slay_wardrobe_hint">Загрузите аутфиты для бота и юзера. Изображение активного аутфита отправится как референс, а словесное описание будет добавлено в промпт.</p>
                     <div class="flex-row"><div id="slay_sw_open_wardrobe" class="menu_button" style="width:100%;"><i class="fa-solid fa-shirt"></i> Открыть гардероб</div></div>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
                     <div id="slay_sw_describe_prompt_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:6px;">
@@ -3136,8 +3232,6 @@ function createSettingsUI() {
                     <div class="flex-row ${settings.imageContextEnabled ? '' : 'iig-hidden'}" id="slay_image_context_count_row"><label>Кол-во (макс ${MAX_CONTEXT_IMAGES})</label><input type="number" id="slay_image_context_count" class="text_pole flex1" value="${settings.imageContextCount}" min="1" max="${MAX_CONTEXT_IMAGES}"></div>
                 </div>
 
-                <!-- Avatar refs removed — char/user refs + wardrobe cover this -->
-
                 <!-- Naistera video -->
                 <div id="slay_naistera_video_section" class="iig-section ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">
                     <h4><i class="fa-solid fa-video"></i> Видео (Naistera)</h4>
@@ -3159,9 +3253,7 @@ function createSettingsUI() {
                     <h4><i class="fa-solid fa-bug"></i> Отладка</h4>
                     <div id="slay_export_logs" class="menu_button"><i class="fa-solid fa-download"></i> Экспорт логов</div>
                 </div>
-
-                <div id="slay_manual_save" class="menu_button" style="width:100%;text-align:center;margin-bottom:6px;background:#2a6a2a;"><i class="fa-solid fa-floppy-disk"></i> Сохранить настройки</div>
-                <p id="slay_save_status" class="hint" style="text-align:center;font-size:0.85em;min-height:1.2em;"></p>
+                </div>
                 <p class="hint" style="text-align:center;opacity:0.5;margin-top:4px;">v4.0.0 by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a> + <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a> + Wewwa</p>
                 <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
@@ -3297,13 +3389,13 @@ async function openStylePickerModal() {
     try {
         const html = await fetch(BASE).then(r => r.text());
         styles = parseStyles(html);
-        try { localStorage.setItem(CACHE_KEY, JSON.stringify(styles)); } catch(e) {}
-    } catch(err) {
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify(styles)); } catch (e) { }
+    } catch (err) {
         fetchErr = err;
         try {
             const cached = localStorage.getItem(CACHE_KEY);
             if (cached) { styles = JSON.parse(cached); iigLog('WARN', `Style fetch failed, loaded ${styles.length} styles from cache`); }
-        } catch(e) {}
+        } catch (e) { }
         if (!styles.length) {
             overlay.querySelector('.slay-style-body').innerHTML = `<p style="padding:16px;opacity:.6;">Ошибка загрузки: ${fetchErr.message}</p>`;
             return;
@@ -3443,14 +3535,30 @@ async function openStylePickerModal() {
     renderGrid();
 }
 
+function updateReferenceOptionVisibility() {
+    const charRow = document.getElementById('slay_send_char_ref_if_mentioned_row');
+    const userRow = document.getElementById('slay_send_user_ref_if_mentioned_row');
+    const charEnabled = document.getElementById('slay_send_char_ref')?.checked;
+    const userEnabled = document.getElementById('slay_send_user_ref')?.checked;
+    charRow?.classList.toggle('iig-hidden', !charEnabled);
+    userRow?.classList.toggle('iig-hidden', !userEnabled);
+}
+
 function bindSettingsEvents() {
     const settings = getSettings();
+    updateReferenceOptionVisibility();
 
     const updateVisibility = () => {
         const apiType = settings.apiType;
         const isNaistera = apiType === 'naistera';
         const isGemini = apiType === 'gemini';
         const isOpenAI = apiType === 'openai';
+
+        document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
+
+        const currentNaisModel = normalizeNaisteraModel(settings.naisteraModel);
+        const supportsRefs = !isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana';
+
         document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
         document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !isOpenAI);
         document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
@@ -3459,9 +3567,34 @@ function bindSettingsEvents() {
         // slay_naistera_preset_row removed — replaced by slay_style_row (always visible)
         document.getElementById('slay_naistera_hint')?.classList.toggle('iig-hidden', !isNaistera);
         document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !isGemini);
-        document.getElementById('slay_refs_section')?.classList.toggle('iig-hidden', false);
-        document.getElementById('slay_image_context_section')?.classList.toggle('iig-hidden', false);
-        document.getElementById('slay_image_context_count_row')?.classList.toggle('iig-hidden', !settings.imageContextEnabled);
+
+        document.getElementById('slay_refs_section')?.classList.toggle('iig-hidden', !supportsRefs);
+        document.getElementById('slay_image_context_section')?.classList.toggle('iig-hidden', !supportsRefs);
+        document.getElementById('slay_image_context_count_row')?.classList.toggle('iig-hidden', !settings.imageContextEnabled || !supportsRefs);
+
+        let noRefsHint = document.getElementById('slay_no_refs_hint');
+        if (!noRefsHint) {
+            noRefsHint = document.createElement('div');
+            noRefsHint.id = 'slay_no_refs_hint';
+            noRefsHint.className = 'hint';
+            noRefsHint.style.color = '#ff9800';
+            noRefsHint.style.marginTop = '4px';
+            noRefsHint.textContent = 'Модель не поддерживает референсы';
+            const modelRow = document.getElementById('slay_naistera_model_row');
+            if (modelRow) modelRow.insertAdjacentElement('afterend', noRefsHint);
+        }
+        if (noRefsHint) noRefsHint.classList.toggle('iig-hidden', supportsRefs || !isNaistera);
+
+        const wardrobeHint = document.getElementById('slay_wardrobe_hint');
+        if (wardrobeHint) {
+            if (!supportsRefs && isNaistera) {
+                wardrobeHint.textContent = 'Модель не поддерживает референсы. Будут отправляться только текстовые описания.';
+                wardrobeHint.style.color = '#ff9800';
+            } else {
+                wardrobeHint.textContent = 'Загрузите аутфиты для бота и юзера. Изображение активного аутфита отправится как референс, а словесное описание будет добавлено в промпт.';
+                wardrobeHint.style.color = '';
+            }
+        }
         // Avatar ref sections removed
         document.getElementById('slay_naistera_video_section')?.classList.toggle('iig-hidden', !isNaistera);
         document.getElementById('slay_naistera_video_frequency_row')?.classList.toggle('iig-hidden', !(isNaistera && settings.naisteraVideoTest));
@@ -3469,7 +3602,7 @@ function bindSettingsEvents() {
         if (endpointInput) endpointInput.placeholder = getEndpointPlaceholder(apiType);
     };
 
-    document.getElementById('slay_enabled')?.addEventListener('change', (e) => { settings.enabled = e.target.checked; saveSettings(); updateHeaderStatusDot(); });
+    document.getElementById('slay_enabled')?.addEventListener('change', (e) => { settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot(); });
     document.getElementById('slay_external_blocks')?.addEventListener('change', (e) => { settings.externalBlocks = e.target.checked; saveSettings(); });
     document.getElementById('slay_api_type')?.addEventListener('change', (e) => {
         const next = e.target.value;
@@ -3488,17 +3621,37 @@ function bindSettingsEvents() {
     document.getElementById('slay_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
         try { const models = await fetchModels(); const sel = document.getElementById('slay_model'); sel.innerHTML = '<option value="">-- Выберите --</option>'; for (const m of models) { const o = document.createElement('option'); o.value = m; o.textContent = m; o.selected = m === settings.model; sel.appendChild(o); } toastr.success(`Моделей: ${models.length}`, 'SLAY Images'); }
-        catch(e) { toastr.error('Ошибка загрузки', 'SLAY Images'); } finally { btn.classList.remove('loading'); }
+        catch (e) { toastr.error('Ошибка загрузки', 'SLAY Images'); } finally { btn.classList.remove('loading'); }
     });
     document.getElementById('slay_size')?.addEventListener('change', (e) => { settings.size = e.target.value; saveSettings(); });
     document.getElementById('slay_quality')?.addEventListener('change', (e) => { settings.quality = e.target.value; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
-    document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => { settings.naisteraModel = normalizeNaisteraModel(e.target.value); saveSettings(); });
+    document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => { settings.naisteraModel = normalizeNaisteraModel(e.target.value); saveSettings(); updateVisibility(); });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
     document.getElementById('slay_image_context_enabled')?.addEventListener('change', (e) => { settings.imageContextEnabled = e.target.checked; saveSettings(); updateVisibility(); });
     document.getElementById('slay_image_context_count')?.addEventListener('input', (e) => { settings.imageContextCount = normalizeImageContextCount(e.target.value); e.target.value = String(settings.imageContextCount); saveSettings(); });
+    document.getElementById('slay_send_char_ref')?.addEventListener('change', (e) => {
+        settings.sendCharAvatar = e.target.checked;
+        settings.naisteraSendCharAvatar = e.target.checked;
+        updateReferenceOptionVisibility();
+        saveSettings();
+    });
+    document.getElementById('slay_send_char_ref_if_mentioned')?.addEventListener('change', (e) => {
+        settings.sendCharRefOnlyIfMentioned = e.target.checked;
+        saveSettings();
+    });
+    document.getElementById('slay_send_user_ref')?.addEventListener('change', (e) => {
+        settings.sendUserAvatar = e.target.checked;
+        settings.naisteraSendUserAvatar = e.target.checked;
+        updateReferenceOptionVisibility();
+        saveSettings();
+    });
+    document.getElementById('slay_send_user_ref_if_mentioned')?.addEventListener('change', (e) => {
+        settings.sendUserRefOnlyIfMentioned = e.target.checked;
+        saveSettings();
+    });
     // Avatar ref handlers removed — char/user refs + wardrobe cover this
     document.getElementById('slay_naistera_video_test')?.addEventListener('change', (e) => { settings.naisteraVideoTest = e.target.checked; saveSettings(); updateVisibility(); });
     document.getElementById('slay_naistera_video_every_n')?.addEventListener('input', (e) => { settings.naisteraVideoEveryN = normalizeNaisteraVideoFrequency(e.target.value); e.target.value = String(settings.naisteraVideoEveryN); saveSettings(); });
@@ -3506,19 +3659,7 @@ function bindSettingsEvents() {
     document.getElementById('slay_retry_delay')?.addEventListener('input', (e) => { const v = parseInt(e.target.value, 10); settings.retryDelay = Number.isNaN(v) ? 1000 : Math.max(500, v); saveSettings(); });
     document.getElementById('slay_export_logs')?.addEventListener('click', exportLogs);
 
-    // Manual save
-    document.getElementById('slay_manual_save')?.addEventListener('click', async () => {
-        const btn = document.getElementById('slay_manual_save'); const status = document.getElementById('slay_save_status');
-        btn.style.opacity = '0.6'; status.textContent = 'Сохраняю...';
-        let ok = false; const errors = [];
-        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { await _stSaveSettings(); ok = true; } catch(e) { errors.push(e.message); } }
-        try { SillyTavern.getContext().saveSettingsDebounced(); } catch(e) {}
-        persistRefsToLocalStorage();
-        if (!ok) { try { const ctx = SillyTavern.getContext(); const payload = { extension_settings: ctx.extensionSettings }; const resp = await fetch('/api/settings/save', { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(payload) }); if (resp.ok) ok = true; else errors.push('HTTP ' + resp.status); } catch(e) { errors.push(e.message); } }
-        btn.style.opacity = '1';
-        if (ok) { status.style.color = '#4caf50'; status.textContent = '✓ Сохранено!'; setTimeout(() => { status.textContent = ''; }, 3000); }
-        else { status.style.color = '#f44336'; status.textContent = '✗ ' + errors.join('; '); }
-    });
+    // Manual save removed
 
     // Test connection
     document.getElementById('slay_test_connection')?.addEventListener('click', async (e) => {
@@ -3720,17 +3861,12 @@ function updateHeaderStatusDot() {
         context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings.inline_image_gen);
         iigLog('INFO', 'Migrated inline_image_gen -> slay_image_gen');
     }
-    // ALWAYS force disable avatar sending — SLAY uses ref slots, not ST avatars
-    // This catches settings that migrated before the fix was added
     if (context.extensionSettings.slay_image_gen) {
         const s = context.extensionSettings.slay_image_gen;
-        if (s.sendCharAvatar || s.sendUserAvatar || s.naisteraSendCharAvatar || s.naisteraSendUserAvatar) {
-            s.sendCharAvatar = false;
-            s.sendUserAvatar = false;
-            s.naisteraSendCharAvatar = false;
-            s.naisteraSendUserAvatar = false;
-            iigLog('INFO', 'Force disabled avatar sending (legacy settings cleanup)');
-        }
+        if (typeof s.sendCharAvatar !== 'boolean') s.sendCharAvatar = true;
+        if (typeof s.sendUserAvatar !== 'boolean') s.sendUserAvatar = true;
+        s.naisteraSendCharAvatar = s.sendCharAvatar;
+        s.naisteraSendUserAvatar = s.sendUserAvatar;
     }
 
     getSettings();
