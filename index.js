@@ -3215,12 +3215,12 @@ async function openStylePickerModal() {
 
     // ── Lightbox ──
     const openLightbox = (src) => {
-        const lb = document.createElement('div');
-        lb.className = 'slay-lb';
-        lb.innerHTML = `<div class="slay-lb-inner"><img src="${src}" alt=""><div class="slay-lb-close"><i class="fa-solid fa-xmark"></i></div></div>`;
-        document.body.appendChild(lb);
-        lb.addEventListener('click', e => { if (!lb.querySelector('img').contains(e.target)) lb.remove(); });
-        lb.querySelector('.slay-lb-close').addEventListener('click', () => lb.remove());
+        const lb = document.getElementById('slay_lightbox');
+        if (!lb) return;
+        lb.querySelector('.iig-lightbox-img').src = src;
+        lb.querySelector('.iig-lightbox-caption').textContent = '';
+        lb.classList.add('open');
+        document.body.style.overflow = 'hidden';
     };
 
     const CACHE_KEY = 'slay_styles_cache';
