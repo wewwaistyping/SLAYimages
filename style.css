@@ -36,7 +36,7 @@
 
 .iig-settings .flex-row {
     display: grid;
-    grid-template-columns: minmax(130px, 170px) 1fr auto;
+    grid-template-columns: minmax(80px, 170px) 1fr auto;
     align-items: center;
     column-gap: 10px;
     row-gap: 8px;
