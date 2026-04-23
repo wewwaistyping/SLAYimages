@@ -1343,6 +1343,33 @@ const defaultSettings = Object.freeze({
 
 const MAX_CONTEXT_IMAGES = 3;
 const MAX_GENERATION_REFERENCE_IMAGES = 7;
+const STYLE_BLOCK_RE = /\[\s*style\s*:\s*[^\]]*\]/gi;
+
+function injectStyleBlock(prompt, styleValue) {
+    const normalizedPrompt = String(prompt || '').trim();
+    const normalizedStyle = String(styleValue || '').trim();
+    if (!normalizedStyle) {
+        return normalizedPrompt;
+    }
+
+    const styleBlock = `[STYLE: ${normalizedStyle}]`;
+    if (!normalizedPrompt) {
+        return styleBlock;
+    }
+
+    STYLE_BLOCK_RE.lastIndex = 0;
+    if (STYLE_BLOCK_RE.test(normalizedPrompt)) {
+        STYLE_BLOCK_RE.lastIndex = 0;
+        let replacedFirst = false;
+        return normalizedPrompt.replace(STYLE_BLOCK_RE, () => {
+            if (replacedFirst) return '';
+            replacedFirst = true;
+            return styleBlock;
+        }).trim();
+    }
+
+    return `${styleBlock}\n\n${normalizedPrompt}`.trim();
+}
 
 const IMAGE_MODEL_KEYWORDS = [
     'dall-e', 'midjourney', 'mj', 'journey', 'stable-diffusion', 'sdxl', 'flux',
@@ -1938,7 +1965,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
     const imageSize = options.imageSize || settings.imageSize || '1K';
 
-    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
+    let fullPrompt = injectStyleBlock(prompt, style);
     fullPrompt = `${fullPrompt}\n\n[aspect_ratio: ${aspectRatio}] [image_size: ${imageSize}]`;
 
     // Build multimodal content with text + all reference images
@@ -2062,7 +2089,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         parts.push({ inlineData: { mimeType: 'image/jpeg', data: referenceImages[i] } });
     }
 
-    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
+    let fullPrompt = injectStyleBlock(prompt, style);
 
     if (instructions.length > 0) {
         const refBlock = instructions.join('\n') + '\nGenerate the scene below. Keep all faces and outfits faithful to the references.';
@@ -2101,7 +2128,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
         labelPrefix = `[Reference images attached, in order: ${labelList}. Use each reference for ITS OWN named subject only — do not mix attributes between subjects.] `;
         iigLog('INFO', `Naistera ref labels: ${labelList}`);
     }
-    const fullPrompt = labelPrefix + (style ? `[Style: ${style}] ${prompt}` : prompt);
+    const fullPrompt = labelPrefix + injectStyleBlock(prompt, style);
     const wantsVideoTest = Boolean(options.videoTestMode);
     const videoEveryN = normalizeNaisteraVideoFrequency(options.videoEveryN ?? settings.naisteraVideoEveryN);
 
