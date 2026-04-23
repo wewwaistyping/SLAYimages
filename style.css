@@ -1357,3 +1357,59 @@
         font-size: 12px;
     }
 }
+
+/* ── Style picker modal ── */
+.slay-style-overlay {
+    position: fixed; inset: 0; z-index: 99999;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.75); backdrop-filter: blur(4px);
+}
+.slay-style-modal {
+    background: #12121a; border: 1px solid rgba(244,114,182,0.25);
+    border-radius: 16px; width: calc(100% - 32px); max-width: 900px;
+    max-height: 90vh; display: flex; flex-direction: column; overflow: hidden;
+}
+@media (max-width: 600px) {
+    .slay-style-modal { width: 100%; max-height: 100dvh; border-radius: 0; }
+}
+.slay-style-modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.07); flex-shrink: 0;
+}
+.slay-style-modal-title { font-weight: 600; font-size: 1em; color: var(--slay-pink,#f472b6); }
+.slay-style-filters {
+    display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.05); flex-shrink: 0;
+}
+.slay-style-chip {
+    padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(244,114,182,0.3);
+    background: transparent; color: var(--SmartThemeFontColor,#ccc); cursor: pointer;
+    font-size: 0.78em; transition: background .2s, border-color .2s;
+}
+.slay-style-chip.active, .slay-style-chip:hover {
+    background: rgba(244,114,182,0.15); border-color: #f472b6;
+}
+.slay-style-grid {
+    flex: 1; overflow-y: auto; padding: 12px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px;
+    align-content: start;
+}
+.slay-style-loading { grid-column: 1/-1; text-align: center; padding: 40px; opacity: .5; }
+.slay-style-card {
+    cursor: pointer; border-radius: 10px; overflow: hidden;
+    background: rgba(255,255,255,0.04); border: 2px solid transparent;
+    transition: border-color .2s, transform .15s; display: flex; flex-direction: column;
+}
+.slay-style-card:hover { border-color: rgba(244,114,182,0.5); transform: scale(1.02); }
+.slay-style-card.selected { border-color: #f472b6; }
+.slay-style-card-img { width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block; }
+.slay-style-no-img {
+    width: 100%; aspect-ratio: 1/1; display: flex; align-items: center;
+    justify-content: center; font-size: 1.6em; opacity: .35;
+    background: rgba(244,114,182,0.05);
+}
+.slay-style-card-name {
+    font-size: 0.72em; padding: 5px 8px; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex-shrink: 0;
+}

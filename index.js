@@ -1328,6 +1328,9 @@ const defaultSettings = Object.freeze({
     naisteraAspectRatio: '1:1',
     naisteraPreset: '',
     naisteraModel: 'grok',
+    // Style picker
+    slayStyle: '',
+    slayStyleName: '',
     naisteraSendCharAvatar: false,
     naisteraSendUserAvatar: false,
     naisteraVideoTest: false,
@@ -2363,6 +2366,10 @@ function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
     validateSettings();
     const settings = getSettings();
+    // Override with user-selected SLAY style if configured
+    if (settings.slayStyle) {
+        style = settings.slayStyle;
+    }
     const maxRetries = settings.maxRetries;
     const baseDelay = settings.retryDelay;
 
@@ -3037,7 +3044,7 @@ function createSettingsUI() {
                     </div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option></select></div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_preset_row"><label>Пресет</label><select id="slay_naistera_preset" class="flex1"><option value="" ${!settings.naisteraPreset ? 'selected' : ''}>Нет</option><option value="digital" ${settings.naisteraPreset === 'digital' ? 'selected' : ''}>Digital</option><option value="realism" ${settings.naisteraPreset === 'realism' ? 'selected' : ''}>Realism</option></select></div>
+                    <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;"><i class="fa-solid fa-palette"></i> Выбрать</div></div></div>
                 </div>
 
                 <!-- NPC refs -->
@@ -3184,6 +3191,116 @@ function bindRefSlotEvents() {
     }
 }
 
+async function openStylePickerModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'slay-style-overlay';
+    overlay.innerHTML = `
+      <div class="slay-style-modal">
+        <div class="slay-style-modal-head">
+          <span class="slay-style-modal-title"><i class="fa-solid fa-palette"></i> Выбрать стиль</span>
+          <div class="slay-style-modal-close menu_button"><i class="fa-solid fa-xmark"></i></div>
+        </div>
+        <div class="slay-style-filters"></div>
+        <div class="slay-style-grid"><div class="slay-style-loading">Загрузка стилей…</div></div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('.slay-style-modal-close').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    const BASE = 'https://wewwaistyping.github.io/slayimagespromts/';
+    const CACHE_KEY = 'slay_styles_cache';
+    let styles = [];
+
+    const parseStyles = (html) => {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const result = [];
+        for (const card of doc.querySelectorAll('article.style-card')) {
+            const name = card.querySelector('h2.card-title')?.textContent.trim() || '';
+            const tags = (card.dataset.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+            const imgRel = card.querySelector('.carousel-track img')?.getAttribute('src') || '';
+            const imgSrc = imgRel ? (new URL(imgRel, BASE)).href : '';
+            const promptRaw = card.querySelector('.prompt-panel[data-panel="direct"] .prompt-code')?.textContent.trim() || '';
+            const prompt = promptRaw.replace(/^\[Describe your scene here\]\.\s*/i, '').trim();
+            if (name && prompt) result.push({ name, tags, imgSrc, prompt });
+        }
+        return result;
+    };
+
+    let fetchErr = null;
+    try {
+        const html = await fetch(BASE).then(r => r.text());
+        styles = parseStyles(html);
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify(styles)); } catch(e) {}
+    } catch(err) {
+        fetchErr = err;
+        try {
+            const cached = localStorage.getItem(CACHE_KEY);
+            if (cached) {
+                styles = JSON.parse(cached);
+                iigLog('WARN', `Style fetch failed, loaded ${styles.length} styles from cache`);
+            }
+        } catch(e) {}
+        if (!styles.length) {
+            overlay.querySelector('.slay-style-grid').innerHTML = `<p style="padding:16px;opacity:.6;">Ошибка загрузки: ${fetchErr.message}</p>`;
+            return;
+        }
+    }
+
+    const allTags = [...new Set(styles.flatMap(s => s.tags))];
+    const TAG_LABELS = { painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
+    let activeTag = '';
+
+    const filtersEl = overlay.querySelector('.slay-style-filters');
+    const gridEl = overlay.querySelector('.slay-style-grid');
+
+    const renderFilters = () => {
+        filtersEl.innerHTML = ['', ...allTags].map(t =>
+            `<button class="slay-style-chip${activeTag === t ? ' active' : ''}" data-tag="${t}">${t ? (TAG_LABELS[t] || t) : 'Все'}</button>`
+        ).join('');
+        for (const btn of filtersEl.querySelectorAll('.slay-style-chip')) {
+            btn.addEventListener('click', () => { activeTag = btn.dataset.tag; renderFilters(); renderGrid(); });
+        }
+    };
+
+    const settings = getSettings();
+
+    const renderGrid = () => {
+        const visible = activeTag ? styles.filter(s => s.tags.includes(activeTag)) : styles;
+        const noReplaceActive = !settings.slayStyle;
+        gridEl.innerHTML = `
+          <div class="slay-style-card${noReplaceActive ? ' selected' : ''}" data-style="" data-name="">
+            <div class="slay-style-card-img slay-style-no-img"><i class="fa-solid fa-ban"></i></div>
+            <span class="slay-style-card-name">Не заменять</span>
+          </div>
+          ${visible.map(s => {
+              const isSel = settings.slayStyle === s.prompt;
+              const encodedPrompt = encodeURIComponent(s.prompt);
+              const encodedName = encodeURIComponent(s.name);
+              return `<div class="slay-style-card${isSel ? ' selected' : ''}" data-style="${encodedPrompt}" data-name="${encodedName}">
+                ${s.imgSrc ? `<img class="slay-style-card-img" src="${s.imgSrc}" alt="" loading="lazy">` : '<div class="slay-style-card-img slay-style-no-img"><i class="fa-solid fa-image"></i></div>'}
+                <span class="slay-style-card-name">${s.name}</span>
+              </div>`;
+          }).join('')}`;
+
+        for (const card of gridEl.querySelectorAll('.slay-style-card')) {
+            card.addEventListener('click', () => {
+                const prompt = card.dataset.style ? decodeURIComponent(card.dataset.style) : '';
+                const name = card.dataset.name ? decodeURIComponent(card.dataset.name) : '';
+                settings.slayStyle = prompt;
+                settings.slayStyleName = name || 'Не заменять';
+                saveSettings();
+                const nameEl = document.getElementById('slay_style_name');
+                if (nameEl) nameEl.textContent = settings.slayStyleName;
+                overlay.remove();
+            });
+        }
+    };
+
+    renderFilters();
+    renderGrid();
+}
+
 function bindSettingsEvents() {
     const settings = getSettings();
 
@@ -3197,7 +3314,7 @@ function bindSettingsEvents() {
         document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
         document.getElementById('slay_naistera_model_row')?.classList.toggle('iig-hidden', !isNaistera);
         document.getElementById('slay_naistera_aspect_row')?.classList.toggle('iig-hidden', !isNaistera);
-        document.getElementById('slay_naistera_preset_row')?.classList.toggle('iig-hidden', !isNaistera);
+        // slay_naistera_preset_row removed — replaced by slay_style_row (always visible)
         document.getElementById('slay_naistera_hint')?.classList.toggle('iig-hidden', !isNaistera);
         document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !isGemini);
         document.getElementById('slay_refs_section')?.classList.toggle('iig-hidden', false);
@@ -3237,7 +3354,7 @@ function bindSettingsEvents() {
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
     document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => { settings.naisteraModel = normalizeNaisteraModel(e.target.value); saveSettings(); });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
-    document.getElementById('slay_naistera_preset')?.addEventListener('change', (e) => { settings.naisteraPreset = e.target.value; saveSettings(); });
+    document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
     document.getElementById('slay_image_context_enabled')?.addEventListener('change', (e) => { settings.imageContextEnabled = e.target.checked; saveSettings(); updateVisibility(); });
     document.getElementById('slay_image_context_count')?.addEventListener('input', (e) => { settings.imageContextCount = normalizeImageContextCount(e.target.value); e.target.value = String(settings.imageContextCount); saveSettings(); });
     // Avatar ref handlers removed — char/user refs + wardrobe cover this
