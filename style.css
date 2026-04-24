@@ -1065,6 +1065,15 @@
     .sw-corner-btn.sw-corner-active { opacity: 1; }
 }
 
+/* When regen is in flight, clip the wrapped img so the hover scale(1.008)
+   on .iig-generated-image can't peek out from under the overlay.
+   Uses both :has() (modern) and an explicit .iig-regen-active class
+   (applied in JS) for iOS Safari <15.4 fallback. */
+.iig-img-wrap:has(.iig-regen-overlay),
+.iig-img-wrap.iig-regen-active { overflow: hidden; border-radius: 8px; }
+.iig-img-wrap:has(.iig-regen-overlay) > .iig-generated-image:hover,
+.iig-img-wrap.iig-regen-active > .iig-generated-image:hover { transform: none; }
+
 /* Regeneration overlay shown on top of image while regen is in flight */
 .iig-img-wrap .iig-regen-overlay {
     position: absolute;

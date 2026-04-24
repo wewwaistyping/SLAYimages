@@ -2384,6 +2384,9 @@ function attachRegenButton(imgEl) {
             </div>
         `;
         wrap.appendChild(overlay);
+        // iOS Safari <15.4 has no :has() support, so also toggle an explicit class on the wrap
+        // (used by the overflow-hidden fallback in style.css to clip hover-scale on the img).
+        wrap.classList.add('iig-regen-active');
         const overlayLabel = overlay.querySelector('.iig-status-label');
         const overlayTimer = overlay.querySelector('.iig-status-timer');
         const regenStart = Date.now();
@@ -2415,6 +2418,7 @@ function attachRegenButton(imgEl) {
         }
         clearInterval(regenTimerId);
         overlay.remove();
+        wrap.classList.remove('iig-regen-active');
 
         // The img may have been replaced in DOM by a swipe/edit during the await.
         // Always re-resolve to a live element before touching .src.
@@ -2975,7 +2979,10 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
                 message.mes = updated;
                 if (message.extra?.display_text) message.extra.display_text = String(message.extra.display_text).replace(errorImgPath, imagePath);
                 if (message.extra?.extblocks) message.extra.extblocks = String(message.extra.extblocks).replace(errorImgPath, imagePath);
-                ctx.saveChatDebounced?.();
+                // Force-save (not debounced). If user leaves chat right after a successful retry,
+                // debounced save may never fire and the old error.svg src persists in the chat file,
+                // causing the error placeholder to re-render on return.
+                try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
             }
         }
         toastr.success('Картинка сгенерирована', 'SLAY Images', { timeOut: 2000 });
