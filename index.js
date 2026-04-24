@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.2';
+const SLAY_VERSION = '4.2.3';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4651,11 +4651,28 @@ function initLightbox() {
     const overlay = document.createElement('div'); overlay.id = 'slay_lightbox'; overlay.className = 'iig-lightbox';
     overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div></div>`;
     document.body.appendChild(overlay);
-    const close = () => { overlay.classList.remove('open'); document.body.style.overflow = ''; };
+    const close = (e) => {
+        // CRITICAL: stop the event from bubbling to document. Otherwise ST's extensions
+        // drawer outside-click detector sees a click that isn't inside the drawer and
+        // closes the drawer in the background — invisibly, because the style picker
+        // modal (which opened the lightbox) is still covering the screen. Once the
+        // picker is dismissed later, the user finds themselves "kicked to chat".
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        overlay.classList.remove('open');
+        document.body.style.overflow = '';
+    };
     overlay.querySelector('.iig-lightbox-backdrop').addEventListener('click', close);
     overlay.querySelector('.iig-lightbox-close').addEventListener('click', close);
     // Touch: tap anywhere on image to close
     overlay.querySelector('.iig-lightbox-img').addEventListener('click', close);
+    // Eat all touch/pointer phases at the overlay boundary so nothing bubbles to the
+    // drawer's outside-click listeners while the lightbox is up.
+    const stop = e => e.stopPropagation();
+    overlay.addEventListener('touchstart', stop, { passive: true });
+    overlay.addEventListener('touchend', stop, { passive: true });
+    overlay.addEventListener('pointerdown', stop);
+    overlay.addEventListener('pointerup', stop);
+    overlay.addEventListener('mousedown', stop);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
     document.getElementById('chat')?.addEventListener('click', (e) => {
         const img = e.target.closest('.iig-generated-image'); if (!img) return;
