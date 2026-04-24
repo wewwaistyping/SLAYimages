@@ -10,6 +10,8 @@
 
 (function initWardrobe() {
     'use strict';
+    // ⚠️ PREVIEW BUILD — isolated storage. Doesn't touch main 4.1.5 settings/outfits.
+    // Seeded once from slay_wardrobe via swMigrate.
     const SW = 'slay_wardrobe';
 
     function uid() { return Date.now().toString(36) + Math.random().toString(36).substring(2, 8); }
@@ -1233,6 +1235,7 @@
    ║  MODULE 2: Core Engine (Inline Image Generation + NPC Refs)   ║
    ╚═══════════════════════════════════════════════════════════════╝ */
 
+// PREVIEW BUILD — isolated. Seeded once from slay_image_gen on first load.
 const MODULE_NAME = 'slay_image_gen';
 
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -1762,8 +1765,174 @@ async function imageUrlToDataUrl(url) {
     } catch (error) { console.error('[IIG] imageUrlToDataUrl failed:', error); return null; }
 }
 
-async function saveRefImageToFile(base64Data, label) {
+// ── v4.2 Recent Refs ──
+// Tracks the last N ref-image paths that were assigned to any slot, so the user can
+// re-assign them quickly via a ribbon under the refs block or a "Недавние" picker.
+const RECENT_REFS_MAX = 10;
+
+function pushRecentRef(path) {
+    if (!path) return;
+    const settings = getSettings();
+    if (!Array.isArray(settings.recentRefs)) settings.recentRefs = [];
+    // Remove any existing entry with this path (we'll re-insert at front)
+    settings.recentRefs = settings.recentRefs.filter(r => (typeof r === 'string' ? r : r.path) !== path);
+    settings.recentRefs.unshift({ path, lastUsed: Date.now() });
+    if (settings.recentRefs.length > RECENT_REFS_MAX) settings.recentRefs.length = RECENT_REFS_MAX;
+    saveSettings();
+    // Re-render ribbon if UI is mounted
+    try { renderRecentRefsRibbon(); } catch (_) { /* no-op if not yet mounted */ }
+}
+
+function getRecentRefs() {
+    const settings = getSettings();
+    const list = Array.isArray(settings.recentRefs) ? settings.recentRefs : [];
+    return list.map(r => typeof r === 'string' ? { path: r, lastUsed: 0 } : r).filter(r => r.path);
+}
+
+function removeRecentRef(path) {
+    const settings = getSettings();
+    if (!Array.isArray(settings.recentRefs)) return;
+    settings.recentRefs = settings.recentRefs.filter(r => (typeof r === 'string' ? r : r.path) !== path);
+    saveSettings();
+    try { renderRecentRefsRibbon(); } catch (_) {}
+}
+
+// Detect image MIME type from base64 prefix (first few characters after base64-encoding the magic bytes)
+function detectImageMimeFromBase64(base64) {
+    if (!base64) return 'image/jpeg';
+    if (base64.startsWith('/9j/')) return 'image/jpeg';
+    if (base64.startsWith('iVBORw')) return 'image/png';
+    if (base64.startsWith('R0lG')) return 'image/gif';
+    if (base64.startsWith('UklGR')) return 'image/webp';
+    return 'image/jpeg';
+}
+
+// Compute SHA-256 hex digest of base64-encoded BYTES (identical for byte-identical files only).
+async function sha256OfBase64(base64) {
+    try {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) { iigLog('WARN', `sha256 failed: ${e?.message}`); return null; }
+}
+
+// Compute SHA-256 digest of DECODED pixel data after downscaling to 32x32 grayscale-ish.
+// Catches the "same image re-encoded as different JPEG" case (Telegram/browser recompression
+// changes bytes but the visual content decodes to ~identical pixels).
+// Returns null on failure (non-image data, CORS, etc.) — caller should fall back to byte-hash.
+async function pixelHashOfBase64(base64) {
+    try {
+        const mime = detectImageMimeFromBase64(base64);
+        const img = new Image();
+        img.decoding = 'sync';
+        img.src = `data:${mime};base64,${base64}`;
+        await img.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = 32; canvas.height = 32;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, 32, 32);
+        const { data } = ctx.getImageData(0, 0, 32, 32); // Uint8ClampedArray, 32*32*4 bytes
+        // Quantize each channel to 4 bits to absorb tiny JPEG encoding noise — two visually
+        // identical images re-encoded with different quality will still round to the same hash.
+        const quantized = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i++) quantized[i] = data[i] & 0xF0;
+        const digest = await crypto.subtle.digest('SHA-256', quantized);
+        return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) { iigLog('WARN', `pixelHash failed: ${e?.message}`); return null; }
+}
+
+// Compute BOTH hashes — byte (exact) and pixel (visual). Returns { byteHash, pixelHash }.
+async function computeRefHashes(rawBase64) {
+    const [byteHash, pixelHash] = await Promise.all([
+        sha256OfBase64(rawBase64),
+        pixelHashOfBase64(rawBase64),
+    ]);
+    return { byteHash, pixelHash };
+}
+
+// Quick HEAD probe to check if a previously-saved path still exists on disk.
+// If the user deleted it from /user/images manually, we shouldn't return a stale path.
+async function refFileStillExists(path) {
+    try { const r = await fetch(path, { method: 'HEAD' }); return r.ok; } catch (_) { return false; }
+}
+
+// Lookup existing path by hash. Returns path string or null.
+// Used by file upload AND paste handlers — they hash BEFORE compression, to avoid the
+// non-deterministic canvas.toDataURL re-encode producing a different hash on the same image.
+// Lookup a path by ANY of the provided hashes (byte or pixel). Returns path or null.
+async function lookupRefByHashes(hashes) {
+    if (!hashes || (!hashes.byteHash && !hashes.pixelHash)) {
+        iigLog('WARN', 'lookupRefByHashes: no hashes provided');
+        return null;
+    }
+    const settings = (typeof getSettings === 'function') ? getSettings() : (SillyTavern.getContext().extensionSettings[MODULE_NAME] || {});
+    if (!settings.refHashMap || typeof settings.refHashMap !== 'object') {
+        iigLog('INFO', `Ref dedup miss: refHashMap empty (b:${hashes.byteHash?.slice(0,8)} p:${hashes.pixelHash?.slice(0,8)})`);
+        return null;
+    }
+    const mapSize = Object.keys(settings.refHashMap).length;
+    // Try pixel-hash FIRST — it's the visual match that catches JPEG recompression
+    const candidates = [
+        { kind: 'pixel', hash: hashes.pixelHash },
+        { kind: 'byte',  hash: hashes.byteHash },
+    ];
+    for (const c of candidates) {
+        if (!c.hash) continue;
+        const entry = settings.refHashMap[c.hash];
+        const existingPath = typeof entry === 'string' ? entry : entry?.path;
+        if (!existingPath) continue;
+        if (!(await refFileStillExists(existingPath))) {
+            iigLog('INFO', `Ref dedup stale ${c.kind}: ${existingPath} gone, removing entry`);
+            delete settings.refHashMap[c.hash];
+            continue;
+        }
+        settings.refHashMap[c.hash] = { path: existingPath, lastUsed: Date.now() };
+        if (typeof saveSettings === 'function') saveSettings();
+        try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
+        iigLog('INFO', `Ref dedup HIT (${c.kind}): reusing ${existingPath} (hash ${c.hash.slice(0, 8)}…, map ${mapSize})`);
+        return existingPath;
+    }
+    iigLog('INFO', `Ref dedup miss: neither byte ${hashes.byteHash?.slice(0,8)}… nor pixel ${hashes.pixelHash?.slice(0,8)}… matched (map ${mapSize})`);
+    return null;
+}
+
+function recordRefHashes(hashes, path) {
+    if (!path) return;
+    if (!hashes?.byteHash && !hashes?.pixelHash) return;
+    const settings = (typeof getSettings === 'function') ? getSettings() : (SillyTavern.getContext().extensionSettings[MODULE_NAME] || {});
+    if (!settings.refHashMap || typeof settings.refHashMap !== 'object') settings.refHashMap = {};
+    const ts = Date.now();
+    if (hashes.byteHash) settings.refHashMap[hashes.byteHash] = { path, lastUsed: ts };
+    if (hashes.pixelHash) settings.refHashMap[hashes.pixelHash] = { path, lastUsed: ts };
+    // Cap at 1000 entries (each ref can add 2), drop oldest
+    const entries = Object.entries(settings.refHashMap);
+    if (entries.length > 1000) {
+        entries.sort((a, b) => (a[1].lastUsed || 0) - (b[1].lastUsed || 0));
+        for (const [h] of entries.slice(0, entries.length - 1000)) delete settings.refHashMap[h];
+    }
+    if (typeof saveSettings === 'function') saveSettings();
+    try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
+    iigLog('INFO', `Recording ref hashes (b:${hashes.byteHash?.slice(0,8)} p:${hashes.pixelHash?.slice(0,8)}) -> ${path} (map ${Object.keys(settings.refHashMap).length})`);
+}
+
+// Legacy single-hash lookup — still used elsewhere, thin wrapper for compat.
+async function lookupRefByHash(hash) { return lookupRefByHashes({ byteHash: hash }); }
+
+async function saveRefImageToFile(base64Data, label, opts = {}) {
     const context = SillyTavern.getContext();
+    // If caller provided a pre-computed hash (from raw/uncompressed bytes), honour it for dedup record.
+    // Otherwise compute from the (possibly compressed) bytes we're about to upload.
+    const hash = opts.hash || await sha256OfBase64(base64Data);
+
+    // If dedup check wasn't done by caller, try it now — but this only dedupes the compressed payload,
+    // which is less reliable than hashing raw bytes (canvas re-encode can differ).
+    if (!opts.skipDedupCheck) {
+        const cached = await lookupRefByHash(hash);
+        if (cached) return cached;
+    }
+
     const safeName = label.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40);
     const filename = `iig_ref_${safeName}_${Date.now()}`;
     const response = await fetch('/api/images/upload', {
@@ -1773,6 +1942,8 @@ async function saveRefImageToFile(base64Data, label) {
     if (!response.ok) { const err = await response.json().catch(() => ({ error: 'Unknown' })); throw new Error(err.error || `Upload failed: ${response.status}`); }
     const result = await response.json();
     iigLog('INFO', `Ref saved: ${result.path}`);
+    // Caller is responsible for recording hash(es) via recordRefHashes — it has access to
+    // both byte- and pixel-hash of the RAW base64 (pre-compression) which is more reliable.
     return result.path;
 }
 
@@ -2324,6 +2495,8 @@ function attachRegenButton(imgEl) {
     const instr = imgEl.getAttribute('data-iig-instruction');
     if (!instr) return;
     if (!imgEl.parentNode) return;
+    // Never wrap images that are part of an error-placeholder UI (they already carry their own retry button)
+    if (imgEl.classList.contains('iig-error-image') || imgEl.closest('.iig-error-placeholder')) return;
 
     // Wrap img in a span so we can position the button absolutely relative to it
     const wrap = document.createElement('span');
@@ -2472,19 +2645,31 @@ function attachRegenButton(imgEl) {
 // Safe to call on already-bound images (attachRegenButton is idempotent).
 function attachRegenButtonsInRoot(root) {
     if (!root) return;
-    const imgs = root.querySelectorAll('img.iig-generated-image[data-iig-instruction], img[data-iig-instruction]');
-    for (const img of imgs) {
-        // Skip error placeholders — they have their own "Попробовать снова" button
-        if (img.classList.contains('iig-error-image')) continue;
-        attachRegenButton(img);
-    }
-    // Rehydrate error placeholders that survived a page reload. On reload the message source
-    // contains <img src="error.svg" data-iig-instruction="...">, which we swap for a proper
-    // div-placeholder with a retry button.
-    for (const stale of root.querySelectorAll('img.iig-error-image[data-iig-instruction]')) {
+
+    // FIRST: rehydrate any stale error-img remnants. They may be <img src="error.svg">
+    // OR the same img wrapped into a <span class="iig-img-wrap"> (if some earlier pass
+    // gave them a regen overlay from an older version). Also catch broken-img fallbacks
+    // (src like /error.svg that 404'd).
+    const errorSelectors = [
+        'img.iig-error-image[data-iig-instruction]',
+        'img[data-iig-instruction][src*="error.svg"]',
+        'img[data-iig-instruction][src*="[IMG:ERROR"]',
+    ].join(', ');
+    for (const stale of root.querySelectorAll(errorSelectors)) {
         const instr = stale.getAttribute('data-iig-instruction') || '';
         const errorEl = createErrorPlaceholder(stale.dataset.tagId || `iig-reload-${Date.now()}`, 'Картинка не была сгенерирована', { fullMatch: `data-iig-instruction='${instr}'` });
-        stale.replaceWith(errorEl);
+        // If the stale img is inside an iig-img-wrap (regen overlay from older build),
+        // replace the WHOLE wrap, not just the img — otherwise the overlay circle stays visible.
+        const wrap = stale.closest('.iig-img-wrap');
+        (wrap || stale).replaceWith(errorEl);
+    }
+
+    // THEN: attach regen button to normal generated images. Skip anything error-ish.
+    const imgs = root.querySelectorAll('img.iig-generated-image[data-iig-instruction], img[data-iig-instruction]');
+    for (const img of imgs) {
+        if (img.classList.contains('iig-error-image')) continue;
+        if (img.closest('.iig-error-placeholder')) continue;
+        attachRegenButton(img);
     }
 }
 
@@ -2913,7 +3098,7 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
         </div>
         <div class="iig-error-title">Генерация не удалась</div>
         <div class="iig-error-msg" title="${sanitizeForHtml(fullMsg)}">${sanitizeForHtml(shortMsg)}</div>
-        <button class="iig-error-retry menu_button" type="button"><i class="fa-solid fa-rotate"></i> Попробовать снова</button>
+        <button class="iig-error-retry menu_button" type="button"><i class="fa-solid fa-rotate"></i><span>Попробовать снова</span></button>
     `;
     // Retry button — reuse the same flow as the regen overlay on success images
     el.querySelector('.iig-error-retry')?.addEventListener('click', async (e) => {
@@ -2979,9 +3164,10 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
                 message.mes = updated;
                 if (message.extra?.display_text) message.extra.display_text = String(message.extra.display_text).replace(errorImgPath, imagePath);
                 if (message.extra?.extblocks) message.extra.extblocks = String(message.extra.extblocks).replace(errorImgPath, imagePath);
-                // Force-save (not debounced). If user leaves chat right after a successful retry,
-                // debounced save may never fire and the old error.svg src persists in the chat file,
-                // causing the error placeholder to re-render on return.
+                // IMPORTANT: use force-save (not debounced). If user leaves chat quickly
+                // after a successful retry, debounced save may never fire and the old
+                // error.svg src persists in the chat file, causing the error placeholder
+                // to re-render on return.
                 try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
             }
         }
@@ -3270,9 +3456,10 @@ function createSettingsUI() {
     let npcSlotsHtml = '';
     for (let i = 0; i < 4; i++) {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
-            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div>
-            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div>
-            <div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
+            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
+            <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
+            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div>
+            <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
         </div>`;
     }
 
@@ -3320,18 +3507,22 @@ function createSettingsUI() {
                 <!-- NPC refs -->
                 <div id="slay_refs_section" class="iig-refs">
                     <h4><i class="fa-solid fa-user-group"></i> Референсы персонажей</h4>
-                    <label class="checkbox_label"><input type="checkbox" id="slay_send_char_ref" ${settings.sendCharAvatar !== false ? 'checked' : ''}><span>Отправлять референс бота</span></label>
-                    <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_send_user_ref" ${settings.sendUserAvatar !== false ? 'checked' : ''}><span>Отправлять референс пользователя</span></label>
-                    <p class="hint">Референсы (бот, юзер, NPC) и картинки одежды отправляются только когда в промте картинки упоминается соответствующее имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если в промте встретится любой из них.</p>
+                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
                     </div>
+                    <!-- v4.2 Recent refs ribbon — populated on render -->
+                    <div id="slay_recent_refs_ribbon" class="iig-recent-refs-ribbon"></div>
                 </div>
+                <!-- v4.2 Floating popup for slot options (Файл / Вставить / Недавние) -->
+                <div id="slay_slot_options_popup" class="iig-slot-options-popup"></div>
+                <!-- v4.2 Floating popup for "assign recent to slot" -->
+                <div id="slay_assign_popup" class="iig-assign-popup"></div>
 
                 <!-- Wardrobe -->
                 <div class="iig-section">
@@ -3413,38 +3604,394 @@ function createSettingsUI() {
     bindSettingsEvents();
     bindRefSlotEvents();
     renderRefSlots();
+    renderRecentRefsRibbon();
 }
+
+// Write saved path to the correct ref slot (char / user / NPC N) AND update its thumbnail in UI.
+// Used by file upload, paste-from-clipboard, and click-to-assign from Recent ribbon.
+function applyPathToSlot(slotEl, refType, npcIndex, savedPath) {
+    const s = getCurrentCharacterRefs();
+    if (refType === 'char') { s.charRef.imageBase64 = ''; s.charRef.imagePath = savedPath; }
+    else if (refType === 'user') { s.userRef.imageBase64 = ''; s.userRef.imagePath = savedPath; }
+    else if (refType === 'npc') {
+        if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        s.npcReferences[npcIndex].imageBase64 = '';
+        s.npcReferences[npcIndex].imagePath = savedPath;
+    }
+    saveSettings();
+    if (slotEl) {
+        const thumb = slotEl.querySelector('.iig-ref-thumb'); if (thumb) thumb.src = savedPath;
+        const tw = slotEl.querySelector('.iig-ref-thumb-wrap'); if (tw) tw.classList.add('has-image');
+    }
+}
+
+// Find slot DOM element by its "ref key" ("char" / "user" / "npc-0" / "npc-1" / ...)
+function findSlotByKey(key) {
+    if (!key) return null;
+    if (key === 'char' || key === 'user') {
+        return document.querySelector(`.iig-ref-slot[data-ref-type="${key}"]`);
+    }
+    const m = key.match(/^npc-(\d+)$/);
+    if (m) return document.querySelector(`.iig-ref-slot[data-ref-type="npc"][data-npc-index="${m[1]}"]`);
+    return null;
+}
+
+// ── v4.2 Recent Refs ribbon rendering ──
+function renderRecentRefsRibbon() {
+    const host = document.getElementById('slay_recent_refs_ribbon');
+    if (!host) return;
+    const items = getRecentRefs();
+    if (items.length === 0) {
+        host.innerHTML = '';
+        host.classList.remove('has-items');
+        return;
+    }
+    host.classList.add('has-items');
+    let html = `<div class="iig-recent-refs-head">
+        <span class="iig-recent-refs-title"><i class="fa-solid fa-clock-rotate-left"></i> Недавние</span>
+        <span class="iig-recent-refs-hint">Tap → куда применить • drag на слот</span>
+    </div>
+    <div class="iig-recent-refs-track">`;
+    for (const item of items) {
+        const safeSrc = String(item.path).replace(/"/g, '&quot;');
+        html += `<div class="iig-recent-thumb" draggable="true" data-path="${safeSrc}" title="${safeSrc}">
+            <img src="${safeSrc}" alt="" loading="lazy">
+            <button class="iig-recent-remove" title="Убрать из недавних" data-path="${safeSrc}">×</button>
+        </div>`;
+    }
+    html += '</div>';
+    host.innerHTML = html;
+    bindRecentRefsEvents(host);
+}
+
+function bindRecentRefsEvents(host) {
+    for (const thumb of host.querySelectorAll('.iig-recent-thumb')) {
+        const path = thumb.dataset.path;
+        // Click → assign popup
+        thumb.addEventListener('click', (e) => {
+            if (e.target.closest('.iig-recent-remove')) return;
+            e.stopPropagation();
+            showAssignPopup(e.currentTarget, path);
+        });
+        // Drag start
+        thumb.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', path);
+            e.dataTransfer.effectAllowed = 'copy';
+            thumb.classList.add('dragging');
+            window._iigRecentDragPath = path;
+        });
+        thumb.addEventListener('dragend', () => {
+            thumb.classList.remove('dragging');
+            window._iigRecentDragPath = null;
+        });
+    }
+    for (const rm of host.querySelectorAll('.iig-recent-remove')) {
+        rm.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            removeRecentRef(rm.dataset.path);
+        });
+    }
+    // Drop targets = all ref slots
+    for (const slot of document.querySelectorAll('.iig-ref-slot')) {
+        if (slot.dataset.iigDropBound === '1') continue;
+        slot.dataset.iigDropBound = '1';
+        slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.classList.add('iig-slot-drop-hover'); });
+        slot.addEventListener('dragleave', () => slot.classList.remove('iig-slot-drop-hover'));
+        slot.addEventListener('drop', (e) => {
+            e.preventDefault();
+            slot.classList.remove('iig-slot-drop-hover');
+            const path = e.dataTransfer.getData('text/plain') || window._iigRecentDragPath;
+            if (!path) return;
+            const refType = slot.dataset.refType;
+            const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+            applyPathToSlot(slot, refType, npcIndex, path);
+            pushRecentRef(path);
+            toastr.success('Реф применён', 'SLAY Images', { timeOut: 1500 });
+        });
+    }
+}
+
+// Prevent popup from being cut off at viewport edges — shift it back into view after show.
+function clampPopupToViewport(popup) {
+    if (!popup || !popup.classList.contains('show')) return;
+    const rect = popup.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const margin = 8;
+    let left = rect.left;
+    let top = rect.top;
+    if (rect.right > vw - margin) left = Math.max(margin, vw - rect.width - margin);
+    if (rect.bottom > vh - margin) top = Math.max(margin, vh - rect.height - margin);
+    if (left < margin) left = margin;
+    if (top < margin) top = margin;
+    popup.style.left = left + 'px';
+    popup.style.top = top + 'px';
+}
+
+// Attach propagation-blockers on a popup so a click INSIDE it doesn't bubble up to
+// SillyTavern's drawer handlers which would close the settings panel.
+// BUBBLE phase only — if we used capture phase, our stopPropagation would cancel
+// the target-phase click on the actual buttons inside the popup.
+function armPopupContainment(popup) {
+    if (!popup || popup.dataset.iigContainArmed === '1') return;
+    popup.dataset.iigContainArmed = '1';
+    const swallow = (e) => { e.stopPropagation(); };
+    popup.addEventListener('mousedown', swallow);
+    popup.addEventListener('click', swallow);
+    popup.addEventListener('touchstart', swallow, { passive: true });
+}
+
+// Close both popups unconditionally — call after a successful pick
+function closeAllRefPopups() {
+    document.getElementById('slay_assign_popup')?.classList.remove('show');
+    document.getElementById('slay_slot_options_popup')?.classList.remove('show');
+}
+
+// ── Assign popup ("Куда применить?") ──
+function showAssignPopup(anchor, path) {
+    const popup = document.getElementById('slay_assign_popup');
+    if (!popup) return;
+    // Toggle: same path + popup already open = close
+    if (popup.classList.contains('show') && popup.dataset.path === path) {
+        popup.classList.remove('show');
+        return;
+    }
+    if (popup.parentElement !== document.body) document.body.appendChild(popup);
+    armPopupContainment(popup);
+    document.getElementById('slay_slot_options_popup')?.classList.remove('show');
+    // Discover existing slots so button list matches current character's NPC count
+    const slotButtons = [];
+    slotButtons.push(`<button class="iig-assign-btn" data-key="char">{{char}}</button>`);
+    slotButtons.push(`<button class="iig-assign-btn" data-key="user">{{user}}</button>`);
+    const npcSlots = document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]');
+    npcSlots.forEach((slot, i) => {
+        const idx = slot.dataset.npcIndex || i;
+        slotButtons.push(`<button class="iig-assign-btn" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
+    });
+    popup.innerHTML = `
+        <div class="iig-assign-title">Куда применить?</div>
+        <div class="iig-assign-preview"><img src="${String(path).replace(/"/g, '&quot;')}" alt=""></div>
+        <div class="iig-assign-buttons">${slotButtons.join('')}</div>
+    `;
+    // Position below the clicked thumb — fixed position is viewport-relative, no scroll offset needed
+    const rect = anchor.getBoundingClientRect();
+    popup.style.left = rect.left + 'px';
+    popup.style.top = (rect.bottom + 6) + 'px';
+    popup.classList.add('show');
+    popup.dataset.path = path;
+    // After show, clamp position to viewport so popup doesn't get cut off on the right/bottom
+    requestAnimationFrame(() => clampPopupToViewport(popup));
+    // Flash effect for the target slot on assign
+    for (const btn of popup.querySelectorAll('.iig-assign-btn')) {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const key = btn.dataset.key;
+            const slot = findSlotByKey(key);
+            if (!slot) { closeAllRefPopups(); return; }
+            const refType = slot.dataset.refType;
+            const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+            applyPathToSlot(slot, refType, npcIndex, path);
+            pushRecentRef(path);
+            slot.classList.add('iig-slot-flash');
+            setTimeout(() => slot.classList.remove('iig-slot-flash'), 600);
+            closeAllRefPopups();
+            toastr.success('Реф применён', 'SLAY Images', { timeOut: 1500 });
+        });
+    }
+}
+
+// ── Slot options popup ("Файл / Вставить / Недавние") when clicking an EMPTY slot ──
+function showSlotOptionsPopup(slot) {
+    const popup = document.getElementById('slay_slot_options_popup');
+    if (!popup) return;
+    // Toggle: if this same popup is already open for this exact slot — close it.
+    const slotKey = `${slot.dataset.refType}-${slot.dataset.npcIndex ?? ''}`;
+    if (popup.classList.contains('show') && popup.dataset.slotKey === slotKey) {
+        popup.classList.remove('show');
+        return;
+    }
+    popup.dataset.slotKey = slotKey;
+    if (popup.parentElement !== document.body) document.body.appendChild(popup);
+    armPopupContainment(popup);
+    // Close any stale assign popup that might still be visible
+    document.getElementById('slay_assign_popup')?.classList.remove('show');
+    const refType = slot.dataset.refType;
+    const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+    const targetLabel = refType === 'char' ? '{{char}}'
+        : refType === 'user' ? '{{user}}'
+        : `NPC ${Number.isFinite(npcIndex) ? npcIndex + 1 : '?'}`;
+    popup.innerHTML = `
+        <div class="iig-assign-title">Добавить в <span style="color:var(--slay-pink,#f472b6);">${targetLabel}</span></div>
+        <div class="iig-slot-options-row">
+            <button class="iig-slot-option-btn" data-act="file"><i class="fa-solid fa-folder-open"></i><span>Файл</span></button>
+            <button class="iig-slot-option-btn" data-act="paste"><i class="fa-solid fa-clipboard"></i><span>Вставить</span></button>
+            <button class="iig-slot-option-btn" data-act="recent"><i class="fa-solid fa-clock-rotate-left"></i><span>Недавние</span></button>
+        </div>
+    `;
+    const rect = slot.getBoundingClientRect();
+    popup.style.left = rect.left + 'px';
+    popup.style.top = (rect.bottom + 6) + 'px';
+    popup.classList.add('show');
+    requestAnimationFrame(() => clampPopupToViewport(popup));
+
+    popup.querySelector('[data-act="file"]').addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+        const fileInput = slot.querySelector('.iig-ref-file-input');
+        if (fileInput) fileInput.click();
+    });
+    popup.querySelector('[data-act="paste"]').addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+        await pasteFromClipboardToSlot(slot);
+    });
+    popup.querySelector('[data-act="recent"]').addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+        const ribbon = document.getElementById('slay_recent_refs_ribbon');
+        if (ribbon) {
+            ribbon.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            ribbon.classList.add('iig-recent-highlight');
+            setTimeout(() => ribbon.classList.remove('iig-recent-highlight'), 1500);
+        }
+    });
+}
+
+// Paste image from clipboard → upload → apply to slot
+async function pasteFromClipboardToSlot(slot) {
+    try {
+        if (!navigator.clipboard || !navigator.clipboard.read) {
+            toastr.error('Браузер не поддерживает чтение буфера обмена', 'SLAY Images');
+            return;
+        }
+        const items = await navigator.clipboard.read();
+        let blob = null;
+        for (const item of items) {
+            const imgType = item.types.find(t => t.startsWith('image/'));
+            if (imgType) { blob = await item.getType(imgType); break; }
+        }
+        if (!blob) {
+            toastr.warning('В буфере нет картинки', 'SLAY Images', { timeOut: 2500 });
+            return;
+        }
+        const rawBase64 = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onloadend = () => res(String(r.result).split(',')[1]);
+            r.onerror = rej;
+            r.readAsDataURL(blob);
+        });
+        const hashes = await computeRefHashes(rawBase64);
+        const refType = slot.dataset.refType;
+        const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+        const cached = await lookupRefByHashes(hashes);
+        if (cached) {
+            applyPathToSlot(slot, refType, npcIndex, cached);
+            pushRecentRef(cached);
+            toastr.success('Вставлено (из кеша, дубликат не создан)', 'SLAY Images', { timeOut: 1800 });
+            return;
+        }
+        const compressed = await compressBase64Image(rawBase64, 768, 0.8);
+        const label = refType === 'npc' ? `npc${npcIndex}` : refType;
+        const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
+        recordRefHashes(hashes, savedPath);
+        applyPathToSlot(slot, refType, npcIndex, savedPath);
+        pushRecentRef(savedPath);
+        toastr.success('Вставлено из буфера', 'SLAY Images', { timeOut: 1800 });
+    } catch (err) {
+        iigLog('ERROR', `Paste from clipboard failed: ${err?.message}`);
+        toastr.error(`Вставка не удалась: ${err?.message || 'ошибка'}`, 'SLAY Images');
+    }
+}
+
+// Close popups on outside click — bubble phase. Inner button handlers run first in target phase,
+// then armPopupContainment stops propagation, so this body-level handler only sees clicks OUTSIDE popups.
+document.addEventListener('click', (e) => {
+    const t = e.target;
+    const insideAssign = t.closest('.iig-assign-popup') || t.closest('.iig-recent-thumb');
+    const insideOptions = t.closest('.iig-slot-options-popup') || t.closest('.iig-ref-thumb-wrap') || t.closest('.iig-ref-upload-btn');
+    if (!insideAssign) document.getElementById('slay_assign_popup')?.classList.remove('show');
+    if (!insideOptions) document.getElementById('slay_slot_options_popup')?.classList.remove('show');
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAllRefPopups();
+});
 
 function bindRefSlotEvents() {
     for (const slot of document.querySelectorAll('.iig-ref-slot')) {
         const refType = slot.dataset.refType;
         const npcIndex = parseInt(slot.dataset.npcIndex, 10);
-        slot.querySelector('.iig-ref-name')?.addEventListener('input', (e) => {
+        // Name input persistence — write to settings on every keystroke AND force a sync save
+        // on blur/change. Debounced save alone was losing the last characters when users typed
+        // quickly and then switched to another slot or closed the panel.
+        const nameInput = slot.querySelector('.iig-ref-name');
+        const writeName = (value) => {
             const s = getCurrentCharacterRefs();
-            if (refType === 'char') s.charRef.name = e.target.value;
-            else if (refType === 'user') s.userRef.name = e.target.value;
-            else if (refType === 'npc') { if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '' }; s.npcReferences[npcIndex].name = e.target.value; }
-            saveSettings();
-        });
+            if (refType === 'char') s.charRef.name = value;
+            else if (refType === 'user') s.userRef.name = value;
+            else if (refType === 'npc') {
+                if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+                s.npcReferences[npcIndex].name = value;
+            }
+        };
+        if (nameInput) {
+            nameInput.addEventListener('input', (e) => { writeName(e.target.value); saveSettings(); });
+            // Flush to disk on blur/change/Enter — guarantees name survives even if user closes settings fast.
+            const flush = (e) => {
+                writeName(e.target.value);
+                saveSettings();
+                try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
+            };
+            nameInput.addEventListener('change', flush);
+            nameInput.addEventListener('blur', flush);
+            nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { flush(e); nameInput.blur(); } });
+        }
         const fileHandler = async (e) => {
             const file = e.target.files?.[0]; if (!file) return;
             try {
                 const rawBase64 = await new Promise((res, rej) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+                // Compute BOTH hashes (byte for exact match, pixel for "same image re-encoded differently")
+                const hashes = await computeRefHashes(rawBase64);
+                const cached = await lookupRefByHashes(hashes);
+                if (cached) {
+                    applyPathToSlot(slot, refType, npcIndex, cached);
+                    pushRecentRef(cached);
+                    toastr.success('Реф применён из кеша (дубликат не создан)', 'SLAY Images', { timeOut: 2000 });
+                    e.target.value = '';
+                    return;
+                }
                 const compressed = await compressBase64Image(rawBase64, 768, 0.8);
                 const label = refType === 'npc' ? `npc${npcIndex}` : refType;
-                const savedPath = await saveRefImageToFile(compressed, label);
-                const s = getCurrentCharacterRefs();
-                if (refType === 'char') { s.charRef.imageBase64 = ''; s.charRef.imagePath = savedPath; }
-                else if (refType === 'user') { s.userRef.imageBase64 = ''; s.userRef.imagePath = savedPath; }
-                else if (refType === 'npc') { if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' }; s.npcReferences[npcIndex].imageBase64 = ''; s.npcReferences[npcIndex].imagePath = savedPath; }
-                saveSettings();
-                const thumb = slot.querySelector('.iig-ref-thumb'); if (thumb) thumb.src = savedPath;
-                const tw = slot.querySelector('.iig-ref-thumb-wrap'); if (tw) tw.classList.add('has-image');
+                const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
+                recordRefHashes(hashes, savedPath);
+                applyPathToSlot(slot, refType, npcIndex, savedPath);
+                pushRecentRef(savedPath);
                 toastr.success('Фото сохранено', 'SLAY Images', { timeOut: 2000 });
-            } catch (err) { toastr.error('Ошибка загрузки фото', 'SLAY Images'); }
+            } catch (err) { iigLog('ERROR', `fileHandler: ${err?.message}`); toastr.error('Ошибка загрузки фото', 'SLAY Images'); }
             e.target.value = '';
         };
         for (const fi of slot.querySelectorAll('.iig-ref-file-input')) fi.addEventListener('change', fileHandler);
+
+        // v4.2: click on thumb-wrap (the camera icon area) always opens the options popup,
+        // whether the slot is empty or already has a picture. Useful for replacing via paste/recent
+        // without having to open file picker first. <label> removed from HTML earlier so no
+        // native label→input trigger competes with us.
+        const thumbWrap = slot.querySelector('.iig-ref-thumb-wrap');
+        if (thumbWrap) {
+            thumbWrap.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                showSlotOptionsPopup(slot);
+            });
+        }
+        // Upload button in .iig-ref-actions (sidebar, "Upload" label) — ALWAYS goes straight to
+        // the native file picker, regardless of whether the slot is empty or already filled.
+        // Users who want Paste or Recent use the camera icon on the thumbnail itself (popup).
+        for (const btn of slot.querySelectorAll('.iig-ref-upload-btn')) {
+            btn.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const fileInput = slot.querySelector('.iig-ref-file-input');
+                if (fileInput) fileInput.click();
+            });
+        }
         slot.querySelector('.iig-ref-delete-btn')?.addEventListener('click', () => {
             const s = getCurrentCharacterRefs();
             if (refType === 'char') s.charRef = { name: '', imageBase64: '', imagePath: '' };
@@ -4102,9 +4649,24 @@ function updateHeaderStatusDot() {
 // ── Initialization ──
 (function init() {
     const context = SillyTavern.getContext();
-    iigLog('INFO', 'Initializing Slay Images v4.0.0');
+    iigLog('INFO', 'Initializing Slay Images v4.2.0');
 
-    // Settings migration
+    // One-time reverse migration: if user tested the 4.2.0-preview build, their data lives
+    // under suffixed keys ('slay_wardrobe' + '_preview' / 'slay_image_gen' + '_preview').
+    // Move it back to the main keys on first run of stable 4.2.0. Using string concat so
+    // the future replace_all rename can't collapse both sides into the same literal.
+    const _PW = 'slay_wardrobe' + '_preview';
+    const _PG = 'slay_image_gen' + '_preview';
+    if (context.extensionSettings[_PW] && !context.extensionSettings.slay_wardrobe) {
+        context.extensionSettings.slay_wardrobe = structuredClone(context.extensionSettings[_PW]);
+        iigLog('INFO', 'Migrated ' + _PW + ' -> slay_wardrobe (one-time, preview upgrade)');
+    }
+    if (context.extensionSettings[_PG] && !context.extensionSettings.slay_image_gen) {
+        context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings[_PG]);
+        iigLog('INFO', 'Migrated ' + _PG + ' -> slay_image_gen (one-time, preview upgrade)');
+    }
+
+    // Legacy settings migration (pre-SLAY fork)
     if (context.extensionSettings.silly_wardrobe && !context.extensionSettings.slay_wardrobe) {
         context.extensionSettings.slay_wardrobe = structuredClone(context.extensionSettings.silly_wardrobe);
         iigLog('INFO', 'Migrated silly_wardrobe -> slay_wardrobe');

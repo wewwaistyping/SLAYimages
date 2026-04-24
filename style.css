@@ -337,7 +337,9 @@
 }
 .iig-error-placeholder .iig-error-retry {
     display: inline-flex;
+    flex-direction: row;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     padding: 6px 14px;
     margin-top: 4px;
@@ -349,6 +351,19 @@
     border: 1px solid color-mix(in srgb, var(--slay-pink) 40%, transparent);
     background: color-mix(in srgb, var(--slay-pink) 12%, transparent);
     color: var(--slay-pink);
+    /* Russian text fix: ST inherits word-break:break-all in some themes, which breaks label letter-by-letter on narrow containers */
+    white-space: nowrap;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    width: auto;
+    max-width: 100%;
+    writing-mode: horizontal-tb;
+}
+.iig-error-placeholder .iig-error-retry span,
+.iig-error-placeholder .iig-error-retry i {
+    white-space: nowrap;
+    word-break: keep-all;
+    writing-mode: horizontal-tb;
 }
 .iig-error-placeholder .iig-error-retry:hover {
     background: var(--slay-pink);
@@ -1065,16 +1080,14 @@
     .sw-corner-btn.sw-corner-active { opacity: 1; }
 }
 
+/* Regeneration overlay shown on top of image while regen is in flight */
 /* When regen is in flight, clip the wrapped img so the hover scale(1.008)
-   on .iig-generated-image can't peek out from under the overlay.
-   Uses both :has() (modern) and an explicit .iig-regen-active class
-   (applied in JS) for iOS Safari <15.4 fallback. */
+   on .iig-generated-image can't peek out from under the overlay. */
 .iig-img-wrap:has(.iig-regen-overlay),
 .iig-img-wrap.iig-regen-active { overflow: hidden; border-radius: 8px; }
 .iig-img-wrap:has(.iig-regen-overlay) > .iig-generated-image:hover,
 .iig-img-wrap.iig-regen-active > .iig-generated-image:hover { transform: none; }
 
-/* Regeneration overlay shown on top of image while regen is in flight */
 .iig-img-wrap .iig-regen-overlay {
     position: absolute;
     inset: 0;
@@ -1576,4 +1589,215 @@
     .slay-style-modal { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; }
     .slay-style-grid { grid-template-columns: 1fr; gap: 8px; }
     .slay-sc-prev, .slay-sc-next { opacity: 0.7; }
+}
+
+/* ═══════════════════════════════════════════
+   v4.2 PREVIEW — Recent refs ribbon + popups
+   ═══════════════════════════════════════════ */
+
+.iig-recent-refs-ribbon {
+    margin-top: 14px;
+    padding: 12px 12px 0;
+    border-top: 1px dashed color-mix(in srgb, var(--slay-pink) 14%, var(--SmartThemeBorderColor));
+    display: none;
+}
+.iig-recent-refs-ribbon.has-items { display: block; }
+.iig-recent-refs-ribbon.iig-recent-highlight {
+    animation: iig-recent-pulse 1.4s ease-out;
+}
+@keyframes iig-recent-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(244,114,182,0.0); }
+    30%  { box-shadow: 0 0 0 3px rgba(244,114,182,0.5); }
+    100% { box-shadow: 0 0 0 0 rgba(244,114,182,0.0); }
+}
+.iig-recent-refs-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.iig-recent-refs-title {
+    font-size: 0.75em;
+    color: var(--slay-pink);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+.iig-recent-refs-title i {
+    margin-right: 5px;
+    opacity: 0.8;
+}
+.iig-recent-refs-hint {
+    font-size: 0.68em;
+    color: var(--SmartThemeQuoteColor);
+    opacity: 0.55;
+}
+.iig-recent-refs-track {
+    display: flex;
+    gap: 7px;
+    overflow-x: auto;
+    padding: 3px 2px 6px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--slay-pink) 30%, transparent) transparent;
+}
+.iig-recent-refs-track::-webkit-scrollbar { height: 4px; }
+.iig-recent-refs-track::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--slay-pink) 30%, transparent); border-radius: 2px; }
+.iig-recent-thumb {
+    position: relative;
+    flex-shrink: 0;
+    width: 54px;
+    height: 54px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 18%, var(--SmartThemeBorderColor));
+    cursor: pointer;
+    transition: all 0.15s;
+    background: rgba(0, 0, 0, 0.2);
+}
+.iig-recent-thumb:hover {
+    border-color: var(--slay-pink);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(244, 114, 182, 0.25);
+}
+.iig-recent-thumb.dragging { opacity: 0.5; transform: scale(0.95); }
+.iig-recent-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center top;
+    display: block;
+    pointer-events: none;
+}
+.iig-recent-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.75);
+    color: rgba(255, 255, 255, 0.85);
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 14px;
+    padding: 0;
+    opacity: 0;
+    transition: all 0.15s;
+}
+.iig-recent-thumb:hover .iig-recent-remove { opacity: 1; }
+.iig-recent-remove:hover { background: var(--slay-error, #ef4444); color: #fff; }
+/* Touch devices — no hover, show the remove button faintly so tap target is discoverable */
+@media (hover: none) {
+    .iig-recent-remove { opacity: 0.55; }
+}
+
+/* Softer placeholder for ref-name inputs — the example text shouldn't visually fight with real names */
+.iig-ref-name::placeholder { color: var(--SmartThemeQuoteColor, rgba(255,255,255,0.5)); opacity: 0.4; font-style: italic; }
+.iig-ref-name::-webkit-input-placeholder { color: var(--SmartThemeQuoteColor, rgba(255,255,255,0.5)); opacity: 0.4; font-style: italic; }
+.iig-ref-name::-moz-placeholder { color: var(--SmartThemeQuoteColor, rgba(255,255,255,0.5)); opacity: 0.4; font-style: italic; }
+
+/* Drop feedback on slots */
+.iig-ref-slot.iig-slot-drop-hover {
+    outline: 2px dashed var(--slay-pink);
+    outline-offset: 2px;
+    background: rgba(244, 114, 182, 0.08);
+}
+.iig-ref-slot.iig-slot-flash {
+    animation: iig-slot-flash 0.6s ease-out;
+}
+@keyframes iig-slot-flash {
+    0%   { box-shadow: 0 0 0 3px var(--slay-pink); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* Floating popups — assign + slot-options.
+   position:fixed + very high z-index so they float above SillyTavern's settings drawer,
+   which has its own stacking context and clipping. */
+.iig-assign-popup, .iig-slot-options-popup {
+    position: fixed !important;
+    background: rgba(18, 18, 26, 0.97);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 32%, var(--SmartThemeBorderColor));
+    border-radius: 10px;
+    padding: 10px 12px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    z-index: 99999 !important;
+    display: none;
+    min-width: 220px;
+    max-width: 320px;
+    pointer-events: auto;
+}
+.iig-assign-popup.show, .iig-slot-options-popup.show { display: block; }
+.iig-assign-title {
+    font-size: 0.72em;
+    color: var(--slay-pink);
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-align: center;
+}
+.iig-assign-preview {
+    width: 60px;
+    height: 60px;
+    margin: 0 auto 10px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 20%, transparent);
+}
+.iig-assign-preview img {
+    width: 100%; height: 100%;
+    object-fit: cover; object-position: center top;
+    display: block;
+}
+.iig-assign-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    gap: 4px;
+}
+.iig-assign-btn {
+    padding: 6px 10px;
+    font-size: 0.72em;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.15));
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #e2e2e2);
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.iig-assign-btn:hover {
+    background: var(--slay-pink);
+    color: #0a0a0f;
+    border-color: var(--slay-pink);
+}
+
+.iig-slot-options-row {
+    display: flex;
+    gap: 6px;
+}
+.iig-slot-option-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 6px;
+    font-size: 0.72em;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.15));
+    color: var(--SmartThemeBodyColor, #e2e2e2);
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+}
+.iig-slot-option-btn i {
+    font-size: 1.15em;
+    color: var(--slay-pink);
+}
+.iig-slot-option-btn:hover {
+    background: color-mix(in srgb, var(--slay-pink) 12%, transparent);
+    border-color: color-mix(in srgb, var(--slay-pink) 35%, transparent);
+    transform: translateY(-1px);
 }
