@@ -1327,9 +1327,9 @@ const defaultSettings = Object.freeze({
     // Gemini/nano-banana
     sendCharAvatar: true,
     sendUserAvatar: true,
-    sendCharRefOnlyIfMentioned: false,
-    sendUserRefOnlyIfMentioned: false,
     userAvatarFile: '',
+    // refMigratedV41 — sentinel for one-time migration to reset sticky false values
+    refMigratedV41: false,
     aspectRatio: '1:1',
     imageSize: '1K',
     // Naistera
@@ -1593,15 +1593,29 @@ function getCurrentCharacterRefs() {
 }
 function getCurrentCharacterNpcs() { return getCurrentCharacterRefs().npcReferences; }
 
+// Parse a name field that may contain multiple aliases separated by comma / semicolon / pipe /
+// slash / whitespace (e.g. "Ева, Eve, Eva, Ivy, Иви"). Returns tokens of length >= 2.
+// The >=2 cutoff (was >2) lets 2-letter names like "Ли", "Ян", "Ed", "Jo" pass.
+function parseNameTokens(rawName) {
+    return String(rawName || '')
+        .split(/[\s,;|/]+/)
+        .map(t => t.trim())
+        .filter(t => t.length >= 2);
+}
+
+function nameIsInPrompt(rawName, lowerPrompt) {
+    const tokens = parseNameTokens(rawName);
+    if (tokens.length === 0) return false;
+    return tokens.some(t => lowerPrompt.includes(t.toLowerCase()));
+}
+
 function matchNpcReferences(prompt, npcList) {
     if (!prompt || !npcList || npcList.length === 0) return [];
     const lowerPrompt = prompt.toLowerCase();
     const matched = [];
     for (const npc of npcList) {
         if (!npc || !npc.name || (!npc.imagePath && !npc.imageBase64 && !npc.imageData)) continue;
-        const words = npc.name.trim().split(/\s+/).filter(w => w.length > 2);
-        if (words.length === 0) continue;
-        if (words.some(word => lowerPrompt.includes(word.toLowerCase()))) {
+        if (nameIsInPrompt(npc.name, lowerPrompt)) {
             matched.push({ name: npc.name, imageBase64: npc.imageBase64, imagePath: npc.imagePath });
         }
     }
@@ -2353,11 +2367,13 @@ function attachRegenButton(imgEl) {
         // which won't match the relative one in the message text, so replaceAll would no-op.
         let liveImg = imgEl;
         const origSrcAttr = imgEl.getAttribute('src') || '';
-        const origOpacity = imgEl.style.opacity;
-        imgEl.style.opacity = '0.35';
+        // Note: we don't dim the image via inline opacity anymore. The overlay's backdrop
+        // (rgba(8,8,14,0.55) + blur) provides enough visual feedback that regen is in progress,
+        // and avoids a class of edge-case bugs where inline opacity stayed sticky after a DOM
+        // re-render (swipe during regen, ST message re-render, etc.).
 
         // Floating overlay with spinner + status + live timer, placed inside the img wrap
-        // above the dimmed image. Matches the loading-placeholder timer format for consistency.
+        // above the image. Matches the loading-placeholder timer format for consistency.
         const overlay = document.createElement('div');
         overlay.className = 'iig-regen-overlay';
         overlay.innerHTML = `
@@ -2425,8 +2441,21 @@ function attachRegenButton(imgEl) {
                 toastr.error(`Перегенерация упала: ${errorMsg || 'неизвестная ошибка'}`, 'SLAY Images');
             }
         } finally {
-            // Always restore opacity and button state, regardless of what happened above
-            liveImg.style.opacity = origOpacity;
+            // Safety net: clear any leftover inline opacity on ANY img with the same
+            // data-iig-instruction in DOM. Covers DOM re-renders / swipes / duplicate
+            // copies that may have inherited a sticky "0.35" from older extension versions.
+            try {
+                const instrVal = imgEl.getAttribute('data-iig-instruction');
+                if (instrVal) {
+                    for (const candidate of document.querySelectorAll('img[data-iig-instruction]')) {
+                        if (candidate.getAttribute('data-iig-instruction') === instrVal) {
+                            candidate.style.opacity = '';
+                        }
+                    }
+                }
+                imgEl.style.opacity = '';
+                if (liveImg !== imgEl) liveImg.style.opacity = '';
+            } catch (e) { /* never block finalization */ }
             icon.className = origIconClass;
             btn.classList.remove('iig-regen-busy');
         }
@@ -2440,7 +2469,19 @@ function attachRegenButton(imgEl) {
 function attachRegenButtonsInRoot(root) {
     if (!root) return;
     const imgs = root.querySelectorAll('img.iig-generated-image[data-iig-instruction], img[data-iig-instruction]');
-    for (const img of imgs) attachRegenButton(img);
+    for (const img of imgs) {
+        // Skip error placeholders — they have their own "Попробовать снова" button
+        if (img.classList.contains('iig-error-image')) continue;
+        attachRegenButton(img);
+    }
+    // Rehydrate error placeholders that survived a page reload. On reload the message source
+    // contains <img src="error.svg" data-iig-instruction="...">, which we swap for a proper
+    // div-placeholder with a retry button.
+    for (const stale of root.querySelectorAll('img.iig-error-image[data-iig-instruction]')) {
+        const instr = stale.getAttribute('data-iig-instruction') || '';
+        const errorEl = createErrorPlaceholder(stale.dataset.tagId || `iig-reload-${Date.now()}`, 'Картинка не была сгенерирована', { fullMatch: `data-iig-instruction='${instr}'` });
+        stale.replaceWith(errorEl);
+    }
 }
 
 function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
@@ -2474,17 +2515,24 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
 
     // ── Determine which characters are mentioned in the prompt (used for refs AND descriptions) ──
+    // Name field can contain multiple aliases separated by comma/semicolon/pipe/slash/space
+    // (e.g. "Ева, Eve, Eva, Ivy, Иви") — see parseNameTokens(). Matching any alias = mentioned.
     const refs = getCurrentCharacterRefs();
     const charDisplayName = getDefaultCharRefName(refs);
     const userDisplayName = getDefaultUserRefName(refs);
     const lowerPrompt = prompt.toLowerCase();
-    const charNameWords = charDisplayName.split(/\s+/).filter(w => w.length > 2);
-    const userNameWords = userDisplayName.split(/\s+/).filter(w => w.length > 2);
-    const charInPrompt = charNameWords.length > 0 && charNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
-    const userInPrompt = userNameWords.length > 0 && userNameWords.some(w => lowerPrompt.includes(w.toLowerCase()));
-    const shouldSendCharReference = settings.sendCharAvatar && (!settings.sendCharRefOnlyIfMentioned || charInPrompt);
-    const shouldSendUserReference = settings.sendUserAvatar && (!settings.sendUserRefOnlyIfMentioned || userInPrompt);
+    const charInPrompt = nameIsInPrompt(charDisplayName, lowerPrompt);
+    const userInPrompt = nameIsInPrompt(userDisplayName, lowerPrompt);
+    // Refs ship only when their owner is explicitly named in the image prompt. This restores
+    // the pre-PR behaviour: char face/outfit gated by charInPrompt, user face/outfit by userInPrompt.
+    // Matched NPCs already use the same name-matching path via matchNpcReferences.
+    const shouldSendCharReference = settings.sendCharAvatar && charInPrompt;
+    const shouldSendUserReference = settings.sendUserAvatar && userInPrompt;
     iigLog('INFO', `Prompt mentions: char "${charDisplayName}"=${charInPrompt}, user "${userDisplayName}"=${userInPrompt}`);
+    if (settings.sendCharAvatar && !charInPrompt) iigLog('INFO', `Char ref skipped — "${charDisplayName}" not found in image prompt`);
+    if (settings.sendUserAvatar && !userInPrompt) iigLog('INFO', `User ref skipped — "${userDisplayName}" not found in image prompt`);
+    if (!settings.sendCharAvatar) iigLog('INFO', 'Char ref disabled in settings (sendCharAvatar=false)');
+    if (!settings.sendUserAvatar) iigLog('INFO', 'User ref disabled in settings (sendUserAvatar=false)');
 
     // ── Multimodal refs (base64 + labels) for Gemini AND OpenAI-compatible chat.completions ──
     if (settings.apiType !== 'naistera') {
@@ -2497,21 +2545,21 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             return true;
         };
 
-        // 1. Character avatar
-        if (canPush()) {
-            const charReference = shouldSendCharReference ? await getPreferredCharacterReferenceBase64(refs, settings) : null;
+        // 1. Character avatar — only if char is mentioned
+        if (canPush() && shouldSendCharReference) {
+            const charReference = await getPreferredCharacterReferenceBase64(refs, settings);
             pushRef(charReference, 'char_face', charDisplayName);
         }
 
-        // 2. User avatar
-        if (canPush()) {
-            const userReference = shouldSendUserReference ? await getPreferredUserReferenceBase64(refs, settings) : null;
+        // 2. User avatar — only if user is mentioned
+        if (canPush() && shouldSendUserReference) {
+            const userReference = await getPreferredUserReferenceBase64(refs, settings);
             pushRef(userReference, 'user_face', userDisplayName);
         }
 
-        // 3. Wardrobe
+        // 3. Wardrobe outfits — only for the character(s) mentioned in the prompt
         if (window.slayWardrobe?.isReady()) {
-            if (canPush() && swS.sendOutfitImageBot !== false) {
+            if (canPush() && charInPrompt && swS.sendOutfitImageBot !== false) {
                 let pushed = false;
                 const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
                 if (botB64) pushed = pushRef(botB64, 'char_outfit', charDisplayName);
@@ -2520,7 +2568,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                     if (pushRef(collageB64, 'char_outfit', charDisplayName)) iigLog('INFO', 'Collage sent for char');
                 }
             }
-            if (canPush() && swS.sendOutfitImageUser !== false) {
+            if (canPush() && userInPrompt && swS.sendOutfitImageUser !== false) {
                 let pushed = false;
                 const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
                 if (userB64) pushed = pushRef(userB64, 'user_outfit', userDisplayName);
@@ -2566,19 +2614,19 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             naisteraRefLabels.push(label);
             return true;
         };
-        // 1. Character avatar
-        if (canPush()) {
-            const u = shouldSendCharReference ? await getPreferredCharacterReferenceDataUrl(refs, settings) : null;
+        // 1. Character avatar — only if char is mentioned
+        if (canPush() && shouldSendCharReference) {
+            const u = await getPreferredCharacterReferenceDataUrl(refs, settings);
             if (u) pushRef(u, `${charDisplayName} (character)`);
         }
-        // 2. User avatar
-        if (canPush()) {
-            const u = shouldSendUserReference ? await getPreferredUserReferenceDataUrl(refs, settings) : null;
+        // 2. User avatar — only if user is mentioned
+        if (canPush() && shouldSendUserReference) {
+            const u = await getPreferredUserReferenceDataUrl(refs, settings);
             if (u) pushRef(u, `${userDisplayName} (user)`);
         }
-        // 3. Wardrobe
+        // 3. Wardrobe outfits — only for the character(s) mentioned in the prompt
         if (window.slayWardrobe?.isReady()) {
-            if (canPush() && swS.sendOutfitImageBot !== false) {
+            if (canPush() && charInPrompt && swS.sendOutfitImageBot !== false) {
                 let pushed = false;
                 const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
                 if (botB64) pushed = pushRef(`data:image/png;base64,${botB64}`, `${charDisplayName} outfit`);
@@ -2587,7 +2635,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                     if (pushRef(collageB64 ? `data:image/png;base64,${collageB64}` : null, `${charDisplayName} outfit`)) iigLog('INFO', 'Collage sent for char');
                 }
             }
-            if (canPush() && swS.sendOutfitImageUser !== false) {
+            if (canPush() && userInPrompt && swS.sendOutfitImageUser !== false) {
                 let pushed = false;
                 const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
                 if (userB64) pushed = pushRef(`data:image/png;base64,${userB64}`, `${userDisplayName} outfit`);
@@ -2833,13 +2881,113 @@ function createLoadingPlaceholder(tagId) {
 }
 
 function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
-    const img = document.createElement('img');
-    img.className = 'iig-error-image'; img.src = getErrorImagePath(); img.alt = 'Generation error'; img.title = `Error: ${errorMessage}`; img.dataset.tagId = tagId;
-    if (tagInfo.fullMatch) {
-        const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(?:(['"]))([\s\S]*?)\1/i) || tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*([{][\s\S]*?[}])(?:\s|>)/i);
-        if (instructionMatch) img.setAttribute('data-iig-instruction', instructionMatch[2] || instructionMatch[1]);
+    // v4.1.5: div-based error placeholder with inline SVG (no dependency on error.svg file which
+    // was unreliable when extension path != standard) + built-in "Попробовать снова" button.
+    // This replaces the previous <img class="iig-error-image" src="error.svg"> which caused two
+    // bugs: (a) broken <img> icon when error.svg 404, (b) attachRegenButton wrapped the
+    // zero-width broken image in <span>, making the regen overlay zero-sized.
+    const el = document.createElement('div');
+    el.className = 'iig-error-placeholder';
+    el.dataset.tagId = tagId;
+    // Keep instruction on the element so the retry button can parse it, AND so recovery after
+    // page reload still has params to regenerate from
+    let instructionValue = '';
+    if (tagInfo?.fullMatch) {
+        const m = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(?:(['"]))([\s\S]*?)\1/i) || tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*([{][\s\S]*?[}])(?:\s|>)/i);
+        if (m) instructionValue = m[2] || m[1];
     }
-    return img;
+    if (instructionValue) el.setAttribute('data-iig-instruction', instructionValue);
+    const shortMsg = String(errorMessage || '').slice(0, 140);
+    const fullMsg = String(errorMessage || '');
+    el.innerHTML = `
+        <div class="iig-error-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.73 18 13.73 3.27a2 2 0 0 0-3.46 0L2.27 18a2 2 0 0 0 1.73 3h16a2 2 0 0 0 1.73-3"/>
+                <path d="M12 9v4"/>
+                <path d="M12 17h.01"/>
+            </svg>
+        </div>
+        <div class="iig-error-title">Генерация не удалась</div>
+        <div class="iig-error-msg" title="${sanitizeForHtml(fullMsg)}">${sanitizeForHtml(shortMsg)}</div>
+        <button class="iig-error-retry menu_button" type="button"><i class="fa-solid fa-rotate"></i> Попробовать снова</button>
+    `;
+    // Retry button — reuse the same flow as the regen overlay on success images
+    el.querySelector('.iig-error-retry')?.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        await retryFailedGeneration(el, instructionValue);
+    });
+    return el;
+}
+
+// Replace error placeholder with loading, run generateImageWithRetry, then swap to final image
+// (or back to a new error placeholder if it fails again).
+async function retryFailedGeneration(errorEl, instructionJsonStr) {
+    if (!errorEl || !errorEl.isConnected) return;
+    if (errorEl.dataset.iigRetrying === '1') return;
+    errorEl.dataset.iigRetrying = '1';
+
+    // Parse instruction
+    let data;
+    try {
+        const decoded = String(instructionJsonStr || '')
+            .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+            .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
+        try { data = JSON.parse(decoded); }
+        catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+    } catch (err) {
+        toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
+        errorEl.dataset.iigRetrying = '0';
+        return;
+    }
+
+    const mesEl = errorEl.closest('.mes');
+    const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : undefined;
+    const ctx = SillyTavern.getContext();
+    const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+
+    // Swap error placeholder for loading placeholder
+    const tagId = errorEl.dataset.tagId || `iig-retry-${Date.now()}`;
+    const loading = createLoadingPlaceholder(tagId);
+    errorEl.replaceWith(loading);
+    const labelEl = loading.querySelector('.iig-status-label');
+    const timerEl = loading.querySelector('.iig-status-timer');
+
+    try {
+        const result = await generateImageWithRetry(data.prompt, data.style,
+            (s) => { if (labelEl?.isConnected) labelEl.textContent = s; },
+            { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, messageId });
+        if (labelEl?.isConnected) labelEl.textContent = 'Сохранение...';
+        if (timerEl?.isConnected) timerEl.textContent = '';
+        const imagePath = isGeneratedVideoResult(result)
+            ? await saveNaisteraMediaToFile(result.dataUrl, 'video')
+            : await saveImageToFile(result);
+        const newEl = createGeneratedMediaElement(imagePath, { style: data.style, prompt: data.prompt });
+        if (instructionJsonStr) newEl.setAttribute('data-iig-instruction', instructionJsonStr);
+        if (loading._timerInterval) clearInterval(loading._timerInterval);
+        if (loading.isConnected) loading.replaceWith(newEl);
+        if (newEl.getAttribute('data-iig-instruction')) attachRegenButton(newEl);
+
+        // Persist new src in message source so it survives reload
+        if (message && typeof message.mes === 'string') {
+            const errorImgPath = getErrorImagePath();
+            const updated = String(message.mes).replace(errorImgPath, imagePath);
+            if (updated !== message.mes) {
+                message.mes = updated;
+                if (message.extra?.display_text) message.extra.display_text = String(message.extra.display_text).replace(errorImgPath, imagePath);
+                if (message.extra?.extblocks) message.extra.extblocks = String(message.extra.extblocks).replace(errorImgPath, imagePath);
+                ctx.saveChatDebounced?.();
+            }
+        }
+        toastr.success('Картинка сгенерирована', 'SLAY Images', { timeOut: 2000 });
+    } catch (err) {
+        const errorMsg = err?.message || String(err);
+        iigLog('ERROR', `Retry failed: ${errorMsg}`);
+        if (loading._timerInterval) clearInterval(loading._timerInterval);
+        // Fall back to a new error placeholder with the same instruction
+        const newError = createErrorPlaceholder(tagId, errorMsg, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
+        if (loading.isConnected) loading.replaceWith(newError);
+        toastr.error(`Ошибка: ${errorMsg}`, 'SLAY Images');
+    }
 }
 
 // ── Message processing (merged: sillyimages externalBlocks + notsosillynotsoimages guards) ──
@@ -3116,7 +3264,7 @@ function createSettingsUI() {
     for (let i = 0; i < 4; i++) {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
             <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div>
-            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя" value=""></div>
+            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div>
             <div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
         </div>`;
     }
@@ -3166,18 +3314,12 @@ function createSettingsUI() {
                 <div id="slay_refs_section" class="iig-refs">
                     <h4><i class="fa-solid fa-user-group"></i> Референсы персонажей</h4>
                     <label class="checkbox_label"><input type="checkbox" id="slay_send_char_ref" ${settings.sendCharAvatar !== false ? 'checked' : ''}><span>Отправлять референс бота</span></label>
-                    <div id="slay_send_char_ref_if_mentioned_row" class="${settings.sendCharAvatar !== false ? '' : 'iig-hidden'}">
-                        <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_send_char_ref_if_mentioned" ${settings.sendCharRefOnlyIfMentioned ? 'checked' : ''}><span>Отправлять, если имя бота есть в промпте картинки</span></label>
-                    </div>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_send_user_ref" ${settings.sendUserAvatar !== false ? 'checked' : ''}><span>Отправлять референс пользователя</span></label>
-                    <div id="slay_send_user_ref_if_mentioned_row" class="${settings.sendUserAvatar !== false ? '' : 'iig-hidden'}">
-                        <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_send_user_ref_if_mentioned" ${settings.sendUserRefOnlyIfMentioned ? 'checked' : ''}><span>Отправлять, если имя пользователя есть в промпте картинки</span></label>
-                    </div>
-                    <p class="hint">По умолчанию, для {{char}} и {{user}} отправляются картинки из карточек. Можно загрузить кастомные, чтобы отправлялись они.<br><br>Референсы NPC будут отправляться только когда в промпте на генерацию картинки упомянуто их имя.</p>
+                    <p class="hint">Референсы (бот, юзер, NPC) и картинки одежды отправляются только когда в промте картинки упоминается соответствующее имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если в промте встретится любой из них.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><label class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label></div><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Ева, Eve, Eva, Ivy, Иви" value=""></div><div class="iig-ref-actions"><label class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"></label><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
@@ -3310,6 +3452,10 @@ function bindRefSlotEvents() {
     }
 }
 
+// Bumped alongside manifest.json — used to invalidate style cache when parse format changes
+const STYLE_CACHE_EXT_VERSION = '4.1.5';
+const STYLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h fallback when ETag isn't supported
+
 async function openStylePickerModal() {
     const BASE = 'https://wewwaistyping.github.io/slayimagespromts/';
 
@@ -3322,6 +3468,7 @@ async function openStylePickerModal() {
           <a class="slay-style-source-link" href="${BASE}" target="_blank" rel="noopener" title="Открыть на сайте">
             <i class="fa-solid fa-arrow-up-right-from-square"></i> Сайт
           </a>
+          <div class="slay-style-refresh menu_button" title="Обновить стили с сайта"><i class="fa-solid fa-rotate"></i></div>
           <div class="slay-style-modal-close menu_button"><i class="fa-solid fa-xmark"></i></div>
         </div>
         <div class="slay-style-filters"></div>
@@ -3358,7 +3505,10 @@ async function openStylePickerModal() {
         document.body.style.overflow = 'hidden';
     };
 
-    const CACHE_KEY = 'slay_styles_cache';
+    // Cache structure: { v, styles, etag, lastModified, ts }
+    //   v = extension version at time of cache (invalidates on extension upgrade)
+    //   ts = cache creation timestamp (for TTL fallback when ETag isn't available)
+    const CACHE_KEY = 'slay_styles_cache_v2';
     let styles = [];
 
     const parseStyles = (html) => {
@@ -3385,19 +3535,73 @@ async function openStylePickerModal() {
         return result;
     };
 
-    let fetchErr = null;
-    try {
-        const html = await fetch(BASE).then(r => r.text());
-        styles = parseStyles(html);
-        try { localStorage.setItem(CACHE_KEY, JSON.stringify(styles)); } catch (e) { }
-    } catch (err) {
-        fetchErr = err;
+    const readCache = () => {
         try {
-            const cached = localStorage.getItem(CACHE_KEY);
-            if (cached) { styles = JSON.parse(cached); iigLog('WARN', `Style fetch failed, loaded ${styles.length} styles from cache`); }
-        } catch (e) { }
-        if (!styles.length) {
-            overlay.querySelector('.slay-style-body').innerHTML = `<p style="padding:16px;opacity:.6;">Ошибка загрузки: ${fetchErr.message}</p>`;
+            const raw = localStorage.getItem(CACHE_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            // Invalidate cache from a different extension version (parser format may have changed)
+            if (parsed?.v !== STYLE_CACHE_EXT_VERSION) return null;
+            if (!Array.isArray(parsed.styles)) return null;
+            return parsed;
+        } catch (e) { return null; }
+    };
+
+    const writeCache = (obj) => {
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify({ v: STYLE_CACHE_EXT_VERSION, ...obj })); } catch (e) { }
+    };
+
+    // Fetch with conditional headers. Resolves to {status, styles, etag, lastModified} where:
+    //   status = 'notmodified' (304 — nothing to do)
+    //           | 'updated'    (200 — new styles parsed)
+    //           | 'error'      (network error)
+    const fetchStyles = async (cached, { force = false } = {}) => {
+        const headers = {};
+        if (!force && cached?.etag) headers['If-None-Match'] = cached.etag;
+        if (!force && cached?.lastModified) headers['If-Modified-Since'] = cached.lastModified;
+        try {
+            const resp = await fetch(BASE, { headers });
+            if (resp.status === 304) return { status: 'notmodified' };
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const html = await resp.text();
+            const parsedStyles = parseStyles(html);
+            return {
+                status: 'updated',
+                styles: parsedStyles,
+                etag: resp.headers.get('ETag') || '',
+                lastModified: resp.headers.get('Last-Modified') || '',
+            };
+        } catch (err) {
+            return { status: 'error', error: err };
+        }
+    };
+
+    const bodyEl = overlay.querySelector('.slay-style-body');
+    const cached = readCache();
+    const cacheAge = cached ? Date.now() - (cached.ts || 0) : Infinity;
+    const cacheFresh = cached && cacheAge < STYLE_CACHE_TTL_MS;
+
+    // Strategy:
+    //   1. If we have any valid cache — show it immediately (stale-while-revalidate).
+    //   2. Fetch in the background with If-None-Match to detect real site changes.
+    //   3. If 304 — do nothing. If updated — replace grid with new data + toast.
+    //   4. If no cache at all — fetch foreground, show loading state.
+    let backgroundRefresh = null;
+
+    if (cached) {
+        styles = cached.styles;
+        iigLog('INFO', `Styles loaded from cache: ${styles.length}, age=${Math.round(cacheAge/1000)}s`);
+        // If cache is stale (>24h) or just always — background-validate with ETag.
+        backgroundRefresh = fetchStyles(cached, { force: !cacheFresh });
+    } else {
+        // No cache — must fetch foreground
+        const result = await fetchStyles(null, { force: true });
+        if (result.status === 'updated') {
+            styles = result.styles;
+            writeCache({ styles, etag: result.etag, lastModified: result.lastModified, ts: Date.now() });
+        } else {
+            const msg = result.error?.message || 'неизвестная ошибка';
+            bodyEl.innerHTML = `<p style="padding:16px;opacity:.6;">Ошибка загрузки: ${msg}</p>`;
             return;
         }
     }
@@ -3407,7 +3611,7 @@ async function openStylePickerModal() {
     let activeTag = '';
 
     const filtersEl = overlay.querySelector('.slay-style-filters');
-    const bodyEl = overlay.querySelector('.slay-style-body');
+    // bodyEl is declared in the cache block above — reused here
 
     const renderFilters = () => {
         filtersEl.innerHTML = ['', ...allTags].map(t =>
@@ -3533,20 +3737,71 @@ async function openStylePickerModal() {
 
     renderFilters();
     renderGrid();
-}
 
-function updateReferenceOptionVisibility() {
-    const charRow = document.getElementById('slay_send_char_ref_if_mentioned_row');
-    const userRow = document.getElementById('slay_send_user_ref_if_mentioned_row');
-    const charEnabled = document.getElementById('slay_send_char_ref')?.checked;
-    const userEnabled = document.getElementById('slay_send_user_ref')?.checked;
-    charRow?.classList.toggle('iig-hidden', !charEnabled);
-    userRow?.classList.toggle('iig-hidden', !userEnabled);
+    // Apply a freshly-fetched style set: update caches, re-derive tags, re-render UI
+    const applyFreshStyles = (result, { silent = false } = {}) => {
+        if (!result || result.status !== 'updated') return;
+        const oldCount = styles.length;
+        styles = result.styles;
+        writeCache({ styles, etag: result.etag, lastModified: result.lastModified, ts: Date.now() });
+        // Re-derive tag list (new styles might add new categories)
+        const newTags = [...new Set(styles.flatMap(s => s.tags))];
+        allTags.length = 0;
+        allTags.push(...newTags);
+        renderFilters();
+        renderGrid();
+        if (!silent) {
+            const delta = styles.length - oldCount;
+            const msg = delta > 0 ? `Стили обновлены (+${delta})` : delta < 0 ? `Стили обновлены (${delta})` : 'Стили обновлены';
+            if (typeof toastr !== 'undefined') toastr.success(msg, 'SLAY Images', { timeOut: 2500 });
+        }
+    };
+
+    // Wait for background refresh (if any) and quietly apply if the site changed
+    if (backgroundRefresh) {
+        backgroundRefresh.then(result => {
+            if (!overlay.isConnected) {
+                // Modal was closed — still write cache silently
+                if (result.status === 'updated') {
+                    writeCache({ styles: result.styles, etag: result.etag, lastModified: result.lastModified, ts: Date.now() });
+                }
+                return;
+            }
+            if (result.status === 'notmodified') {
+                iigLog('INFO', 'Style cache validated via ETag — no changes on site');
+            } else if (result.status === 'updated') {
+                applyFreshStyles(result);
+            } else if (result.status === 'error') {
+                iigLog('WARN', `Background style refresh failed: ${result.error?.message || 'unknown'}`);
+            }
+        });
+    }
+
+    // Manual refresh button — force fetch, ignore ETag
+    const refreshBtn = overlay.querySelector('.slay-style-refresh');
+    refreshBtn?.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (refreshBtn.classList.contains('is-loading')) return;
+        refreshBtn.classList.add('is-loading');
+        const icon = refreshBtn.querySelector('i');
+        const origClass = icon.className;
+        icon.className = 'fa-solid fa-spinner iig-spin-anim';
+        try {
+            const result = await fetchStyles(null, { force: true });
+            if (result.status === 'updated') {
+                applyFreshStyles(result, { silent: false });
+            } else if (result.status === 'error') {
+                if (typeof toastr !== 'undefined') toastr.error(`Не удалось обновить: ${result.error?.message || 'ошибка'}`, 'SLAY Images');
+            }
+        } finally {
+            icon.className = origClass;
+            refreshBtn.classList.remove('is-loading');
+        }
+    });
 }
 
 function bindSettingsEvents() {
     const settings = getSettings();
-    updateReferenceOptionVisibility();
 
     const updateVisibility = () => {
         const apiType = settings.apiType;
@@ -3635,21 +3890,11 @@ function bindSettingsEvents() {
     document.getElementById('slay_send_char_ref')?.addEventListener('change', (e) => {
         settings.sendCharAvatar = e.target.checked;
         settings.naisteraSendCharAvatar = e.target.checked;
-        updateReferenceOptionVisibility();
-        saveSettings();
-    });
-    document.getElementById('slay_send_char_ref_if_mentioned')?.addEventListener('change', (e) => {
-        settings.sendCharRefOnlyIfMentioned = e.target.checked;
         saveSettings();
     });
     document.getElementById('slay_send_user_ref')?.addEventListener('change', (e) => {
         settings.sendUserAvatar = e.target.checked;
         settings.naisteraSendUserAvatar = e.target.checked;
-        updateReferenceOptionVisibility();
-        saveSettings();
-    });
-    document.getElementById('slay_send_user_ref_if_mentioned')?.addEventListener('change', (e) => {
-        settings.sendUserRefOnlyIfMentioned = e.target.checked;
         saveSettings();
     });
     // Avatar ref handlers removed — char/user refs + wardrobe cover this
@@ -3865,6 +4110,18 @@ function updateHeaderStatusDot() {
         const s = context.extensionSettings.slay_image_gen;
         if (typeof s.sendCharAvatar !== 'boolean') s.sendCharAvatar = true;
         if (typeof s.sendUserAvatar !== 'boolean') s.sendUserAvatar = true;
+        // One-time v4.1 migration: earlier code (4.0.x) force-disabled these on every startup,
+        // leaving a sticky `false` in many users' settings. Reset once, then remember so we don't
+        // keep overwriting intentional user choices on every future startup.
+        if (!s.refMigratedV41) {
+            s.sendCharAvatar = true;
+            s.sendUserAvatar = true;
+            s.refMigratedV41 = true;
+            iigLog('INFO', 'refMigratedV41: reset sendCharAvatar/sendUserAvatar to true (one-time)');
+        }
+        // Drop dead flags from PR that we no longer use
+        if ('sendCharRefOnlyIfMentioned' in s) delete s.sendCharRefOnlyIfMentioned;
+        if ('sendUserRefOnlyIfMentioned' in s) delete s.sendUserRefOnlyIfMentioned;
         s.naisteraSendCharAvatar = s.sendCharAvatar;
         s.naisteraSendUserAvatar = s.sendUserAvatar;
     }
