@@ -750,6 +750,12 @@
     .iig-ref-thumb-wrap:not(.has-image) .iig-ref-upload-overlay {
         opacity: 0.5;
     }
+    /* On mobile the camera overlay is always faintly visible on empty slots,
+       so hide the user-plus/user placeholder underneath — otherwise both icons
+       stack and it looks like two buttons. */
+    .iig-ref-thumb-wrap:not(.has-image) .iig-ref-empty-icon {
+        opacity: 0;
+    }
 }
 
 /* ==================== Test Connection ==================== */
@@ -1729,6 +1735,39 @@
     pointer-events: auto;
 }
 .iig-assign-popup.show, .iig-slot-options-popup.show { display: block; }
+
+/* Close (X) button in the top-right corner of ref popups. Needed because the popups
+   are position:fixed and follow the viewport on scroll — on mobile especially, an
+   explicit dismiss control is a lot easier than scrolling to tap outside. */
+.iig-popup-close {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--SmartThemeBodyColor, #ccc);
+    opacity: 0.55;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 0.85em;
+    line-height: 1;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    z-index: 1;
+}
+.iig-popup-close:hover {
+    opacity: 1;
+    color: var(--slay-pink);
+    background: rgba(244, 114, 182, 0.12);
+}
+.iig-popup-close:active {
+    background: rgba(244, 114, 182, 0.22);
+}
 .iig-assign-title {
     font-size: 0.72em;
     color: var(--slay-pink);

@@ -1,8 +1,10 @@
 /**
- * Slay Inline Image Generation + Wardrobe
- * Merged extension: notsosillynotsoimages (NPC refs) + sillyimages (wardrobe)
- * v4.0.0 by aceeenvw + 0xl0cal + Wewwa
+ * 💅🔥 SLAY Images — Inline Image Generation + Wardrobe + Gallery
+ * by Wewwa (https://github.com/wewwaistyping) — tg: @wewwajai
+ * gallery update by hydall (https://github.com/hydall)
+ * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
+const SLAY_VERSION = '4.2.1';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -10,8 +12,6 @@
 
 (function initWardrobe() {
     'use strict';
-    // ⚠️ PREVIEW BUILD — isolated storage. Doesn't touch main 4.1.5 settings/outfits.
-    // Seeded once from slay_wardrobe via swMigrate.
     const SW = 'slay_wardrobe';
 
     function uid() { return Date.now().toString(36) + Math.random().toString(36).substring(2, 8); }
@@ -3594,7 +3594,13 @@ function createSettingsUI() {
                     <div id="slay_export_logs" class="menu_button"><i class="fa-solid fa-download"></i> Экспорт логов</div>
                 </div>
                 </div>
-                <p class="hint" style="text-align:center;opacity:0.5;margin-top:4px;">v4.0.0 by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a> + <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a> + Wewwa</p>
+                <p class="hint iig-credit" style="text-align:center;opacity:0.5;margin-top:4px;line-height:1.55;">
+                    v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank" style="color:inherit;text-decoration:underline;">Wewwa</a>
+                    · <a href="https://t.me/wewwajai" target="_blank" style="color:inherit;text-decoration:underline;">tg for support</a><br>
+                    gallery update by <a href="https://github.com/hydall" target="_blank" style="color:inherit;text-decoration:underline;">hydall</a>
+                    · based on sillyimages by <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a>
+                    and <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a>'s NPC system
+                </p>
                 <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
         </div>
@@ -3769,10 +3775,15 @@ function showAssignPopup(anchor, path) {
         slotButtons.push(`<button class="iig-assign-btn" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
     });
     popup.innerHTML = `
+        <button class="iig-popup-close" type="button" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
         <div class="iig-assign-title">Куда применить?</div>
         <div class="iig-assign-preview"><img src="${String(path).replace(/"/g, '&quot;')}" alt=""></div>
         <div class="iig-assign-buttons">${slotButtons.join('')}</div>
     `;
+    popup.querySelector('.iig-popup-close')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+    });
     // Position below the clicked thumb — fixed position is viewport-relative, no scroll offset needed
     const rect = anchor.getBoundingClientRect();
     popup.style.left = rect.left + 'px';
@@ -3821,6 +3832,7 @@ function showSlotOptionsPopup(slot) {
         : refType === 'user' ? '{{user}}'
         : `NPC ${Number.isFinite(npcIndex) ? npcIndex + 1 : '?'}`;
     popup.innerHTML = `
+        <button class="iig-popup-close" type="button" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
         <div class="iig-assign-title">Добавить в <span style="color:var(--slay-pink,#f472b6);">${targetLabel}</span></div>
         <div class="iig-slot-options-row">
             <button class="iig-slot-option-btn" data-act="file"><i class="fa-solid fa-folder-open"></i><span>Файл</span></button>
@@ -3828,6 +3840,10 @@ function showSlotOptionsPopup(slot) {
             <button class="iig-slot-option-btn" data-act="recent"><i class="fa-solid fa-clock-rotate-left"></i><span>Недавние</span></button>
         </div>
     `;
+    popup.querySelector('.iig-popup-close')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+    });
     const rect = slot.getBoundingClientRect();
     popup.style.left = rect.left + 'px';
     popup.style.top = (rect.bottom + 6) + 'px';
@@ -4007,7 +4023,7 @@ function bindRefSlotEvents() {
 }
 
 // Bumped alongside manifest.json — used to invalidate style cache when parse format changes
-const STYLE_CACHE_EXT_VERSION = '4.1.5';
+const STYLE_CACHE_EXT_VERSION = SLAY_VERSION;
 const STYLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h fallback when ETag isn't supported
 
 async function openStylePickerModal() {
@@ -4649,7 +4665,7 @@ function updateHeaderStatusDot() {
 // ── Initialization ──
 (function init() {
     const context = SillyTavern.getContext();
-    iigLog('INFO', 'Initializing Slay Images v4.2.0');
+    iigLog('INFO', `Initializing Slay Images v${SLAY_VERSION}`);
 
     // One-time reverse migration: if user tested the 4.2.0-preview build, their data lives
     // under suffixed keys ('slay_wardrobe' + '_preview' / 'slay_image_gen' + '_preview').
