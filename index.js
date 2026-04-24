@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.1';
+const SLAY_VERSION = '4.2.2';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4064,6 +4064,13 @@ async function openStylePickerModal() {
     });
     modal?.addEventListener('click', e => e.stopPropagation());
     modal?.addEventListener('mousedown', e => e.stopPropagation());
+    // Mobile: ST's extensions drawer closes on outside touch/pointer events, which fire
+    // before/after the synthesized click. Eat them at the modal boundary so they never
+    // bubble to the drawer (prevents "tap a style → drawer closes" regression).
+    modal?.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+    modal?.addEventListener('touchend', e => e.stopPropagation(), { passive: true });
+    modal?.addEventListener('pointerdown', e => e.stopPropagation());
+    modal?.addEventListener('pointerup', e => e.stopPropagation());
 
     // ── Lightbox ──
     const openLightbox = (src) => {
@@ -4292,7 +4299,9 @@ async function openStylePickerModal() {
 
         // Select on body/description click only
         for (const selectable of bodyEl.querySelectorAll('.slay-sc-selectable')) {
-            selectable.addEventListener('click', () => {
+            selectable.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
                 const prompt = selectable.dataset.style ? decodeURIComponent(selectable.dataset.style) : '';
                 const name = selectable.dataset.name ? decodeURIComponent(selectable.dataset.name) : '';
                 settings.slayStyle = prompt;
@@ -4300,7 +4309,12 @@ async function openStylePickerModal() {
                 saveSettings();
                 const nameEl = document.getElementById('slay_style_name');
                 if (nameEl) nameEl.textContent = settings.slayStyleName;
-                closeOverlay();
+                // Defer overlay teardown: if we remove it synchronously during the click,
+                // the following touchend/pointerup lands on whatever was behind the overlay
+                // (the ST extensions drawer backdrop), which interprets the tap as "outside
+                // click" and closes itself. One tick of delay lets the full click sequence
+                // finish against the modal before the overlay goes away.
+                setTimeout(() => closeOverlay(), 0);
             });
         }
     };
