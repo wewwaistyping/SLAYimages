@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.4';
+const SLAY_VERSION = '4.2.5';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -3375,17 +3375,26 @@ function renderRefSlots() {
         else thumb.src = '';
         if (wrap) wrap.classList.toggle('has-image', !!(ref?.imagePath || ref?.imageBase64 || ref?.imageData));
     };
+    // Don't clobber a name input that the user is currently typing in. If the
+    // input has focus, leave its .value alone; on blur the saved value is
+    // already what's there. This prevents cursor jumps from SETTINGS_UPDATED
+    // re-renders that fire while typing.
+    const setNameInput = (input, value) => {
+        if (!input) return;
+        if (document.activeElement === input) return;
+        input.value = value || '';
+    };
     const charSlot = document.querySelector('.iig-ref-slot[data-ref-type="char"]');
     if (charSlot) {
         setThumb(charSlot, settings.charRef);
-        charSlot.querySelector('.iig-ref-name').value = settings.charRef?.name || '';
+        setNameInput(charSlot.querySelector('.iig-ref-name'), settings.charRef?.name);
         const label = charSlot.querySelector('.iig-ref-label');
         if (label) label.textContent = charDisplayName;
     }
     const userSlot = document.querySelector('.iig-ref-slot[data-ref-type="user"]');
     if (userSlot) {
         setThumb(userSlot, settings.userRef);
-        userSlot.querySelector('.iig-ref-name').value = settings.userRef?.name || '';
+        setNameInput(userSlot.querySelector('.iig-ref-name'), settings.userRef?.name);
         const label = userSlot.querySelector('.iig-ref-label');
         if (label) label.textContent = userDisplayName;
     }
@@ -3394,8 +3403,17 @@ function renderRefSlots() {
         if (!slot) continue;
         const npc = settings.npcReferences[i] || null;
         setThumb(slot, npc);
-        slot.querySelector('.iig-ref-name').value = npc?.name || '';
+        setNameInput(slot.querySelector('.iig-ref-name'), npc?.name);
     }
+}
+
+// Debounced re-render trigger for high-frequency events (SETTINGS_UPDATED
+// fires on every save). 200ms is short enough that persona-switch UI feels
+// snappy, long enough that bursts collapse to one render.
+let _renderRefSlotsDebounce = null;
+function renderRefSlotsDebounced() {
+    clearTimeout(_renderRefSlotsDebounce);
+    _renderRefSlotsDebounce = setTimeout(renderRefSlots, 200);
 }
 
 function createSettingsUI() {
@@ -4729,6 +4747,16 @@ function updateHeaderStatusDot() {
         }, 300);
     });
 
+    // Persona switch (and many other settings changes) emits SETTINGS_UPDATED.
+    // We use it just to refresh ref-slot labels — the {{user}} title needs to
+    // follow whichever persona is currently active. Debounced so a burst of
+    // settings saves only rerenders once.
+    if (context.event_types.SETTINGS_UPDATED) {
+        context.eventSource.on(context.event_types.SETTINGS_UPDATED, () => {
+            renderRefSlotsDebounced();
+        });
+    }
+
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, async (messageId) => {
         await onMessageReceived(messageId);
         // After processing, attach regen buttons to any pre-existing images in THIS message
@@ -4736,6 +4764,27 @@ function updateHeaderStatusDot() {
         const mesEl = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
         if (mesEl) attachRegenButtonsInRoot(mesEl);
     });
+
+    // Explicit re-bind on message edit. ST replaces .mes_text innerHTML when
+    // the user saves an edit; the new <img> needs a fresh regen button. We
+    // used to rely solely on MutationObserver but it occasionally missed the
+    // mutation depending on how ST patched the DOM, leaving the img buttonless.
+    const REBIND_EDIT_EVENTS = [
+        'MESSAGE_UPDATED', 'MESSAGE_EDITED', 'MESSAGE_RECEIVED', 'MESSAGE_SWIPED',
+    ];
+    for (const evName of REBIND_EDIT_EVENTS) {
+        const evType = context.event_types?.[evName];
+        if (!evType) continue;
+        context.eventSource.on(evType, (messageId) => {
+            // Defer one tick so DOM patch by ST has actually applied.
+            setTimeout(() => {
+                const mesEl = (Number.isInteger(messageId))
+                    ? document.querySelector(`#chat .mes[mesid="${messageId}"]`)
+                    : null;
+                attachRegenButtonsInRoot(mesEl || document.getElementById('chat') || document.body);
+            }, 50);
+        });
+    }
 
     iigLog('INFO', 'Slay Images initialized');
 })();
