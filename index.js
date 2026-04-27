@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.3';
+const SLAY_VERSION = '4.2.4';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1961,102 +1961,52 @@ async function loadRefImageAsBase64(path) {
     } catch (e) { iigLog('WARN', `loadRefImageAsBase64 failed for ${path}:`, e.message); return null; }
 }
 
-// ── Avatar helpers (from sillyimages-master) ──
-async function getCharacterAvatarBase64() {
-    try {
-        const context = SillyTavern.getContext();
-        if (context.characterId === undefined || context.characterId === null) return null;
-        if (typeof context.getCharacterAvatar === 'function') {
-            const avatarUrl = context.getCharacterAvatar(context.characterId);
-            if (avatarUrl) return await imageUrlToBase64(avatarUrl);
-        }
-        const character = context.characters?.[context.characterId];
-        if (character?.avatar) return await imageUrlToBase64(`/characters/${encodeURIComponent(character.avatar)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getCharacterAvatarBase64 error:', error); return null; }
-}
-
-async function getCharacterAvatarDataUrl() {
-    try {
-        const context = SillyTavern.getContext();
-        if (context.characterId === undefined || context.characterId === null) return null;
-        if (typeof context.getCharacterAvatar === 'function') {
-            const avatarUrl = context.getCharacterAvatar(context.characterId);
-            if (avatarUrl) return await imageUrlToDataUrl(avatarUrl);
-        }
-        const character = context.characters?.[context.characterId];
-        if (character?.avatar) return await imageUrlToDataUrl(`/characters/${encodeURIComponent(character.avatar)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getCharacterAvatarDataUrl error:', error); return null; }
-}
-
-async function getUserAvatarBase64() {
-    try {
-        const context = SillyTavern.getContext();
-        const settings = getSettings();
-        const currentAvatar = context.user_avatar;
-        if (currentAvatar) {
-            const b64 = await imageUrlToBase64(`/User Avatars/${encodeURIComponent(currentAvatar)}`);
-            if (b64) return b64;
-        }
-        const userMsgAvatar = document.querySelector('#chat .mes[is_user="true"] .avatar img');
-        if (userMsgAvatar?.src) { const b64 = await imageUrlToBase64(userMsgAvatar.src); if (b64) return b64; }
-        if (settings.userAvatarFile) return await imageUrlToBase64(`/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getUserAvatarBase64 error:', error); return null; }
-}
-
-async function getUserAvatarDataUrl() {
-    try {
-        const context = SillyTavern.getContext();
-        const settings = getSettings();
-        const currentAvatar = context.user_avatar;
-        if (currentAvatar) { const d = await imageUrlToDataUrl(`/User Avatars/${encodeURIComponent(currentAvatar)}`); if (d) return d; }
-        const userMsgAvatar = document.querySelector('#chat .mes[is_user="true"] .avatar img');
-        if (userMsgAvatar?.src) { const d = await imageUrlToDataUrl(userMsgAvatar.src); if (d) return d; }
-        if (settings.userAvatarFile) return await imageUrlToDataUrl(`/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getUserAvatarDataUrl error:', error); return null; }
-}
+// (Removed in 4.2.4: getCharacterAvatarBase64 / getUserAvatarBase64 / their
+// DataUrl variants. Used to be the silent fallback when ref slots were empty
+// — that "feature" surprised users into seeing refs sent when they thought
+// everything was off. Now: empty slot = nothing sent. If the user wants their
+// character avatar as a ref, they upload it manually into the char slot.)
 
 function hasManualReference(ref) {
     return Boolean(ref?.imagePath || ref?.imageBase64 || ref?.imageData);
 }
 
+// Empty slot = no ref. Used to silently fall back to ST character/user avatar
+// which violated the "empty slot means nothing is sent" expectation. Now strict:
+// slot needs an actual uploaded image (imagePath/imageBase64/imageData). If
+// empty → return null, even when char/user is named in the prompt.
 async function getPreferredCharacterReferenceBase64(refs, settings) {
     if (!settings.sendCharAvatar) return null;
-    if (hasManualReference(refs?.charRef)) {
-        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
-        if (manual) return manual;
-    }
-    return await getCharacterAvatarBase64();
+    if (!hasManualReference(refs?.charRef)) return null;
+    return refs.charRef.imagePath
+        ? await loadRefImageAsBase64(refs.charRef.imagePath)
+        : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
 }
 
 async function getPreferredUserReferenceBase64(refs, settings) {
     if (!settings.sendUserAvatar) return null;
-    if (hasManualReference(refs?.userRef)) {
-        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
-        if (manual) return manual;
-    }
-    return await getUserAvatarBase64();
+    if (!hasManualReference(refs?.userRef)) return null;
+    return refs.userRef.imagePath
+        ? await loadRefImageAsBase64(refs.userRef.imagePath)
+        : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
 }
 
 async function getPreferredCharacterReferenceDataUrl(refs, settings) {
     if (!settings.sendCharAvatar) return null;
-    if (hasManualReference(refs?.charRef)) {
-        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
-        if (manual) return `data:image/jpeg;base64,${manual}`;
-    }
-    return await getCharacterAvatarDataUrl();
+    if (!hasManualReference(refs?.charRef)) return null;
+    const manual = refs.charRef.imagePath
+        ? await loadRefImageAsBase64(refs.charRef.imagePath)
+        : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
+    return manual ? `data:image/jpeg;base64,${manual}` : null;
 }
 
 async function getPreferredUserReferenceDataUrl(refs, settings) {
     if (!settings.sendUserAvatar) return null;
-    if (hasManualReference(refs?.userRef)) {
-        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
-        if (manual) return `data:image/jpeg;base64,${manual}`;
-    }
-    return await getUserAvatarDataUrl();
+    if (!hasManualReference(refs?.userRef)) return null;
+    const manual = refs.userRef.imagePath
+        ? await loadRefImageAsBase64(refs.userRef.imagePath)
+        : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
+    return manual ? `data:image/jpeg;base64,${manual}` : null;
 }
 
 async function fetchUserAvatars() {
