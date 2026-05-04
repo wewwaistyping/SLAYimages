@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.6';
+const SLAY_VERSION = '4.2.7';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1227,6 +1227,18 @@ const SLAY_VERSION = '4.2.6';
     ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
         setTimeout(() => { swUpdatePromptInjection(); swInjectFloatingBtn(); }, 300);
     });
+    // Refresh outfit prompt injection RIGHT BEFORE every LLM request. Fixes
+    // intermittent "wardrobe description missing" cases:
+    //   - User sends message within the 300ms CHAT_CHANGED debounce window
+    //   - Swipe / regenerate cleared/reordered ST's extension prompt buffer
+    //   - User's preset rebuilds the messages array and stale ext prompts
+    // Calling swUpdatePromptInjection() here guarantees the injection is
+    // present and current for every single generation.
+    if (ctx.event_types.GENERATION_STARTED) {
+        ctx.eventSource.on(ctx.event_types.GENERATION_STARTED, () => {
+            try { swUpdatePromptInjection(); } catch (e) { swLog('WARN', 'GENERATION_STARTED injection refresh failed:', e.message); }
+        });
+    }
     swLog('INFO', 'SlayWardrobe v4 initialized');
 })();
 
