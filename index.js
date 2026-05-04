@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.7';
+const SLAY_VERSION = '4.2.8';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -2567,8 +2567,16 @@ function attachRegenButton(imgEl) {
                 liveImg.src = newImagePath;
                 if (message && origSrcAttr) {
                     const replaced = replaceImageSrcEverywhere(message, origSrcAttr, newImagePath);
-                    if (replaced) ctx.saveChatDebounced?.();
-                    else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
+                    if (replaced) {
+                        // FORCE-save (not debounced). Without this, if the user
+                        // reloaded or switched chat within ~5s of the regen,
+                        // message.mes still held the OLD src and the previous
+                        // image (or error placeholder) silently re-appeared on
+                        // next render. The new image stayed on disk in the
+                        // gallery but vanished from the chat. Same fix we did
+                        // for retryFailedGeneration in 4.1.6.
+                        try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+                    } else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
                 }
                 toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
             } else {
