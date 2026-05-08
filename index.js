@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.8';
+const SLAY_VERSION = '4.2.9';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1618,10 +1618,44 @@ function parseNameTokens(rawName) {
         .filter(t => t.length >= 2);
 }
 
+// Generic placeholder names ST falls back to when persona/char name is empty.
+// Without the skip below, nameIsInPrompt("User", "the user walks") returns
+// true (substring match on "user") and our code happily ships the user ref
+// into a prompt that has no actual user mention. Same for "Character", etc.
+const NAME_GENERIC_FALLBACKS = new Set([
+    'user', 'character', 'char', 'persona', 'юзер', 'персонаж', 'чар',
+]);
+
+// Substring check with Unicode-aware word boundary so a real-name alias
+// doesn't trip on a longer word that just happens to contain it. Examples
+// of the false positives this prevents:
+//   Eva → evangelion / evangelist
+//   Ева → евразия / евангелие
+//   Roxy → proxy / epoxy
+//   Ed → predator / editor
+//   User → user-friendly (also caught by NAME_GENERIC_FALLBACKS above)
+// Cyrillic letters are correctly treated as word chars via \p{L}.
+function wordBoundaryIncludes(needle, haystack) {
+    if (!needle || !haystack) return false;
+    const isLetter = ch => !!ch && /[\p{L}]/u.test(ch);
+    let idx = 0;
+    while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+        const before = idx === 0 ? '' : haystack[idx - 1];
+        const after = idx + needle.length >= haystack.length ? '' : haystack[idx + needle.length];
+        if (!isLetter(before) && !isLetter(after)) return true;
+        idx += 1;
+    }
+    return false;
+}
+
 function nameIsInPrompt(rawName, lowerPrompt) {
     const tokens = parseNameTokens(rawName);
     if (tokens.length === 0) return false;
-    return tokens.some(t => lowerPrompt.includes(t.toLowerCase()));
+    return tokens.some(token => {
+        const lower = token.toLowerCase();
+        if (NAME_GENERIC_FALLBACKS.has(lower)) return false;
+        return wordBoundaryIncludes(lower, lowerPrompt);
+    });
 }
 
 function matchNpcReferences(prompt, npcList) {
@@ -3500,7 +3534,7 @@ function createSettingsUI() {
                 <!-- NPC refs -->
                 <div id="slay_refs_section" class="iig-refs">
                     <h4><i class="fa-solid fa-user-group"></i> Референсы персонажей</h4>
-                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
+                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
                             <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
