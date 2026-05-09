@@ -424,14 +424,29 @@
 
 /* ── Regenerate button overlay on generated images ── */
 .iig-img-wrap {
+    /* The wrap MUST be exactly as big as its child image — no more, no less.
+       Bots often template the img with `style="width:100%"` inside an outer
+       `<div style="display:table;width:fit-content">`. Our span inserted
+       between them used to create a circular sizing chain that landed on
+       slightly-off values after ST re-rendered an edited message — visible
+       "broken frame" mismatch (wrap cropped or didn't resize to match).
+       Pairing inline-block (sizes to content via shrink-to-fit) with
+       width:auto !important on the child img (defeats the bot's inline
+       style="width:100%" before it can trigger the circular dep) gives
+       us a stable layout in both portrait and landscape cases. */
     position: relative;
     display: inline-block;
     max-width: 100%;
     line-height: 0;
+    vertical-align: top;
 }
 .iig-img-wrap > img,
 .iig-img-wrap > .iig-generated-image {
     display: block;
+    /* !important to defeat inline `style="width:100%"` from bot templates,
+       which would otherwise compute width against the wrap and reintroduce
+       the circular dependency that misaligned the frame on edit reflow. */
+    width: auto !important;
     max-width: 100%;
     height: auto;
     transition: opacity .2s;
