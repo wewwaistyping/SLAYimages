@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.10';
+const SLAY_VERSION = '4.2.11';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║

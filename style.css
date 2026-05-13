@@ -1352,6 +1352,30 @@
         grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
         gap: 8px;
     }
+    /* On narrow mobile cards (~110px wide) the original single-row footer
+       overflowed and clipped the last button (delete 🗑️). Stack name above
+       the buttons row so both have full card width. */
+    .sw-outfit-footer {
+        padding: 6px 6px;
+        gap: 4px;
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+    .sw-outfit-name {
+        flex-basis: 100%;
+        text-align: center;
+        font-size: 10.5px;
+    }
+    .sw-outfit-btns {
+        gap: 2px;
+        justify-content: center;
+        width: 100%;
+    }
+    .sw-outfit-btns > div {
+        width: 22px;
+        height: 22px;
+        font-size: 10.5px;
+    }
 }
 
 /* ═══════════════════════════════════════════
