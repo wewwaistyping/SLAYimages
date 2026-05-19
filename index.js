@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.11';
+const SLAY_VERSION = '4.2.12';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -3165,18 +3165,21 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         if (loading.isConnected) loading.replaceWith(newEl);
         if (newEl.getAttribute('data-iig-instruction')) attachRegenButton(newEl);
 
-        // Persist new src in message source so it survives reload
-        if (message && typeof message.mes === 'string') {
+        // Persist new src in message source so it survives reload.
+        // CRITICAL: use replaceImageSrcEverywhere() — it patches mes,
+        // display_text, extblocks AND swipes[swipe_id] + swipe_info. The old
+        // hand-rolled replace only touched mes/display_text/extblocks and
+        // missed swipes — which is what ST actually re-renders from on chat
+        // reload, so the error.svg src in swipes[0] would silently win and
+        // bring the error placeholder back every time the user came back to
+        // the chat.
+        if (message) {
             const errorImgPath = getErrorImagePath();
-            const updated = String(message.mes).replace(errorImgPath, imagePath);
-            if (updated !== message.mes) {
-                message.mes = updated;
-                if (message.extra?.display_text) message.extra.display_text = String(message.extra.display_text).replace(errorImgPath, imagePath);
-                if (message.extra?.extblocks) message.extra.extblocks = String(message.extra.extblocks).replace(errorImgPath, imagePath);
-                // IMPORTANT: use force-save (not debounced). If user leaves chat quickly
-                // after a successful retry, debounced save may never fire and the old
-                // error.svg src persists in the chat file, causing the error placeholder
-                // to re-render on return.
+            const replaced = replaceImageSrcEverywhere(message, errorImgPath, imagePath);
+            if (replaced) {
+                // Force-save (not debounced). If user leaves chat quickly after
+                // a successful retry, debounced save may never fire and the old
+                // error.svg src persists in the chat file.
                 try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
             }
         }
