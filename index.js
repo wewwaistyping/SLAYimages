@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.14';
+const SLAY_VERSION = '4.2.15';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1702,8 +1702,23 @@ function replaceTagInMessageSource(message, tag, replacement) {
         if (message.extra.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
         return;
     }
+    // Main message path: update mes, display_text AND swipes[swipe_id] +
+    // swipe_info[swipe_id].extra.display_text. ST re-renders from swipes
+    // on chat reload, so missing the swipes update causes the [IMG:GEN]
+    // placeholder (or previous error.svg) to silently win and bring the
+    // pre-generation state back — visible as "image reverts to old/error
+    // after reload". Same family of bug as 4.2.12 retry-path fix.
     message.mes = (message.mes || '').replace(tag.fullMatch, replacement);
     if (message.extra?.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
+    const swipeId = message.swipe_id;
+    if (Number.isInteger(swipeId) && Array.isArray(message.swipes) && typeof message.swipes[swipeId] === 'string') {
+        message.swipes[swipeId] = message.swipes[swipeId].replace(tag.fullMatch, replacement);
+    }
+    if (Number.isInteger(swipeId) && Array.isArray(message.swipe_info) && message.swipe_info[swipeId]?.extra) {
+        const si = message.swipe_info[swipeId].extra;
+        if (typeof si.display_text === 'string') si.display_text = si.display_text.replace(tag.fullMatch, replacement);
+        if (typeof si.extblocks === 'string') si.extblocks = si.extblocks.replace(tag.fullMatch, replacement);
+    }
 }
 
 function extractGeneratedImageUrlsFromText(text) {
