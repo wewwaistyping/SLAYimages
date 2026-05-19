@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.13';
+const SLAY_VERSION = '4.2.14';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4732,7 +4732,19 @@ function initLightbox() {
     overlay.addEventListener('mousedown', stop);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
     document.getElementById('chat')?.addEventListener('click', (e) => {
-        const img = e.target.closest('.iig-generated-image'); if (!img) return;
+        // Match either the runtime-applied class (fresh generation) OR the
+        // persistent data-iig-instruction attribute that survives edit
+        // re-renders. The class is lost when ST rebuilds the img from
+        // message.mes — bot templates don't include the class, only the
+        // data attribute. Skip when the click landed on the regen button.
+        if (e.target.closest('.iig-regen-btn')) return;
+        const img = e.target.closest('img.iig-generated-image, img[data-iig-instruction]');
+        if (!img || img.tagName !== 'IMG') return;
+        // Skip error placeholders — they have their own retry button.
+        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) return;
+        // Skip imgs whose src is still the placeholder / error path.
+        const src = img.getAttribute('src') || '';
+        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) return;
         e.preventDefault(); e.stopPropagation();
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
