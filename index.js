@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.12';
+const SLAY_VERSION = '4.2.13';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -936,7 +936,7 @@ const SLAY_VERSION = '4.2.12';
             const endpoint = (swS.describeEndpoint || iigSettings.endpoint || '').replace(/\/$/, '');
             const apiKey = swS.describeKey || iigSettings.apiKey || '';
             const modelSelect = document.getElementById('slay_sw_describe_model');
-            const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.0-flash';
+            const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.5-flash';
             if (!endpoint || !apiKey) {
                 toastr.warning('Настройте API для описания в секции Гардероб', 'Гардероб', { timeOut: 5000 });
                 return null;
@@ -3515,7 +3515,7 @@ function createSettingsUI() {
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model" class="flex1">${settings.model ? `<option value="${sanitizeForHtml(settings.model)}" selected>${sanitizeForHtml(settings.model)}</option>` : '<option value="">-- Выберите --</option>'}</select><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить"><i class="fa-solid fa-sync"></i></div></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><input type="text" id="slay_model" class="text_pole flex1" list="slay_model_list" placeholder="введи название или выбери из списка" value="${sanitizeForHtml(settings.model || '')}"><datalist id="slay_model_list"></datalist><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                     <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
                 </div>
                 <hr>
@@ -3571,7 +3571,7 @@ function createSettingsUI() {
                             <div class="flex-row" style="margin-top:6px;"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
                             <div class="flex-row" style="margin-top:6px;"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
                             <div class="flex-row" style="margin-top:6px;"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><select id="slay_sw_describe_model" class="flex1">${swSettings.describeModel ? `<option value="${sanitizeForHtml(swSettings.describeModel)}" selected>${sanitizeForHtml(swSettings.describeModel)}</option>` : '<option value="gemini-2.0-flash" selected>gemini-2.0-flash</option>'}</select><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить"><i class="fa-solid fa-sync"></i></div></div>
+                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><input type="text" id="slay_sw_describe_model" class="text_pole flex1" list="slay_sw_describe_model_list" placeholder="введи или выбери из списка" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}"><datalist id="slay_sw_describe_model_list"></datalist><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                             <div id="slay_sw_describe_test" class="menu_button iig-test-connection" style="margin-top:8px;"><i class="fa-solid fa-wifi"></i> Тест</div>
                             <p class="hint" style="margin-top:4px;">Оставьте Endpoint и API Key пустыми — будут использованы из основных настроек. Или укажите свои для отдельного подключения.</p>
                         </div>
@@ -4489,13 +4489,29 @@ function bindSettingsEvents() {
     // Just save the model name. Don't auto-flip apiType based on model name —
     // OpenAI-compat routers expose Gemini models too, and user's explicit
     // apiType choice should be respected.
-    document.getElementById('slay_model')?.addEventListener('change', (e) => {
-        settings.model = e.target.value;
+    // Input event (not change) so typing freely is saved as user types.
+    // Field is <input list="slay_model_list"> — users can either pick a
+    // suggestion or type any model name the API knows (recraft/whatever)
+    // that isn't in the auto-detected image-model whitelist.
+    document.getElementById('slay_model')?.addEventListener('input', (e) => {
+        settings.model = e.target.value.trim();
         saveSettings();
     });
     document.getElementById('slay_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
-        try { const models = await fetchModels(); const sel = document.getElementById('slay_model'); sel.innerHTML = '<option value="">-- Выберите --</option>'; for (const m of models) { const o = document.createElement('option'); o.value = m; o.textContent = m; o.selected = m === settings.model; sel.appendChild(o); } toastr.success(`Моделей: ${models.length}`, 'SLAY Images'); }
+        try {
+            const models = await fetchModels();
+            const dl = document.getElementById('slay_model_list');
+            if (dl) {
+                dl.innerHTML = '';
+                for (const m of models) {
+                    const o = document.createElement('option');
+                    o.value = m;
+                    dl.appendChild(o);
+                }
+            }
+            toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
+        }
         catch (e) { toastr.error('Ошибка загрузки', 'SLAY Images'); } finally { btn.classList.remove('loading'); }
     });
     document.getElementById('slay_size')?.addEventListener('change', (e) => { settings.size = e.target.value; saveSettings(); });
@@ -4590,9 +4606,10 @@ function bindSettingsEvents() {
         const input = document.getElementById('slay_sw_describe_key'); const icon = document.querySelector('#slay_sw_describe_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
     });
-    document.getElementById('slay_sw_describe_model')?.addEventListener('change', (e) => {
+    // Input event so typing freely is saved per keystroke.
+    document.getElementById('slay_sw_describe_model')?.addEventListener('input', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
-        if (s) { s.describeModel = e.target.value; SillyTavern.getContext().saveSettingsDebounced(); }
+        if (s) { s.describeModel = e.target.value.trim(); SillyTavern.getContext().saveSettingsDebounced(); }
     });
     document.getElementById('slay_sw_describe_refresh')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
@@ -4607,11 +4624,15 @@ function bindSettingsEvents() {
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const models = (data.data || []).map(m => m.id).sort();
-            const sel = document.getElementById('slay_sw_describe_model');
-            const current = swS.describeModel || 'gemini-2.0-flash';
-            sel.innerHTML = '';
-            for (const m of models) { const o = document.createElement('option'); o.value = m; o.textContent = m; o.selected = m === current; sel.appendChild(o); }
-            if (models.length === 0) sel.innerHTML = '<option value="gemini-2.0-flash">gemini-2.0-flash</option>';
+            const dl = document.getElementById('slay_sw_describe_model_list');
+            if (dl) {
+                dl.innerHTML = '';
+                for (const m of models) {
+                    const o = document.createElement('option');
+                    o.value = m;
+                    dl.appendChild(o);
+                }
+            }
             toastr.success(`Найдено моделей: ${models.length}`, 'Гардероб');
         } catch (error) { toastr.error(`Ошибка: ${error.message}`, 'Гардероб'); }
         finally { btn.classList.remove('loading'); }
