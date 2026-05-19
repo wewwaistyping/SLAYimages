@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.15';
+const SLAY_VERSION = '4.2.16';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1702,22 +1702,28 @@ function replaceTagInMessageSource(message, tag, replacement) {
         if (message.extra.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
         return;
     }
-    // Main message path: update mes, display_text AND swipes[swipe_id] +
-    // swipe_info[swipe_id].extra.display_text. ST re-renders from swipes
-    // on chat reload, so missing the swipes update causes the [IMG:GEN]
-    // placeholder (or previous error.svg) to silently win and bring the
-    // pre-generation state back — visible as "image reverts to old/error
-    // after reload". Same family of bug as 4.2.12 retry-path fix.
+    // Main message path: update mes, display_text AND all swipes/swipe_info.
+    // ST re-renders from swipes on chat reload AND on swipe-revert (after
+    // an aborted swipe). Updating only the current swipe leaves stale src
+    // in other swipe entries — abort/revert can resurrect them.
+    // Iterating ALL swipes is safe: tag.fullMatch is per-swipe-content, so
+    // it's no-op when a swipe doesn't contain it.
     message.mes = (message.mes || '').replace(tag.fullMatch, replacement);
     if (message.extra?.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
-    const swipeId = message.swipe_id;
-    if (Number.isInteger(swipeId) && Array.isArray(message.swipes) && typeof message.swipes[swipeId] === 'string') {
-        message.swipes[swipeId] = message.swipes[swipeId].replace(tag.fullMatch, replacement);
+    if (Array.isArray(message.swipes)) {
+        for (let i = 0; i < message.swipes.length; i++) {
+            if (typeof message.swipes[i] === 'string') {
+                message.swipes[i] = message.swipes[i].replace(tag.fullMatch, replacement);
+            }
+        }
     }
-    if (Number.isInteger(swipeId) && Array.isArray(message.swipe_info) && message.swipe_info[swipeId]?.extra) {
-        const si = message.swipe_info[swipeId].extra;
-        if (typeof si.display_text === 'string') si.display_text = si.display_text.replace(tag.fullMatch, replacement);
-        if (typeof si.extblocks === 'string') si.extblocks = si.extblocks.replace(tag.fullMatch, replacement);
+    if (Array.isArray(message.swipe_info)) {
+        for (let i = 0; i < message.swipe_info.length; i++) {
+            const si = message.swipe_info[i]?.extra;
+            if (!si) continue;
+            if (typeof si.display_text === 'string') si.display_text = si.display_text.replace(tag.fullMatch, replacement);
+            if (typeof si.extblocks === 'string') si.extblocks = si.extblocks.replace(tag.fullMatch, replacement);
+        }
     }
 }
 
@@ -2469,14 +2475,22 @@ function replaceImageSrcEverywhere(message, oldSrc, newSrc) {
         if (typeof message.extra.display_text === 'string') message.extra.display_text = rep(message.extra.display_text);
         if (typeof message.extra.extblocks === 'string') message.extra.extblocks = rep(message.extra.extblocks);
     }
-    if (Array.isArray(message.swipes) && Number.isInteger(message.swipe_id) && typeof message.swipes[message.swipe_id] === 'string') {
-        message.swipes[message.swipe_id] = rep(message.swipes[message.swipe_id]);
+    // Patch ALL swipes, not just current. If user clicks swipe ↔ abort ↔ swipe-back,
+    // ST sometimes restores message.mes from a non-current swipe (or extra storage)
+    // that still holds the pre-regen src. No-op when a swipe doesn't contain oldSrc
+    // (different content) — safe to iterate.
+    if (Array.isArray(message.swipes)) {
+        for (let i = 0; i < message.swipes.length; i++) {
+            if (typeof message.swipes[i] === 'string') message.swipes[i] = rep(message.swipes[i]);
+        }
     }
-    if (Array.isArray(message.swipe_info) && Number.isInteger(message.swipe_id) && message.swipe_info[message.swipe_id]) {
-        const si = message.swipe_info[message.swipe_id];
-        if (si.extra) {
-            if (typeof si.extra.display_text === 'string') si.extra.display_text = rep(si.extra.display_text);
-            if (typeof si.extra.extblocks === 'string') si.extra.extblocks = rep(si.extra.extblocks);
+    if (Array.isArray(message.swipe_info)) {
+        for (let i = 0; i < message.swipe_info.length; i++) {
+            const si = message.swipe_info[i];
+            if (si?.extra) {
+                if (typeof si.extra.display_text === 'string') si.extra.display_text = rep(si.extra.display_text);
+                if (typeof si.extra.extblocks === 'string') si.extra.extblocks = rep(si.extra.extblocks);
+            }
         }
     }
     return changed;
