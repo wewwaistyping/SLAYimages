@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.16';
+const SLAY_VERSION = '4.2.17';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -3544,7 +3544,7 @@ function createSettingsUI() {
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><input type="text" id="slay_model" class="text_pole flex1" list="slay_model_list" placeholder="введи название или выбери из списка" value="${sanitizeForHtml(settings.model || '')}"><datalist id="slay_model_list"></datalist><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><input type="text" id="slay_model" class="text_pole flex1" list="slay_model_list" placeholder="введи название или выбери из списка" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><datalist id="slay_model_list"></datalist><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                     <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
                 </div>
                 <hr>
@@ -3600,7 +3600,7 @@ function createSettingsUI() {
                             <div class="flex-row" style="margin-top:6px;"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
                             <div class="flex-row" style="margin-top:6px;"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
                             <div class="flex-row" style="margin-top:6px;"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><input type="text" id="slay_sw_describe_model" class="text_pole flex1" list="slay_sw_describe_model_list" placeholder="введи или выбери из списка" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}"><datalist id="slay_sw_describe_model_list"></datalist><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><input type="text" id="slay_sw_describe_model" class="text_pole flex1" list="slay_sw_describe_model_list" placeholder="введи или выбери из списка" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}" autocomplete="off" spellcheck="false"><datalist id="slay_sw_describe_model_list"></datalist><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                             <div id="slay_sw_describe_test" class="menu_button iig-test-connection" style="margin-top:8px;"><i class="fa-solid fa-wifi"></i> Тест</div>
                             <p class="hint" style="margin-top:4px;">Оставьте Endpoint и API Key пустыми — будут использованы из основных настроек. Или укажите свои для отдельного подключения.</p>
                         </div>
