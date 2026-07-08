@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.2.17';
+const SLAY_VERSION = '4.3.0';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -63,6 +63,7 @@ const SLAY_VERSION = '4.2.17';
         // v4.1 UX additions
         modalWidth: 'normal',   // compact | normal | wide | xwide | full
         showHidden: false,      // toggle to show hidden items in grid
+        tagsCollapsed: false,   // collapse the tag-filter row (funnel toggle in category row)
     });
 
     // Map preset -> pixel width (used as CSS var --sw-modal-width)
@@ -194,8 +195,130 @@ const SLAY_VERSION = '4.2.17';
         if (!cn) { toastr.error('Персонаж не выбран', 'Гардероб'); return false; }
         const co = swGetCharOutfit();
         co[type][cat] = id;
+        // Track lastWornAt per figure (bot/user) so Quick-Swap can rank by "last
+        // worn on THIS figure" — users may have different relevant history for
+        // bot vs user. Also keep a global lastWornAt for back-compat / general sort.
+        if (id) {
+            const item = swFindItem(id);
+            if (item) {
+                const now = Date.now();
+                item.lastWornAt = now;
+                if (type === 'bot') item.lastWornAtBot = now;
+                else if (type === 'user') item.lastWornAtUser = now;
+            }
+        }
         swSave();
         return true;
+    }
+
+    // Equip a full outfit from Quick-Swap. Unlike swSetSlot this:
+    //   (a) forces mode=full on the target type
+    //   (b) preserves parts (top/bottom/shoes/accessories/hair) intact so the user can
+    //       switch back to "по частям" in the full wardrobe modal without losing data
+    //   (c) updates lastWornAt + saves + re-renders the preview popup & fab badge
+    function swQuickSwapFull(type, id) {
+        const co = swGetCharOutfit();
+        if (!co || !co[type]) return false;
+        co[type].full = id;
+        co[type + 'Mode'] = 'full';
+        // Mirror swSetSlot's lastWornAt bump (global + per-figure)
+        const item = swFindItem(id);
+        if (item) {
+            const now = Date.now();
+            item.lastWornAt = now;
+            if (type === 'bot') item.lastWornAtBot = now;
+            else if (type === 'user') item.lastWornAtUser = now;
+        }
+        swSave();
+        swInjectFloatingBtn();       // badge refresh
+        swUpdatePromptInjection();
+        return true;
+    }
+
+    // Pick the "topmost worn item" for the preview thumbnail.
+    //   full mode  → the full item (if any)
+    //   parts mode → first non-null in priority order: top → bottom → shoes
+    //                → accessories → hair
+    //   nothing equipped → null
+    const SW_PARTS_PRIORITY = ['top', 'bottom', 'shoes', 'accessories', 'hair'];
+    function swGetTopWornItem(type) {
+        const co = swGetCharOutfit();
+        if (!co || !co[type]) return null;
+        const mode = swGetModeFor(type);
+        if (mode === 'full') {
+            const id = co[type].full;
+            return id ? swFindItem(id) : null;
+        }
+        for (const cat of SW_PARTS_PRIORITY) {
+            const id = co[type][cat];
+            if (id) {
+                const item = swFindItem(id);
+                if (item) return item;
+            }
+        }
+        return null;
+    }
+
+    // Count how many parts are currently worn (across bot+user). Used for FAB badge.
+    // A full counts as 1 (regardless of how many categories it represents).
+    function swCountWornParts() {
+        const co = swGetCharOutfit();
+        if (!co) return 0;
+        let n = 0;
+        for (const type of ['bot', 'user']) {
+            const mode = swGetModeFor(type);
+            if (mode === 'full') {
+                if (co[type]?.full) n++;
+            } else {
+                for (const cat of SW_PARTS_PRIORITY) if (co[type]?.[cat]) n++;
+            }
+        }
+        return n;
+    }
+
+    // Quick-Swap ranking:
+    //   1. favourites first
+    //   2. then by lastWornAt DESC (most recently worn higher)
+    //   3. then by name ASC
+    //   hidden items are excluded entirely
+    // Rank for Quick-Swap, figure-aware:
+    //   1. favourites first (shared across figures — single ⭐ flag on the item)
+    //   2. then by lastWornAtBot or lastWornAtUser DESC (depending on `figure`).
+    //      Falls back to global lastWornAt if per-figure stamp not yet set.
+    //   3. then by name ASC
+    //   hidden items are excluded entirely
+    function swRankForQuickSwap(items, figure = 'user') {
+        const stampKey = figure === 'bot' ? 'lastWornAtBot' : 'lastWornAtUser';
+        return items
+            .filter(o => !o.hidden)
+            .sort((a, b) => {
+                const af = a.favourite ? 1 : 0, bf = b.favourite ? 1 : 0;
+                if (af !== bf) return bf - af;
+                const aw = a[stampKey] || a.lastWornAt || 0;
+                const bw = b[stampKey] || b.lastWornAt || 0;
+                if (aw !== bw) return bw - aw;
+                return String(a.name || '').localeCompare(String(b.name || ''));
+            });
+    }
+
+    // Group full-category items by tag. Items without any tag land under 'other'.
+    // Returns { [tagKey]: Item[] } with values ranked for the target figure so
+    // "last worn on THIS figure" floats up (bot and user can have different
+    // relevant histories).
+    function swGroupFullsByTag(figure = 'user') {
+        const all = swGetSettings().items.filter(o => o.category === 'full');
+        const byTag = {};
+        for (const tk of TAG_KEYS) byTag[tk] = [];
+        for (const item of all) {
+            const tags = Array.isArray(item.tags) ? item.tags : [];
+            const targetTags = tags.length ? tags.filter(t => TAG_KEYS.includes(t)) : ['other'];
+            for (const tk of targetTags) {
+                if (!byTag[tk]) byTag[tk] = [];
+                byTag[tk].push(item);
+            }
+        }
+        for (const tk of TAG_KEYS) byTag[tk] = swRankForQuickSwap(byTag[tk], figure);
+        return byTag;
     }
 
     function swSetMode(mode) {
@@ -225,12 +348,25 @@ const SLAY_VERSION = '4.2.17';
         return false;
     }
 
-    function swResize(file, maxDim) {
+    // Accepts a File/Blob OR an already-read data: URL string. Prefer passing a
+    // data URL captured at file-pick time: on Android a File is a content://
+    // handle that can expire while a form modal is open — reading it later
+    // fails with a bare FileReader error (the "Ошибка: read" reports).
+    function swResize(src, maxDim) {
         return new Promise((res, rej) => {
+            const go = (dataUrl) => { const img = new Image(); img.onload = () => { let { width: w, height: h } = img; if (w > maxDim || h > maxDim) { const s = Math.min(maxDim / w, maxDim / h); w = Math.round(w * s); h = Math.round(h * s); } const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h); res({ base64: c.toDataURL('image/png').split(',')[1] }); }; img.onerror = () => rej(new Error('не удалось декодировать картинку (битый файл или формат не поддерживается)')); img.src = dataUrl; };
+            if (typeof src === 'string') { go(src); return; }
             const r = new FileReader();
-            r.onload = (e) => { const img = new Image(); img.onload = () => { let { width: w, height: h } = img; if (w > maxDim || h > maxDim) { const s = Math.min(maxDim / w, maxDim / h); w = Math.round(w * s); h = Math.round(h * s); } const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h); res({ base64: c.toDataURL('image/png').split(',')[1] }); }; img.onerror = () => rej(new Error('decode')); img.src = e.target.result; };
-            r.onerror = () => rej(new Error('read')); r.readAsDataURL(file);
+            r.onload = (e) => go(e.target.result);
+            r.onerror = () => rej(new Error('не удалось прочитать файл — выберите его заново'));
+            r.readAsDataURL(src);
         });
+    }
+
+    function swBytesToBase64(bytes) {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(bin);
     }
 
     // ── Save wardrobe image to server file ──
@@ -356,6 +492,14 @@ const SLAY_VERSION = '4.2.17';
             .sw-cat-tab-blocked { opacity:0.35; pointer-events:none; }
             .sw-cat-dot { position:absolute; top:2px; right:4px; width:6px; height:6px; border-radius:50%; background:#db7093; display:none; }
             .sw-cat-dot-visible { display:block; }
+            .sw-tagfilter-toggle { margin-left:auto; display:inline-flex; align-items:center; gap:5px; padding:4px 11px; border-radius:14px; cursor:pointer; font-size:12px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.04); color:#aaa; transition:all .2s; user-select:none; }
+            .sw-tagfilter-toggle:hover { background:rgba(255,255,255,0.08); color:#ccc; }
+            .sw-tagfilter-toggle.sw-tagfilter-on { background:rgba(219,112,147,0.2); color:#f0a0c0; border-color:rgba(219,112,147,0.4); }
+            .sw-tagfilter-badge { font-size:11px; line-height:1; padding:1px 6px; border-radius:8px; background:rgba(219,112,147,0.35); color:#fbe3ee; max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .sw-img-missing { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; cursor:pointer; background:rgba(255,255,255,0.03); border:1px dashed rgba(244,114,182,0.4); border-radius:8px; color:#caa; text-align:center; padding:6px; box-sizing:border-box; }
+            .sw-img-missing i { font-size:26px; color:rgba(244,114,182,0.7); }
+            .sw-img-missing span { font-size:11px; color:#b89; line-height:1.2; }
+            .sw-img-missing .sw-img-missing-hint { font-size:10px; color:rgba(244,114,182,0.85); }
 
             .sw-tag-filter { display:flex; gap:4px; padding:4px 12px; flex-wrap:wrap; }
             .sw-tag-chip { padding:3px 10px; border-radius:12px; cursor:pointer; font-size:11px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.03); color:#999; transition:all .2s; user-select:none; }
@@ -491,6 +635,13 @@ const SLAY_VERSION = '4.2.17';
             }
         }
 
+        // Tag-row collapse state (persisted). Funnel toggle lives in the category
+        // row; clicking it shows/hides the tag filter row to save vertical space
+        // (esp. on mobile). Filtering still works while collapsed — the active
+        // tag is shown as a badge on the funnel.
+        const tagsCollapsed = !!swGetSettings().tagsCollapsed;
+        const activeTagLabel = swTagFilter ? (TAGS[swTagFilter] || swTagFilter) : '';
+
         // ── Category tabs with dots ──
         if (catWrap) {
             let catHtml = '';
@@ -503,6 +654,11 @@ const SLAY_VERSION = '4.2.17';
                     <span class="sw-cat-dot ${equipped && !blocked ? 'sw-cat-dot-visible' : ''}"></span>
                 </div>`;
             }
+            // Funnel toggle, pushed to the right end of the category row. NOT a
+            // .sw-cat-tab (so the category-click loop below ignores it).
+            catHtml += `<div class="sw-tagfilter-toggle ${tagsCollapsed ? 'sw-tagfilter-on' : ''}" id="sw-tagfilter-toggle" title="Фильтр по тегам" role="button" aria-label="Показать/скрыть фильтр по тегам" aria-pressed="${tagsCollapsed ? 'true' : 'false'}">
+                <i class="fa-solid fa-filter"></i>${tagsCollapsed && swTagFilter ? `<span class="sw-tagfilter-badge">${esc(activeTagLabel)}</span>` : ''}
+            </div>`;
             catWrap.innerHTML = catHtml;
             // If current cat is blocked, switch to first available
             if (swIsCatBlocked(mode, swCatTab)) {
@@ -517,10 +673,19 @@ const SLAY_VERSION = '4.2.17';
                     swRender();
                 });
             }
+            catWrap.querySelector('#sw-tagfilter-toggle')?.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const s = swGetSettings();
+                s.tagsCollapsed = !s.tagsCollapsed;
+                swSave();
+                swRender();
+            });
         }
 
         // ── Tag filter ──
         if (tagWrap) {
+            // Collapsed → hide the whole tag row (filtering still applies via swTagFilter).
+            tagWrap.style.display = tagsCollapsed ? 'none' : '';
             let tagHtml = `<div class="sw-tag-chip ${swTagFilter === null ? 'sw-tag-chip-active' : ''}" data-tag="">Все</div>`;
             for (const tag of TAG_KEYS) {
                 tagHtml += `<div class="sw-tag-chip ${swTagFilter === tag ? 'sw-tag-chip-active' : ''}" data-tag="${tag}">${esc(TAGS[tag])}</div>`;
@@ -593,7 +758,7 @@ const SLAY_VERSION = '4.2.17';
         });
 
         // ── Grid ──
-        let h = '<div class="sw-outfit-grid"><div class="sw-outfit-card sw-upload-card" id="sw-upload-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-plus"></i></div><span>Загрузить</span></div>';
+        let h = '<div class="sw-outfit-grid"><div class="sw-outfit-card sw-upload-card" id="sw-upload-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-plus"></i></div><span>Загрузить</span></div><div class="sw-outfit-card sw-upload-card" id="sw-import-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-file-import"></i></div><span>Импорт</span></div>';
         for (const o of filtered) {
             const a = o.id === equippedId;
             const fav = !!o.favourite;
@@ -602,9 +767,13 @@ const SLAY_VERSION = '4.2.17';
             if (a) classes.push('sw-outfit-active');
             if (fav) classes.push('sw-outfit-favourite');
             if (hid) classes.push('sw-outfit-hidden');
+            const _src = swGetOutfitSrc(o);
+            const _imgInner = _src
+                ? `<img src="${_src}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy">`
+                : `<div class="sw-img-missing"><i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span></div>`;
             h += `<div class="${classes.join(' ')}" data-id="${o.id}">
                 <div class="sw-outfit-img-wrap">
-                    <img src="${swGetOutfitSrc(o)}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy">
+                    ${_imgInner}
                     ${a ? '<div class="sw-active-badge"><i class="fa-solid fa-check"></i></div>' : ''}
                     <button class="sw-corner-btn sw-corner-fav ${fav ? 'sw-corner-active' : ''}" data-act="fav" title="${fav ? 'Убрать из избранного' : 'В избранное'}"><i class="fa-${fav ? 'solid' : 'regular'} fa-star"></i></button>
                     <button class="sw-corner-btn sw-corner-hide ${hid ? 'sw-corner-active' : ''}" data-act="hide" title="${hid ? 'Показать' : 'Скрыть'}"><i class="fa-solid fa-eye${hid ? '-slash' : ''}"></i></button>
@@ -629,10 +798,28 @@ const SLAY_VERSION = '4.2.17';
             if (labelText && labelText.nodeType === 3) labelText.textContent = ` Скрытые: ${hiddenCount}`;
         }
 
-        document.getElementById('sw-upload-trigger')?.addEventListener('click', swUpload);
+        // NB: wrap in arrows — a bare handler reference would receive the click
+        // event as the importMode argument (truthy) and break normal upload.
+        document.getElementById('sw-upload-trigger')?.addEventListener('click', () => swUpload());
+        document.getElementById('sw-import-trigger')?.addEventListener('click', () => swUpload(true));
         for (const card of content.querySelectorAll('.sw-outfit-card[data-id]')) {
             const id = card.dataset.id;
-            card.querySelector('.sw-outfit-img')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
+            // Lost-image fallback: if the file 404s (deleted from disk), swap the
+            // broken <img> for a placeholder so the card isn't just a dark void.
+            const cardImg = card.querySelector('.sw-outfit-img');
+            cardImg?.addEventListener('error', () => {
+                const wrap = cardImg.closest('.sw-outfit-img-wrap');
+                if (!wrap || wrap.querySelector('.sw-img-missing')) return;
+                cardImg.remove();
+                const ph = document.createElement('div');
+                ph.className = 'sw-img-missing';
+                ph.innerHTML = '<i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span>';
+                ph.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
+                wrap.insertBefore(ph, wrap.firstChild);
+            });
+            cardImg?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
+            // Placeholder also acts as the toggle target (click = equip/unequip)
+            card.querySelector('.sw-img-missing')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
             card.querySelector('.sw-btn-activate')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
             card.querySelector('.sw-corner-fav')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleFavourite(id); swRender(); });
             card.querySelector('.sw-corner-hide')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleHidden(id); swRender(); });
@@ -733,24 +920,225 @@ const SLAY_VERSION = '4.2.17';
         swRender(); // re-render to rebind events
     }
 
-    function swShowUploadModal(defaultName) {
+    // ── Outfit card export/import (SillyTavern-card style: PNG + tEXt chunk) ──
+    // A shared outfit is a regular PNG of the clothing image with a tEXt chunk
+    // keyed SW_PNG_CHUNK_KEY holding base64(UTF-8 JSON):
+    //   { spec:'slay_wardrobe_item', spec_version:'1.0',
+    //     item:{ name, description, category, forWho, gender, tags } }
+    // Local-only fields (id, addedAt, favourite, lastWorn*, hidden) are NOT
+    // exported; import mints a fresh id. The file opens as a normal image
+    // anywhere — the metadata rides along invisibly, like ST character cards.
+    const SW_PNG_CHUNK_KEY = 'slaywardrobe';
+    const SW_CARD_SPEC = 'slay_wardrobe_item';
+    const SW_PNG_SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+
+    const swCrcTable = (() => {
+        const t = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            t[n] = c >>> 0;
+        }
+        return t;
+    })();
+    function swCrc32(bytes, start = 0, end = bytes.length) {
+        let c = 0xFFFFFFFF;
+        for (let i = start; i < end; i++) c = swCrcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+        return (c ^ 0xFFFFFFFF) >>> 0;
+    }
+    function swB64EncodeUnicode(str) {
+        const bytes = new TextEncoder().encode(str);
+        let bin = '';
+        const CHUNK = 0x8000; // avoid call-stack overflow on large arrays
+        for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+        return btoa(bin);
+    }
+    function swB64DecodeUnicode(b64) {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
+    }
+    function swIsPng(bytes) {
+        if (!bytes || bytes.length < 8) return false;
+        for (let i = 0; i < 8; i++) if (bytes[i] !== SW_PNG_SIG[i]) return false;
+        return true;
+    }
+    // Walk PNG chunks; cb(type, dataStart, dataLen, chunkStart, chunkEnd) — return true to stop.
+    function swPngWalkChunks(bytes, cb) {
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let off = 8;
+        while (off + 8 <= bytes.length) {
+            const len = dv.getUint32(off);
+            const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]);
+            const chunkEnd = off + 12 + len;
+            if (chunkEnd > bytes.length) break; // malformed
+            if (cb(type, off + 8, len, off, chunkEnd)) return;
+            off = chunkEnd;
+        }
+    }
+    // Read tEXt chunk value for our keyword; null if absent or not a PNG.
+    function swPngReadText(bytes, keyword) {
+        if (!swIsPng(bytes)) return null;
+        let found = null;
+        swPngWalkChunks(bytes, (type, dStart, dLen) => {
+            if (type !== 'tEXt') return false;
+            let kEnd = dStart;
+            const dEnd = dStart + dLen;
+            while (kEnd < dEnd && bytes[kEnd] !== 0) kEnd++;
+            const kw = String.fromCharCode(...bytes.subarray(dStart, kEnd));
+            if (kw !== keyword) return false;
+            let text = '';
+            for (let i = kEnd + 1; i < dEnd; i++) text += String.fromCharCode(bytes[i]);
+            found = text;
+            return true;
+        });
+        return found;
+    }
+    // Insert a tEXt chunk (keyword + latin1 text) right before IEND; strips any
+    // pre-existing chunk with the same keyword first.
+    function swPngInsertText(bytes, keyword, text) {
+        if (!swIsPng(bytes)) throw new Error('not a PNG');
+        // locate & drop existing same-keyword tEXt + find IEND start
+        const dropRanges = [];
+        let iendStart = -1;
+        swPngWalkChunks(bytes, (type, dStart, dLen, cStart, cEnd) => {
+            if (type === 'tEXt') {
+                let kEnd = dStart;
+                const dEnd = dStart + dLen;
+                while (kEnd < dEnd && bytes[kEnd] !== 0) kEnd++;
+                const kw = String.fromCharCode(...bytes.subarray(dStart, kEnd));
+                if (kw === keyword) dropRanges.push([cStart, cEnd]);
+            }
+            if (type === 'IEND') { iendStart = cStart; return true; }
+            return false;
+        });
+        if (iendStart < 0) throw new Error('PNG has no IEND');
+        // build new tEXt chunk bytes
+        const kwBytes = new TextEncoder().encode(keyword);
+        const txtBytes = new Uint8Array(text.length);
+        for (let i = 0; i < text.length; i++) txtBytes[i] = text.charCodeAt(i) & 0xFF;
+        const data = new Uint8Array(kwBytes.length + 1 + txtBytes.length);
+        data.set(kwBytes, 0); data[kwBytes.length] = 0; data.set(txtBytes, kwBytes.length + 1);
+        const chunk = new Uint8Array(12 + data.length);
+        const cdv = new DataView(chunk.buffer);
+        cdv.setUint32(0, data.length);
+        chunk[4] = 0x74; chunk[5] = 0x45; chunk[6] = 0x58; chunk[7] = 0x74; // 'tEXt'
+        chunk.set(data, 8);
+        cdv.setUint32(8 + data.length, swCrc32(chunk, 4, 8 + data.length));
+        // reassemble: original minus dropRanges, with new chunk spliced before IEND
+        const parts = [];
+        let cursor = 0;
+        const boundaries = [...dropRanges, [iendStart, iendStart]].sort((a, b) => a[0] - b[0]);
+        for (const [s, e] of boundaries) {
+            if (s > cursor) parts.push(bytes.subarray(cursor, s));
+            if (s === iendStart && e === iendStart) parts.push(chunk); // splice point
+            cursor = Math.max(cursor, e);
+        }
+        parts.push(bytes.subarray(cursor));
+        const total = parts.reduce((n, p) => n + p.length, 0);
+        const out = new Uint8Array(total);
+        let o = 0;
+        for (const p of parts) { out.set(p, o); o += p.length; }
+        return out;
+    }
+
+    // Export an item as a shareable PNG card (image + embedded metadata).
+    async function swExportItem(id) {
+        const o = swFindItem(id);
+        if (!o) { toastr.error('Предмет не найден', 'Гардероб'); return; }
+        try {
+            toastr.info('Собираю карточку...', 'Гардероб', { timeOut: 4000 });
+            // Load the current image (path preferred, inline base64 fallback)
+            const src = swGetOutfitSrc(o);
+            if (!src) throw new Error('у предмета нет картинки');
+            // Re-encode through canvas: unifies jpeg/webp/png sources into PNG
+            // (tEXt chunks only exist in PNG). Same-origin, so no canvas taint.
+            const img = await new Promise((res, rej) => {
+                const im = new Image();
+                im.onload = () => res(im);
+                im.onerror = () => rej(new Error('картинка не загрузилась (файл удалён?)'));
+                im.src = src;
+            });
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            const blob = await new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'));
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const payload = {
+                spec: SW_CARD_SPEC,
+                spec_version: '1.0',
+                item: {
+                    name: o.name || '',
+                    description: o.description || '',
+                    category: o.category || 'full',
+                    forWho: o.forWho || 'all',
+                    gender: o.gender || 'unisex',
+                    tags: Array.isArray(o.tags) ? o.tags : [],
+                },
+            };
+            const withChunk = swPngInsertText(bytes, SW_PNG_CHUNK_KEY, swB64EncodeUnicode(JSON.stringify(payload)));
+            const outBlob = new Blob([withChunk], { type: 'image/png' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(outBlob);
+            const safe = String(o.name || 'outfit').replace(/[^\p{L}\p{N} _-]/gu, '').trim().replace(/\s+/g, '_') || 'outfit';
+            a.download = `slay_outfit_${safe}.png`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+            toastr.success(`Карточка «${o.name}» экспортирована`, 'Гардероб', { timeOut: 2500 });
+        } catch (e) { toastr.error('Экспорт не удался: ' + (e?.message || e), 'Гардероб'); }
+    }
+
+    // Try to read outfit-card metadata from a picked file. Returns item-shaped
+    // object or null (not a PNG / no chunk / wrong spec / parse error).
+    function swParseOutfitCard(bytes, fileName = '') {
+        try {
+            // Distinguish the two "no card" cases in the log: mobile galleries and
+            // messengers re-encode images (PNG→JPEG or fresh PNG), stripping tEXt.
+            if (!swIsPng(bytes)) { swLog('INFO', `outfit card: "${fileName}" is not a PNG — likely re-encoded by gallery/messenger`); return null; }
+            const raw = swPngReadText(bytes, SW_PNG_CHUNK_KEY);
+            if (!raw) { swLog('INFO', `outfit card: "${fileName}" is a PNG without embedded outfit data`); return null; }
+            const payload = JSON.parse(swB64DecodeUnicode(raw));
+            if (payload?.spec !== SW_CARD_SPEC || !payload.item) return null;
+            const it = payload.item;
+            return {
+                name: String(it.name || ''),
+                description: String(it.description || ''),
+                category: CAT_KEYS.includes(it.category) ? it.category : 'full',
+                forWho: ['all', 'bot', 'user'].includes(it.forWho) ? it.forWho : 'all',
+                gender: GENDER_KEYS.includes(it.gender) ? it.gender : 'unisex',
+                tags: Array.isArray(it.tags) ? it.tags.filter(t => TAG_KEYS.includes(t)) : [],
+            };
+        } catch (e) { swLog('WARN', 'swParseOutfitCard failed:', e?.message); return null; }
+    }
+
+    function swShowUploadModal(defaultName, defaults = null) {
         return new Promise((resolve) => {
+            // defaults (from an imported outfit card) win over the generic
+            // fallbacks: name, category, forWho, gender, tags come pre-filled.
+            const selCat = defaults?.category || swCatTab;
+            const selForWho = defaults?.forWho || (swTab === 'bot' ? 'bot' : (swTab === 'user' ? 'user' : 'all'));
+            const selGender = defaults?.gender || 'unisex';
+            const selTags = new Set(defaults?.tags || []);
+            const nameVal = defaults?.name || defaultName;
             let tagsHtml = '';
-            for (const tag of TAG_KEYS) { tagsHtml += `<label style="display:inline-flex;align-items:center;gap:3px;font-size:12px;color:#bbb;cursor:pointer;"><input type="checkbox" value="${tag}" style="accent-color:#db7093;"> ${esc(TAGS[tag])}</label> `; }
+            for (const tag of TAG_KEYS) { tagsHtml += `<label style="display:inline-flex;align-items:center;gap:3px;font-size:12px;color:#bbb;cursor:pointer;"><input type="checkbox" value="${tag}" ${selTags.has(tag) ? 'checked' : ''} style="accent-color:#db7093;"> ${esc(TAGS[tag])}</label> `; }
             let catOptions = '';
-            for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${cat === swCatTab ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
+            for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${cat === selCat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
 
             const el = swShowInline(`
                 <div style="padding:10px;">
-                    <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">👗 Новый предмет</h3>
+                    <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">${defaults ? '🧥 Импорт костюма' : '👗 Новый предмет'}</h3>
+                    ${defaults ? '<div style="font-size:11px;color:#9c8;margin:0 0 8px;">В картинке найдены данные костюма — поля заполнены автоматически.</div>' : ''}
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Название</label>
-                    <input type="text" id="sw-upl-name" value="${esc(defaultName)}" placeholder="Название" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">
+                    <input type="text" id="sw-upl-name" value="${esc(nameVal)}" placeholder="Название" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Категория</label>
                     <select id="sw-upl-cat" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">${catOptions}</select>
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Для кого</label>
-                    <select id="sw-upl-forwho" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="all">Все</option><option value="bot" ${swTab === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${swTab === 'user' ? 'selected' : ''}>Юзер</option></select>
+                    <select id="sw-upl-forwho" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="all" ${selForWho === 'all' ? 'selected' : ''}>Все</option><option value="bot" ${selForWho === 'bot' ? 'selected' : ''}>Бот</option><option value="user" ${selForWho === 'user' ? 'selected' : ''}>Юзер</option></select>
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Пол</label>
-                    <select id="sw-upl-gender" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="unisex">⚥ Унисекс</option><option value="female">♀️ Женское</option><option value="male">♂️ Мужское</option></select>
+                    <select id="sw-upl-gender" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="unisex" ${selGender === 'unisex' ? 'selected' : ''}>⚥ Унисекс</option><option value="female" ${selGender === 'female' ? 'selected' : ''}>♀️ Женское</option><option value="male" ${selGender === 'male' ? 'selected' : ''}>♂️ Мужское</option></select>
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Теги</label>
                     <div id="sw-upl-tags" style="display:flex;flex-wrap:wrap;gap:6px;">${tagsHtml}</div>
                     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
@@ -814,6 +1202,16 @@ const SLAY_VERSION = '4.2.17';
             const el = swShowInline(`
                 <div style="padding:10px;">
                     <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">✏️ Редактировать</h3>
+                    <div style="display:flex;gap:12px;margin:0 0 6px;align-items:center;">
+                        <img id="sw-edit-thumb" src="${esc(swGetOutfitSrc(item) || '')}" alt="" style="width:64px;height:84px;object-fit:cover;object-position:center top;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);flex-shrink:0;">
+                        <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
+                            <button id="sw-edit-replace" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(244,114,182,0.3);cursor:pointer;font-size:12px;background:rgba(244,114,182,0.12);color:#f0a0c0;display:inline-flex;align-items:center;gap:6px;"><i class="fa-solid fa-image"></i> Заменить картинку</button>
+                            <span style="font-size:11px;color:#888;">описание и данные останутся</span>
+                            <button id="sw-edit-export" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(147,197,219,0.3);cursor:pointer;font-size:12px;background:rgba(147,197,219,0.1);color:#a0d0f0;display:inline-flex;align-items:center;gap:6px;"><i class="fa-solid fa-file-export"></i> Экспорт PNG</button>
+                            <span style="font-size:11px;color:#888;">картинка + данные в одном файле — можно делиться</span>
+                        </div>
+                    </div>
+                    <input type="file" id="sw-edit-file" accept="image/*" style="display:none;">
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Название</label>
                     <input type="text" id="sw-edit-name" value="${esc(item.name)}" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;">
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Описание</label>
@@ -834,6 +1232,31 @@ const SLAY_VERSION = '4.2.17';
             if (!el) { resolve(null); return; }
             const close = (val) => { swRestoreInline(); resolve(val); };
             el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
+            // ── Replace image: keep ALL metadata (name/desc/category/forWho/gender/tags),
+            // swap only the picture. Mutates the live item + saves immediately (independent
+            // of Save/Cancel of the text fields). Don't call swRender here — it would rebuild
+            // #sw-tab-content and destroy this inline panel; the grid refreshes on close via
+            // swRestoreInline→swRender.
+            const replaceFile = el.querySelector('#sw-edit-file');
+            el.querySelector('#sw-edit-replace')?.addEventListener('click', () => replaceFile?.click());
+            el.querySelector('#sw-edit-export')?.addEventListener('click', () => swExportItem(item.id));
+            replaceFile?.addEventListener('change', async () => {
+                const f = replaceFile.files?.[0];
+                if (!f) return;
+                try {
+                    toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 8000 });
+                    const { base64 } = await swResize(f, swGetSettings().maxDimension);
+                    const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`);
+                    item.imagePath = path;
+                    item.base64 = '';
+                    swSave();
+                    swUpdatePromptInjection();
+                    const thumb = el.querySelector('#sw-edit-thumb');
+                    if (thumb) thumb.src = path + '?t=' + Date.now();
+                    toastr.success('Картинка заменена', 'Гардероб', { timeOut: 2000 });
+                } catch (e) { toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
+                finally { replaceFile.value = ''; }
+            });
             el.querySelector('#sw-edit-save').addEventListener('click', () => {
                 const name = el.querySelector('#sw-edit-name').value.trim();
                 if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
@@ -844,7 +1267,10 @@ const SLAY_VERSION = '4.2.17';
                 const tags = [...el.querySelectorAll('#sw-edit-tags input:checked')].map(c => c.value);
                 close({ name, description, category, forWho, gender, tags });
             });
-            setTimeout(() => m.querySelector('#sw-edit-name')?.focus(), 50);
+            // was m.querySelector — `m` doesn't exist in this scope (it lives in
+            // swOpenModal). This was THE long-standing "Uncaught ReferenceError:
+            // m is not defined" console error fired 50ms after opening item edit.
+            setTimeout(() => el.querySelector('#sw-edit-name')?.focus(), 50);
         });
     }
 
@@ -933,7 +1359,7 @@ const SLAY_VERSION = '4.2.17';
         // ── Direct API mode (recommended) ──
         if (mode === 'direct') {
             const iigSettings = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const endpoint = (swS.describeEndpoint || iigSettings.endpoint || '').replace(/\/$/, '');
+            const endpoint = normalizeApiEndpoint(swS.describeEndpoint || iigSettings.endpoint || '');
             const apiKey = swS.describeKey || iigSettings.apiKey || '';
             const modelSelect = document.getElementById('slay_sw_describe_model');
             const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.5-flash';
@@ -952,39 +1378,58 @@ const SLAY_VERSION = '4.2.17';
             try {
                 let desc = null;
 
-                if (useGeminiFormat) {
-                    const url = `${endpoint}/v1beta/models/${model}:generateContent`;
-                    const body = {
-                        contents: [{
-                            role: 'user', parts: [
-                                { inlineData: { mimeType: 'image/png', data: base64 } },
-                                { text: describePrompt }
-                            ]
-                        }],
-                        generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
-                    };
-                    const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                    if (!response.ok) throw new Error(`API ${response.status}`);
-                    const result = await response.json();
-                    desc = result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
-                } else {
-                    const url = `${endpoint}/v1/chat/completions`;
-                    const body = {
-                        model, max_tokens: maxTokens,
-                        messages: [
-                            { role: 'system', content: describePrompt },
-                            {
-                                role: 'user', content: [
-                                    { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                                    { type: 'text', text: 'Describe the clothing in this image.' }
+                // Retry on transient failures (429 rate-limit, 5xx) up to 2 times
+                // with short backoff. First upload of the session often hits 429
+                // on a "warm" Gemini key because previous chat completions bumped
+                // the shared per-minute quota.
+                const callApi = async () => {
+                    if (useGeminiFormat) {
+                        const url = `${endpoint}/v1beta/models/${model}:generateContent`;
+                        const body = {
+                            contents: [{
+                                role: 'user', parts: [
+                                    { inlineData: { mimeType: 'image/png', data: base64 } },
+                                    { text: describePrompt }
                                 ]
-                            }
-                        ]
-                    };
-                    const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                    if (!response.ok) throw new Error(`API ${response.status}`);
-                    const result = await response.json();
-                    desc = result.choices?.[0]?.message?.content?.trim() || '';
+                            }],
+                            generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
+                        };
+                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
+                        const result = await response.json();
+                        return result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
+                    } else {
+                        const url = `${endpoint}/v1/chat/completions`;
+                        const body = {
+                            model, max_tokens: maxTokens,
+                            messages: [
+                                { role: 'system', content: describePrompt },
+                                {
+                                    role: 'user', content: [
+                                        { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+                                        { type: 'text', text: 'Describe the clothing in this image.' }
+                                    ]
+                                }
+                            ]
+                        };
+                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
+                        const result = await response.json();
+                        return result.choices?.[0]?.message?.content?.trim() || '';
+                    }
+                };
+
+                const MAX_RETRIES = 2;
+                for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                    try { desc = await callApi(); break; }
+                    catch (err) {
+                        const status = err.status || 0;
+                        const retryable = status === 429 || (status >= 500 && status < 600);
+                        if (!retryable || attempt === MAX_RETRIES) throw err;
+                        const delay = 800 * Math.pow(2, attempt); // 800ms, 1600ms
+                        swLog('WARN', `Describe API ${status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
+                        await new Promise(r => setTimeout(r, delay));
+                    }
                 }
 
                 if (desc) {
@@ -1051,25 +1496,48 @@ const SLAY_VERSION = '4.2.17';
         return null;
     }
 
-    async function swUpload() {
-        const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+    async function swUpload(importMode = false) {
+        const inp = document.createElement('input'); inp.type = 'file';
+        // Import mode: NO accept filter. With accept="image/*" Android opens the
+        // photo picker (gallery), which can hand over a re-encoded copy with the
+        // tEXt chunk stripped; the plain document picker returns original bytes.
+        if (!importMode) inp.accept = 'image/*';
         inp.addEventListener('change', async () => {
             const f = inp.files?.[0]; if (!f) return;
             const defaultName = f.name.replace(/\.[^.]+$/, '');
 
-            // Show upload modal
-            const result = await swShowUploadModal(defaultName);
+            // Read the WHOLE file into memory right now, while the picker handle
+            // is fresh. On Android a File is a content:// ticket that routinely
+            // expires while the user fills the form modal (browser suspended
+            // behind the picker, cloud-backed gallery item) — reading it after
+            // the modal is what produced the "Ошибка: read" reports.
+            let bytes;
+            try { bytes = new Uint8Array(await f.arrayBuffer()); }
+            catch (e) { toastr.error('Не удалось прочитать файл — выберите его заново', 'Гардероб'); return; }
+            const dataUrl = `data:${f.type || 'image/png'};base64,${swBytesToBase64(bytes)}`;
+
+            // Outfit-card import: if the picked PNG carries our tEXt chunk,
+            // pre-fill the form and reuse the embedded description (skipping
+            // the AI auto-describe — the card already knows what it is).
+            const card = swParseOutfitCard(bytes, f.name);
+            if (importMode && !card) {
+                toastr.error('В этом файле нет данных костюма. Если карточка приехала через галерею или мессенджер как «фото» — метаданные вырезаны. Передавайте PNG как файл/документ и выбирайте через «Файлы», а не из галереи.', '\u{1F9E5} Импорт костюма', { timeOut: 12000 });
+                return;
+            }
+
+            // Show upload modal (pre-filled when importing a card)
+            const result = await swShowUploadModal(defaultName, card);
             if (!result) return;
 
             try {
-                const { base64 } = await swResize(f, swGetSettings().maxDimension);
-                let autoDesc = null;
-                if (swGetSettings().autoDescribe !== false) {
+                const { base64 } = await swResize(dataUrl, swGetSettings().maxDimension);
+                let autoDesc = card?.description?.trim() || null;
+                if (!autoDesc && swGetSettings().autoDescribe !== false) {
                     autoDesc = await swAnalyzeOutfit(base64, result.category);
-                }
-                if (autoDesc) {
-                    const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
-                    if (edited !== null) autoDesc = edited;
+                    if (autoDesc) {
+                        const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
+                        if (edited !== null) autoDesc = edited;
+                    }
                 }
                 const imagePath = await swSaveImageToFile(base64, `wardrobe_${result.name}`);
                 swAddItem({
@@ -1087,7 +1555,7 @@ const SLAY_VERSION = '4.2.17';
                 // Switch to the uploaded item's category
                 swCatTab = result.category;
                 swRender();
-                toastr.success(`\u00AB${result.name}\u00BB добавлен`, 'Гардероб');
+                toastr.success(`\u00AB${result.name}\u00BB ${card ? 'импортирован' : 'добавлен'}`, 'Гардероб');
             } catch (e) { toastr.error('Ошибка: ' + e.message, 'Гардероб'); }
         });
         inp.click();
@@ -1152,28 +1620,531 @@ const SLAY_VERSION = '4.2.17';
     }
 
     // ── Bar button ──
+    // Hover-preview is DESKTOP-ONLY. Mobile browsers synthesize mouseenter
+    // from taps (and some withhold the click when hover mutates the DOM), so
+    // without this guard a tap on the bar button opened the PC hover popup
+    // instead of the wardrobe modal. Checked at event time, not bind time —
+    // handles device-mode changes (e.g. DevTools emulation, convertibles).
+    const swCanHover = () => window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    let swHoverShowTimer = null;
+    let swAutoCloseTimer = null;  // dismiss timer after cursor leaves popup
+    const SW_AUTOCLOSE_MS = 5000;
+
+    // Persist last-used Quick-Swap tab across popup open/close + sessions.
+    let swPreviewTab = (() => {
+        try { return localStorage.getItem('slay_wardrobe_preview_tab') === 'bot' ? 'bot' : 'user'; }
+        catch (e) { return 'user'; }
+    })();
+    function swSetPreviewTab(tab) {
+        swPreviewTab = tab;
+        try { localStorage.setItem('slay_wardrobe_preview_tab', tab); } catch (e) { }
+    }
+
+
     function swInjectFloatingBtn() {
         let $btn = $('#sw-bar-btn');
         if ($btn.length === 0) {
             $btn = $('<div id="sw-bar-btn" title="Гардероб"><i class="fa-solid fa-shirt"></i></div>');
-            $btn.on('click touchend', function (e) { e.preventDefault(); e.stopPropagation(); swOpenModal(); });
+            const btnEl = $btn.get(0);
+
+            // Click/tap always opens the full wardrobe. If popup happens to be
+            // open (opened earlier via hover) — close it first so it doesn't
+            // linger on top of the modal. No toggle-close through the button:
+            //   - "navигated to button, wanted wardrobe" must always work in one click
+            //   - popup closes via X / outside click / Escape (enough ways)
+            btnEl.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                clearTimeout(swHoverShowTimer);
+                swClosePreviewPopup();
+                swOpenModal();
+            });
+
+            // ── Hover: opens popup after 500ms intent debounce. Fast
+            // click-intent users never see the popup; deliberate pause triggers.
+            btnEl.addEventListener('mouseenter', () => {
+                if (!swCanHover()) return;
+                clearTimeout(swHoverShowTimer);
+                clearTimeout(swAutoCloseTimer);
+                swHoverShowTimer = setTimeout(() => swOpenPreviewPopup(btnEl), 500);
+            });
+            btnEl.addEventListener('mouseleave', () => {
+                clearTimeout(swHoverShowTimer);
+                // If popup is currently open, restart the auto-close countdown
+                // when cursor leaves the bar button. Without this, a user who
+                // moved popup→button→away would stall the popup open forever
+                // (popup mouseleave already fired before they reached button,
+                // then button mouseenter cancelled the timer).
+                const pp = document.getElementById('sw-preview-popup');
+                if (pp?.classList.contains('sw-pp-open') && !pp.matches(':hover')) {
+                    clearTimeout(swAutoCloseTimer);
+                    swAutoCloseTimer = setTimeout(swClosePreviewPopup, SW_AUTOCLOSE_MS);
+                }
+            });
+
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
         }
         const co = swGetCharOutfit();
-        let count = 0;
-        if (co) {
-            for (const type of ['bot', 'user']) {
-                for (const cat of CAT_KEYS) {
-                    if (co[type]?.[cat]) count++;
-                }
-            }
-        }
+        // Badge = currently worn parts across bot+user. Respects per-type mode so a
+        // full counts as 1 (not 1 + parts), because parts are preserved in storage
+        // even after a quick-swap to full.
+        const count = co ? swCountWornParts() : 0;
         $btn.toggleClass('sw-bar-active', count > 0);
         if (count > 0) {
             $btn.html(`<i class="fa-solid fa-shirt"></i><span class="sw-bar-count">${count}</span>`);
         } else { $btn.html('<i class="fa-solid fa-shirt"></i>'); }
         $btn.show();
+    }
+
+    // ╔════════════════════════════════════════════════════════════════════╗
+    // ║  Preview popup + Quick-Swap (v4.3)                                 ║
+    // ╚════════════════════════════════════════════════════════════════════╝
+    // Shown on hover (desktop) / long-press (mobile) on the wardrobe bar button.
+    // Contents: currently-worn preview for bot+user + quick-swap buttons grouped
+    // by tag. Mobile falls back to a bottom-sheet layout via CSS media query.
+
+    const SW_TAG_ICONS = Object.freeze({
+        home: '🏠', street: '👟', evening: '🌙',
+        sleep: '💤', sport: '💪', beach: '🏖', other: '✨',
+    });
+
+    function swPreviewPopupEl() {
+        let el = document.getElementById('sw-preview-popup');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'sw-preview-popup';
+            el.className = 'sw-preview-popup';
+            document.body.appendChild(el);
+            // ── Dismissal paths:
+            //   1. click outside popup (but not on bar-btn — bar-btn handler owns that)
+            //   2. X close button inside popup
+            //   3. Escape key
+            //   4. mouseleave for SW_AUTOCLOSE_MS (5s)
+            document.addEventListener('click', (e) => {
+                if (!el.classList.contains('sw-pp-open')) return;
+                if (el.contains(e.target)) return;
+                if (e.target.closest('#sw-bar-btn')) return;
+                swClosePreviewPopup();
+            });
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && el.classList.contains('sw-pp-open')) {
+                    swClosePreviewPopup();
+                }
+            });
+
+            // ── Auto-dismiss: cursor left the popup for SW_AUTOCLOSE_MS → close.
+            // Entering the popup cancels the timer.
+            el.addEventListener('mouseenter', () => clearTimeout(swAutoCloseTimer));
+            el.addEventListener('mouseleave', () => {
+                clearTimeout(swAutoCloseTimer);
+                swAutoCloseTimer = setTimeout(swClosePreviewPopup, SW_AUTOCLOSE_MS);
+            });
+
+            // ── Event-bubbling containment (bound ONCE on the permanent element).
+            // Previously this was re-added on every swRenderPreviewPopup() call
+            // which stacked duplicate listeners on the same element after each
+            // swap — textbook leak. Now the element is stable; listener set is
+            // fixed size.
+            const stop = e => e.stopPropagation();
+            el.addEventListener('touchstart', stop, { passive: true });
+            el.addEventListener('touchend', stop, { passive: true });
+            el.addEventListener('pointerdown', stop);
+            el.addEventListener('pointerup', stop);
+            el.addEventListener('mousedown', stop);
+
+        }
+        return el;
+    }
+
+    // Anchor rect remembered across re-positions (e.g. after sub-picker expand)
+    let swPopupAnchorRect = null;
+
+    function swRepositionPopup() {
+        const el = document.getElementById('sw-preview-popup');
+        if (!el || !el.classList.contains('sw-pp-open') || !swPopupAnchorRect) return;
+        const r = swPopupAnchorRect;
+        el.style.visibility = 'hidden';
+        el.style.left = '0px';
+        el.style.top = '0px';
+        const w = el.offsetWidth;
+        const h = el.offsetHeight;
+        const vh = window.innerHeight;
+        let left = r.right - w;
+        let top = r.top - h - 10;
+        if (left < 8) left = 8;
+        // If popup doesn't fit above the button, anchor its BOTTOM to just
+        // above the button instead — so when sub-picker expands the popup
+        // stretches upward, not off-screen below.
+        if (top < 8) top = Math.max(8, vh - h - 10);
+        el.style.left = left + 'px';
+        el.style.top = top + 'px';
+        el.style.visibility = '';
+    }
+
+    function swOpenPreviewPopup(anchor) {
+        const el = swPreviewPopupEl();
+        swRenderPreviewPopup();
+        swPopupAnchorRect = anchor.getBoundingClientRect();
+        el.classList.add('sw-pp-open');
+        swRepositionPopup();
+    }
+
+    function swClosePreviewPopup() {
+        clearTimeout(swAutoCloseTimer);
+        const el = document.getElementById('sw-preview-popup');
+        if (el) el.classList.remove('sw-pp-open');
+        swHidePeek?.();  // also drop any lingering hold-to-zoom preview
+    }
+
+    // Render preview thumbnails (bot + user) + quick-swap categories for the
+    // currently-selected swPreviewTab. Called on every open + after swaps.
+    function swRenderPreviewPopup() {
+        // Before the old DOM gets blown away by innerHTML, make sure no peek
+        // timers (set by mouseenter on old tiles) can still fire.
+        swCancelPendingPeekTimers();
+        const el = swPreviewPopupEl();
+        const co = swGetCharOutfit();
+        const cn = swCharName();
+        if (!cn) {
+            el.innerHTML = `<div class="sw-pp-empty">Выберите персонажа</div>`;
+            return;
+        }
+        const botItem = swGetTopWornItem('bot');
+        const userItem = swGetTopWornItem('user');
+        // Thumb backgrounds are set from JS (data-src → .style.backgroundImage)
+        // instead of inline CSS to avoid url() escape bugs on paths with spaces,
+        // parens, backslashes, unicode.
+        const renderSlot = (type, item) => {
+            const label = type === 'bot' ? '{{char}}' : '{{user}}';
+            if (!item) {
+                return `<div class="sw-pp-slot sw-pp-slot-empty" data-type="${type}">
+                    <div class="sw-pp-thumb sw-pp-thumb-empty"><i class="fa-solid fa-shirt"></i></div>
+                    <div class="sw-pp-slot-label">${label}</div>
+                    <div class="sw-pp-slot-sub">— пусто —</div>
+                </div>`;
+            }
+            const src = swGetOutfitSrc(item) || '';
+            const mode = swGetModeFor(type);
+            const sub = mode === 'full'
+                ? (CATEGORIES[item.category] || 'Полный')
+                : 'По частям';
+            const safeSrcAttr = esc(src);
+            return `<div class="sw-pp-slot" data-type="${type}" data-src="${safeSrcAttr}">
+                <div class="sw-pp-thumb"></div>
+                <div class="sw-pp-slot-label">${label}</div>
+                <div class="sw-pp-slot-sub" title="${esc(item.name)}">${esc(item.name)}</div>
+                <div class="sw-pp-slot-meta">${sub}</div>
+            </div>`;
+        };
+
+        const byTag = swGroupFullsByTag(swPreviewTab);
+        // Only show tags that have at least 1 visible item — clutter-free UX
+        const activeTags = TAG_KEYS.filter(tk => byTag[tk].length > 0);
+
+        const catButtons = activeTags.map(tk => {
+            const items = byTag[tk];
+            const multi = items.length > 1 ? ' sw-pp-cat-multi' : '';
+            return `<button class="sw-pp-cat-btn${multi}" data-tag="${tk}" title="${TAGS[tk]} (${items.length})">
+                <span class="sw-pp-cat-ico">${SW_TAG_ICONS[tk] || '✨'}</span>
+                <span class="sw-pp-cat-count">${items.length}</span>
+            </button>`;
+        }).join('');
+
+        el.innerHTML = `
+            <button class="sw-pp-close" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
+            <div class="sw-pp-body">
+                <div class="sw-pp-screen sw-pp-screen-main">
+                    <div class="sw-pp-section sw-pp-section-preview">
+                        <div class="sw-pp-title">Сейчас надето</div>
+                        <div class="sw-pp-preview-grid">
+                            ${renderSlot('bot', botItem)}
+                            ${renderSlot('user', userItem)}
+                        </div>
+                    </div>
+                    <div class="sw-pp-section sw-pp-section-swap">
+                        <div class="sw-pp-title">Быстрая смена <span class="sw-pp-title-sub">(${swPreviewTab === 'bot' ? 'Бот' : 'Юзер'})</span></div>
+                        <div class="sw-pp-cats">
+                            ${catButtons || '<div class="sw-pp-empty-line">Нет полных комплектов</div>'}
+                        </div>
+                    </div>
+                </div>
+                <div class="sw-pp-screen sw-pp-screen-sub" hidden>
+                    <div class="sw-pp-subgrid-head">
+                        <button class="sw-pp-sub-back" title="К категориям"><i class="fa-solid fa-arrow-left"></i></button>
+                        <span class="sw-pp-subgrid-title"></span>
+                    </div>
+                    <div class="sw-pp-subgrid-items"></div>
+                </div>
+            </div>
+            <div class="sw-pp-footer">
+                <div class="sw-pp-tabs">
+                    <button class="sw-pp-tab${swPreviewTab === 'user' ? ' sw-pp-tab-active' : ''}" data-tab="user">👤 Юзер</button>
+                    <button class="sw-pp-tab${swPreviewTab === 'bot' ? ' sw-pp-tab-active' : ''}" data-tab="bot">🤖 Бот</button>
+                </div>
+                <button class="sw-pp-open-full"><i class="fa-solid fa-shirt"></i> Открыть гардероб</button>
+            </div>
+        `;
+
+        // ── Wire events ──
+        el.querySelector('.sw-pp-close')?.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation(); swClosePreviewPopup();
+        });
+        el.querySelector('.sw-pp-open-full')?.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            swClosePreviewPopup();
+            swOpenModal();
+        });
+        // Preview slot click → open full wardrobe on that type's tab
+        el.querySelectorAll('.sw-pp-slot').forEach(slot => {
+            slot.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const type = slot.dataset.type;
+                swTab = type;
+                swClosePreviewPopup();
+                swOpenModal();
+            });
+        });
+        // Tab switch (bot/user for Quick-Swap target). Persists choice.
+        el.querySelectorAll('.sw-pp-tab').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                swSetPreviewTab(tab.dataset.tab);
+                swRenderPreviewPopup();
+            });
+        });
+        // Category button click → always open sub-picker, never instant-equip.
+        el.querySelectorAll('.sw-pp-cat-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const tk = btn.dataset.tag;
+                const items = byTag[tk] || [];
+                if (items.length > 0) swShowSubgrid(tk, items);
+            });
+        });
+        // Apply thumbs via JS-set style (dodges CSS url() escaping hell —
+        // paths with (), backslashes, spaces, unicode all survive).
+        for (const slot of el.querySelectorAll('.sw-pp-slot')) {
+            const src = slot.dataset.src;
+            const thumb = slot.querySelector('.sw-pp-thumb');
+            if (src && thumb && !thumb.classList.contains('sw-pp-thumb-empty')) {
+                thumb.style.backgroundImage = `url("${src.replace(/"/g, '\\"')}")`;
+            }
+        }
+
+    }
+
+    // Step-based navigation: tap a multi-outfit category → swap the main screen
+    // (preview+categories) out for the sub-picker screen (back-button + items).
+    // Popup size stays constant; only the sub-picker's own grid scrolls if the
+    // tag has many outfits. Back button returns to the main screen.
+    function swShowSubgrid(tagKey, items) {
+        // Re-rendering the tiles set → any pending peek timers from previous
+        // sub-picker state become stale. Flush them.
+        swCancelPendingPeekTimers();
+        const el = swPreviewPopupEl();
+        const main = el.querySelector('.sw-pp-screen-main');
+        const sub = el.querySelector('.sw-pp-screen-sub');
+        const titleEl = el.querySelector('.sw-pp-subgrid-title');
+        const grid = el.querySelector('.sw-pp-subgrid-items');
+        if (!sub || !grid || !main) return;
+        titleEl.textContent = `${TAGS[tagKey] || tagKey} — выбери (${items.length})`;
+        // Name captions intentionally dropped — thumbnails alone are enough
+        // (per user feedback: "ебало есть, и глаза, и так все увидим").
+        // Only the favourite star overlays.
+        grid.innerHTML = items.map(item => {
+            const fav = item.favourite ? '<span class="sw-pp-sub-fav">★</span>' : '';
+            return `<div class="sw-pp-sub-item" data-id="${item.id}" title="${esc(item.name)}">${fav}</div>`;
+        }).join('');
+        // Set backgrounds via JS so path escaping doesn't bite us
+        const itemById = new Map(items.map(i => [i.id, i]));
+        for (const node of grid.querySelectorAll('.sw-pp-sub-item')) {
+            const item = itemById.get(node.dataset.id);
+            if (!item) continue;
+            const src = swGetOutfitSrc(item);
+            if (src) node.style.backgroundImage = `url("${src.replace(/"/g, '\\"')}")`;
+        }
+        main.hidden = true;
+        sub.hidden = false;
+        // Back button: re-use the single permanent listener via data-wired flag
+        // so opening the sub-picker many times doesn't stack duplicates.
+        const backBtn = el.querySelector('.sw-pp-sub-back');
+        if (backBtn && backBtn.dataset.wired !== '1') {
+            backBtn.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                sub.hidden = true;
+                main.hidden = false;
+            });
+            backBtn.dataset.wired = '1';
+        }
+        grid.querySelectorAll('.sw-pp-sub-item').forEach(node => {
+            swBindPeek(node);
+            node.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                if (node.dataset.peekSuppress === '1') {
+                    delete node.dataset.peekSuppress;
+                    return;
+                }
+                const id = node.dataset.id;
+                const item = swFindItem(id);
+                if (item) swApplyQuickSwap(item);
+            });
+        });
+    }
+
+    // ── Peek (hold-to-zoom) ───────────────────────────────────────────────
+    // Hover a sub-picker tile for 500ms → floating enlarged preview appears.
+    // Mouseleave → dismiss. Only ever triggered from inside the desktop
+    // popup (mobile popup is disabled entirely), so no touch path needed.
+
+    // Track all pending peek timers globally. Re-rendering the popup or
+    // applying a swap detaches the old tiles but pending setTimeouts keep
+    // firing — those then show peek against a detached node whose rect is
+    // (0,0,0,0), parking a stuck preview in the top-left corner. Killing
+    // all pending timers on apply/hide/render eliminates that race.
+    const swPeekTimers = new Set();
+    function swCancelPendingPeekTimers() {
+        for (const t of swPeekTimers) clearTimeout(t);
+        swPeekTimers.clear();
+    }
+
+    function swBindPeek(tileEl) {
+        let hoverTimer = null;
+        const showPeek = () => {
+            swPeekTimers.delete(hoverTimer);
+            // Guard against the race described above: tile was removed from
+            // DOM (sub-picker re-render, popup close) before the 500ms hover
+            // timer fired. getBoundingClientRect would return (0,0) and park
+            // a stray peek in the viewport corner.
+            if (!tileEl.isConnected) return;
+            const id = tileEl.dataset.id;
+            const item = swFindItem(id);
+            if (!item) return;
+            swShowPeek(tileEl, item);
+        };
+
+        tileEl.addEventListener('mouseenter', () => {
+            // Same desktop-only guard as the bar button: taps synthesize
+            // mouseenter, which would park a hover-peek over the tapped tile.
+            if (!swCanHover()) return;
+            clearTimeout(hoverTimer);
+            swPeekTimers.delete(hoverTimer);
+            hoverTimer = setTimeout(showPeek, 500);
+            swPeekTimers.add(hoverTimer);
+        });
+        tileEl.addEventListener('mouseleave', () => {
+            clearTimeout(hoverTimer);
+            swPeekTimers.delete(hoverTimer);
+            swHidePeek();
+        });
+    }
+
+    function swShowPeek(tileEl, item) {
+        swHidePeek();  // only one at a time
+        const src = swGetOutfitSrc(item);
+        if (!src) return;
+        const peek = document.createElement('div');
+        peek.className = 'sw-pp-peek';
+        peek.innerHTML = `
+            <div class="sw-pp-peek-img"></div>
+            <div class="sw-pp-peek-name">${esc(item.name)}${item.favourite ? ' <span class="sw-pp-peek-fav">★</span>' : ''}</div>
+        `;
+        // Background via JS — same reason as tiles: paths with special chars
+        // break inline CSS url().
+        peek.querySelector('.sw-pp-peek-img').style.backgroundImage =
+            `url("${String(src).replace(/"/g, '\\"')}")`;
+        document.body.appendChild(peek);
+        // Size — large enough to inspect, small enough to fit on mobile
+        const PW = Math.min(260, window.innerWidth - 32);
+        const PH = Math.round(PW * 4 / 3) + 32; // +32 for caption strip
+        peek.style.width = PW + 'px';
+        const r = tileEl.getBoundingClientRect();
+        let left = r.left + r.width / 2 - PW / 2;
+        let top = r.top + r.height / 2 - PH / 2;
+        // Clamp to viewport with a small margin
+        left = Math.max(8, Math.min(left, window.innerWidth - PW - 8));
+        top = Math.max(8, Math.min(top, window.innerHeight - PH - 8));
+        peek.style.left = left + 'px';
+        peek.style.top = top + 'px';
+        requestAnimationFrame(() => peek.classList.add('sw-pp-peek-show'));
+    }
+
+    function swHidePeek() {
+        // Kill any pending setTimeouts that would otherwise fire against a
+        // tile that's already been removed from DOM (detached bounding rect
+        // parks the peek in the viewport corner — "стуck в углу" bug).
+        swCancelPendingPeekTimers();
+        document.querySelectorAll('.sw-pp-peek').forEach(p => p.remove());
+    }
+
+    // Apply a full outfit to the currently-selected swPreviewTab's figure, keep
+    // parts preserved. Surgical update: navigate back to main screen and patch
+    // only the two preview slots instead of rebuilding the entire popup
+    // (eliminates the full-popup DOM flash, keeps scroll position, cheaper).
+    function swApplyQuickSwap(item) {
+        const type = swPreviewTab;
+        swQuickSwapFull(type, item.id);
+        swHidePeek();
+        const el = document.getElementById('sw-preview-popup');
+        if (el) {
+            // Back to main screen from sub-picker
+            const main = el.querySelector('.sw-pp-screen-main');
+            const sub = el.querySelector('.sw-pp-screen-sub');
+            if (sub) sub.hidden = true;
+            if (main) main.hidden = false;
+            // Patch preview slots only (fresh top-worn thumbnail + caption)
+            swUpdatePreviewSlots(el);
+        }
+        swShowQuickSwapToast(item.name, type);
+    }
+
+    // Rebuild only the two preview slots inside the preview-grid of an open
+    // popup. Cheaper than swRenderPreviewPopup() and avoids a full DOM flash.
+    function swUpdatePreviewSlots(root) {
+        const grid = root.querySelector('.sw-pp-preview-grid');
+        if (!grid) return;
+        const render = (type) => {
+            const item = swGetTopWornItem(type);
+            const label = type === 'bot' ? '{{char}}' : '{{user}}';
+            if (!item) {
+                return `<div class="sw-pp-slot sw-pp-slot-empty" data-type="${type}">
+                    <div class="sw-pp-thumb sw-pp-thumb-empty"><i class="fa-solid fa-shirt"></i></div>
+                    <div class="sw-pp-slot-label">${label}</div>
+                    <div class="sw-pp-slot-sub">— пусто —</div>
+                </div>`;
+            }
+            const src = swGetOutfitSrc(item) || '';
+            const mode = swGetModeFor(type);
+            const sub = mode === 'full' ? (CATEGORIES[item.category] || 'Полный') : 'По частям';
+            return `<div class="sw-pp-slot" data-type="${type}" data-src="${esc(src)}">
+                <div class="sw-pp-thumb"></div>
+                <div class="sw-pp-slot-label">${label}</div>
+                <div class="sw-pp-slot-sub" title="${esc(item.name)}">${esc(item.name)}</div>
+                <div class="sw-pp-slot-meta">${sub}</div>
+            </div>`;
+        };
+        grid.innerHTML = render('bot') + render('user');
+        // Attach thumb bg + click handlers (same as in swRenderPreviewPopup)
+        for (const slot of grid.querySelectorAll('.sw-pp-slot')) {
+            const src = slot.dataset.src;
+            const thumb = slot.querySelector('.sw-pp-thumb');
+            if (src && thumb && !thumb.classList.contains('sw-pp-thumb-empty')) {
+                thumb.style.backgroundImage = `url("${src.replace(/"/g, '\\"')}")`;
+            }
+            slot.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const type = slot.dataset.type;
+                swTab = type;
+                swClosePreviewPopup();
+                swOpenModal();
+            });
+        }
+    }
+
+    function swShowQuickSwapToast(name, type) {
+        const who = type === 'bot' ? 'бот' : 'юзер';
+        if (typeof toastr !== 'undefined') {
+            toastr.success(`Надето на ${who}: ${name}`, 'Гардероб', { timeOut: 1500 });
+        }
     }
 
     // ── Public API ──
@@ -1228,12 +2199,9 @@ const SLAY_VERSION = '4.2.17';
         setTimeout(() => { swUpdatePromptInjection(); swInjectFloatingBtn(); }, 300);
     });
     // Refresh outfit prompt injection RIGHT BEFORE every LLM request. Fixes
-    // intermittent "wardrobe description missing" cases:
-    //   - User sends message within the 300ms CHAT_CHANGED debounce window
-    //   - Swipe / regenerate cleared/reordered ST's extension prompt buffer
-    //   - User's preset rebuilds the messages array and stale ext prompts
-    // Calling swUpdatePromptInjection() here guarantees the injection is
-    // present and current for every single generation.
+    // intermittent "wardrobe description missing" cases (CHAT_CHANGED race,
+    // swipe/regen, preset that rebuilds messages array). Guarantees current
+    // outfit description is present for every single generation.
     if (ctx.event_types.GENERATION_STARTED) {
         ctx.eventSource.on(ctx.event_types.GENERATION_STARTED, () => {
             try { swUpdatePromptInjection(); } catch (e) { swLog('WARN', 'GENERATION_STARTED injection refresh failed:', e.message); }
@@ -1247,7 +2215,6 @@ const SLAY_VERSION = '4.2.17';
    ║  MODULE 2: Core Engine (Inline Image Generation + NPC Refs)   ║
    ╚═══════════════════════════════════════════════════════════════╝ */
 
-// PREVIEW BUILD — isolated. Seeded once from slay_image_gen on first load.
 const MODULE_NAME = 'slay_image_gen';
 
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -1335,6 +2302,14 @@ const defaultSettings = Object.freeze({
     endpoint: '',
     apiKey: '',
     model: '',
+    // Saved connection profiles: [{name, apiType, endpoint, apiKey, model}].
+    // Applying a profile copies its fields into the live settings — it's a
+    // snapshot, not a live link; later edits don't write back to the profile.
+    connectionProfiles: [],
+    // Custom apiType: request body shape sent to the user-supplied full URL.
+    // 'chat' = OpenAI chat/completions multimodal; 'images' = OpenAI
+    // images/generations ({prompt, size, n, response_format}).
+    customBodyFormat: 'chat',
     size: '1024x1024',
     quality: 'standard',
     maxRetries: 0,
@@ -1420,7 +2395,7 @@ function isGeminiModel(modelId) {
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
 const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
-const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org' });
+const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
 function normalizeNaisteraModel(model) {
     const raw = String(model || '').trim().toLowerCase();
@@ -1706,8 +2681,6 @@ function replaceTagInMessageSource(message, tag, replacement) {
     // ST re-renders from swipes on chat reload AND on swipe-revert (after
     // an aborted swipe). Updating only the current swipe leaves stale src
     // in other swipe entries — abort/revert can resurrect them.
-    // Iterating ALL swipes is safe: tag.fullMatch is per-swipe-content, so
-    // it's no-op when a swipe doesn't contain it.
     message.mes = (message.mes || '').replace(tag.fullMatch, replacement);
     if (message.extra?.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
     if (Array.isArray(message.swipes)) {
@@ -2085,9 +3058,47 @@ async function fetchUserAvatars() {
     } catch (error) { console.error('[IIG] fetchUserAvatars failed:', error); return []; }
 }
 
+// Normalize an API endpoint to its BASE url: trim, drop trailing slash(es),
+// drop trailing /v1 or /v1beta. Users routinely paste endpoints from provider
+// docs WITH the version segment (https://ellyai.pro/v1, https://openrouter.ai/api/v1)
+// — our code then appends /v1/chat/completions and lands on /v1/v1/... →
+// 404/405 without CORS headers → browser shows "Failed to fetch".
+function normalizeApiEndpoint(raw) {
+    if (!raw) return '';
+    return String(raw).trim()
+        .replace(/\/+$/, '')
+        .replace(/\/v1(beta)?$/i, '')
+        .replace(/\/+$/, '');
+}
+
+// Strip invisible unicode + whitespace that riders in from clipboard (Telegram
+// loves zero-width spaces). HTTP headers are ISO-8859-1 only — one stray
+// cyrillic letter or U+200B in the key makes fetch throw a cryptic
+// "String contains non ISO-8859-1 code point" before the request even leaves.
+function sanitizeApiKey(raw) {
+    return String(raw || '').replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '').trim();
+}
+
+// Build Authorization headers, failing EARLY with a human-readable error if
+// the key still contains non-ASCII garbage after sanitization.
+function buildAuthHeaders(apiKey, extra = {}) {
+    const key = sanitizeApiKey(apiKey);
+    if (!key) throw new Error('API Key не задан');
+    if (!/^[\x20-\x7E]+$/.test(key)) {
+        throw new Error('API Key содержит недопустимые символы (кириллица или невидимый юникод из буфера обмена). Очистите поле и вставьте ключ заново.');
+    }
+    return { 'Authorization': `Bearer ${key}`, ...extra };
+}
+
 async function fetchModels() {
     const settings = getSettings();
-    const endpoint = settings.endpoint ? settings.endpoint.replace(/\/$/, '') : getEffectiveEndpoint(settings);
+    // Custom = full URL straight to a generation endpoint; appending /v1/models
+    // to it is meaningless. Model (if needed) is typed by hand.
+    if (settings.apiType === 'custom') {
+        toastr.info('Custom URL: списка моделей нет, введи имя модели вручную (или оставь пустым)', 'SLAY Images', { timeOut: 3500 });
+        return [];
+    }
+    const endpoint = settings.endpoint ? normalizeApiEndpoint(settings.endpoint) : getEffectiveEndpoint(settings);
     if (!endpoint || !settings.apiKey) {
         console.warn('[IIG] Cannot fetch models: endpoint=' + endpoint + ' apiKey=' + (settings.apiKey ? 'set' : 'empty'));
         toastr.warning('Укажите endpoint и API key', 'SLAY Images');
@@ -2095,10 +3106,19 @@ async function fetchModels() {
     }
     const url = `${endpoint}/v1/models`;
     try {
-        const response = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${settings.apiKey}` } });
+        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        return (data.data || []).filter(m => isImageModel(m.id)).map(m => m.id);
+        const all = (data.data || []).map(m => m.id).filter(Boolean);
+        // DON'T hard-filter by isImageModel() — the keyword whitelist drops
+        // legit models the user needs (recraft, custom proxy aliases, anything
+        // new). Instead surface ALL models with the likely-image ones sorted
+        // first so they're easy to pick, and the rest still available below.
+        const imageLikely = [];
+        const rest = [];
+        for (const id of all) (isImageModel(id) ? imageLikely : rest).push(id);
+        imageLikely.sort(); rest.sort();
+        return [...imageLikely, ...rest];
     } catch (error) { console.error('[IIG] fetchModels failed:', error); toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'SLAY Images'); return []; }
 }
 
@@ -2229,7 +3249,7 @@ async function fetchUrlAsDataUrl(url) {
 
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
-    const endpoint = settings.endpoint.replace(/\/$/, '');
+    const endpoint = normalizeApiEndpoint(settings.endpoint);
     const model = settings.model;
     const aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     const imageSize = options.imageSize || settings.imageSize || '1K';
@@ -2259,17 +3279,38 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         fullPrompt = `${instructions.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n${fullPrompt}`;
     }
 
-    const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
-    const body = {
-        model,
-        messages: [{ role: 'user', content }],
-        modalities: ['image', 'text'],
-        stream: false,
-    };
-
-    const url = `${endpoint}/v1/chat/completions`;
-    iigLog('INFO', `OpenAI chat.completions: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
-    const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // ── Custom apiType: user supplies the FULL endpoint URL, we append
+    // nothing. Body shape follows settings.customBodyFormat:
+    //   'chat'   — same multimodal chat/completions body as openai mode
+    //   'images' — DALL-E style images/generations body; this format has
+    //              no slot for reference images, they're skipped with a log
+    const isCustom = settings.apiType === 'custom';
+    let url, body;
+    if (isCustom && (settings.customBodyFormat || 'chat') === 'images') {
+        if (imgCount > 0) iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
+        url = String(settings.endpoint || '').trim().replace(/\/+$/, '');
+        body = {
+            ...(model ? { model } : {}),
+            prompt: fullPrompt,
+            n: 1,
+            size: settings.size || '1024x1024',
+            response_format: 'b64_json',
+        };
+        iigLog('INFO', `Custom images/generations: model=${model || '(default)'}, size=${body.size}, url=${url.slice(0, 60)}`);
+    } else {
+        const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
+        body = {
+            ...(model ? { model } : {}),
+            messages: [{ role: 'user', content }],
+            modalities: ['image', 'text'],
+            stream: false,
+        };
+        url = isCustom
+            ? String(settings.endpoint || '').trim().replace(/\/+$/, '')
+            : `${endpoint}/v1/chat/completions`;
+        iigLog('INFO', `${isCustom ? 'Custom chat.completions' : 'OpenAI chat.completions'}: model=${model || '(default)'}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
+    }
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
     const found = extractImageFromChatResponse(result);
@@ -2326,7 +3367,7 @@ function extractImageFromChatResponse(result) {
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const model = settings.model;
-    const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent`;
+    const url = `${normalizeApiEndpoint(settings.endpoint)}/v1beta/models/${model}:generateContent`;
     let aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) aspectRatio = '1:1';
     let imageSize = options.imageSize || settings.imageSize || '1K';
@@ -2370,7 +3411,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const body = { contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } } };
     iigLog('INFO', `Gemini: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${referenceImages.length}`);
 
-    const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
     const candidates = result.candidates || [];
@@ -2408,7 +3449,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
 
     let response;
     try {
-        response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     } catch (error) {
         const pageOrigin = window.location.origin;
         let endpointOrigin = endpoint;
@@ -2430,7 +3471,8 @@ function validateSettings() {
     const errors = [];
     if (!settings.endpoint && settings.apiType !== 'naistera') errors.push('URL эндпоинта не настроен');
     if (!settings.apiKey) errors.push('API ключ не настроен');
-    if (settings.apiType !== 'naistera' && !settings.model) errors.push('Модель не выбрана');
+    // Custom endpoints often pin the model server-side — model is optional there.
+    if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
     if (settings.apiType === 'naistera') {
         const m = normalizeNaisteraModel(settings.naisteraModel);
         if (!NAISTERA_MODELS.includes(m)) errors.push('Для Naistera выберите модель: grok / nano banana');
@@ -2439,6 +3481,35 @@ function validateSettings() {
 }
 
 function sanitizeForHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+
+// ── ST-native popups (with window.prompt/confirm fallback for old builds) ──
+// callGenericPopup lives in ST's popup.js and renders the same themed dialog
+// the rest of the UI uses. POPUP_TYPE: TEXT=1, CONFIRM=2, INPUT=3 (hardcoded
+// fallback numbers for ST builds that don't export POPUP_TYPE on the context).
+async function slayPromptInput(title, defaultValue = '') {
+    const ctx = SillyTavern.getContext();
+    try {
+        if (typeof ctx.callGenericPopup === 'function') {
+            const INPUT = ctx.POPUP_TYPE?.INPUT ?? 3;
+            const res = await ctx.callGenericPopup(title, INPUT, String(defaultValue));
+            return (typeof res === 'string') ? res : null; // false/null/undefined = cancelled
+        }
+    } catch (e) { iigLog('WARN', 'callGenericPopup(INPUT) failed, falling back to prompt:', e.message); }
+    const v = window.prompt(title, String(defaultValue));
+    return v === null ? null : v;
+}
+
+async function slayConfirm(text) {
+    const ctx = SillyTavern.getContext();
+    try {
+        if (typeof ctx.callGenericPopup === 'function') {
+            const CONFIRM = ctx.POPUP_TYPE?.CONFIRM ?? 2;
+            const res = await ctx.callGenericPopup(text, CONFIRM);
+            return res === true || res === 1; // POPUP_RESULT.AFFIRMATIVE === 1
+        }
+    } catch (e) { iigLog('WARN', 'callGenericPopup(CONFIRM) failed, falling back to confirm:', e.message); }
+    return window.confirm(text);
+}
 
 function isGeneratedVideoResult(value) {
     return Boolean(value) && typeof value === 'object' && value.kind === 'video' && typeof value.dataUrl === 'string';
@@ -2494,6 +3565,82 @@ function replaceImageSrcEverywhere(message, oldSrc, newSrc) {
         }
     }
     return changed;
+}
+
+// ── Src remap: self-healing for resurrected stale image paths ──
+// ST stores message text in multiple places (mes, display_text, extblocks,
+// swipes, swipe_info) and edit/swipe/reload can re-render from ANY of them.
+// We patch all the stores we know about on regen, but third-party regex
+// scripts and presets can keep their own copies we can't reach. Instead of
+// chasing every store, remember every regen as oldSrc→newSrc in localStorage
+// and FIX THE DOM (and the message stores) whenever a stale src resurfaces.
+const IIG_SRC_REMAP_KEY = 'slay_iig_src_remap_v1';
+// 1000, not 200: entries evicted FIFO — a heavy regen user crossing the cap
+// loses self-heal for their oldest chats. ~150 bytes/entry → worst case
+// ~150KB of localStorage, acceptable.
+const IIG_SRC_REMAP_MAX = 1000;
+
+function loadSrcRemap() {
+    try { return JSON.parse(localStorage.getItem(IIG_SRC_REMAP_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+}
+
+function recordSrcRemap(oldSrc, newSrc) {
+    // Only map real generated files. error.svg / [IMG:GEN] are shared
+    // placeholders — mapping those would redirect EVERY error to one image.
+    if (!oldSrc || !newSrc || oldSrc === newSrc) return;
+    if (!oldSrc.includes('/user/images/') || !newSrc.includes('/user/images/')) return;
+    try {
+        const map = loadSrcRemap();
+        // Collapse chains: if something already maps to oldSrc, point it at newSrc
+        for (const k of Object.keys(map)) { if (map[k] === oldSrc) map[k] = newSrc; }
+        map[oldSrc] = newSrc;
+        const keys = Object.keys(map);
+        if (keys.length > IIG_SRC_REMAP_MAX) {
+            for (const k of keys.slice(0, keys.length - IIG_SRC_REMAP_MAX)) delete map[k];
+        }
+        localStorage.setItem(IIG_SRC_REMAP_KEY, JSON.stringify(map));
+    } catch (e) { /* localStorage full/blocked — self-heal just won't persist */ }
+}
+
+function resolveSrcRemap(src) {
+    if (!src || !src.includes('/user/images/')) return src;
+    const map = loadSrcRemap();
+    let current = src;
+    for (let hops = 0; hops < 10; hops++) {
+        const next = map[current];
+        if (!next || next === current) break;
+        current = next;
+    }
+    return current;
+}
+
+// Walk all chat images; any whose src was superseded by a regen gets updated
+// in-place (DOM) and re-patched into the message stores. Called from the same
+// rebind hooks that re-attach regen buttons after edits/swipes/reloads.
+function healStaleImageSrcs(root) {
+    if (!root) return;
+    const imgs = root.querySelectorAll('img[src*="/user/images/"]');
+    if (!imgs.length) return;
+    const ctx = SillyTavern.getContext();
+    let healed = 0;
+    for (const img of imgs) {
+        const cur = img.getAttribute('src') || '';
+        const fixed = resolveSrcRemap(cur);
+        if (fixed === cur) continue;
+        img.setAttribute('src', fixed);
+        img.src = fixed;
+        healed++;
+        const mesEl = img.closest('.mes');
+        const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : NaN;
+        const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+        if (message) {
+            const replaced = replaceImageSrcEverywhere(message, cur, fixed);
+            if (replaced) ctx.saveChatDebounced?.();
+        }
+        iigLog('INFO', `Src heal: ${cur.slice(-40)} -> ${fixed.slice(-40)}`);
+    }
+    if (healed) iigLog('INFO', `healStaleImageSrcs: fixed ${healed} stale image(s)`);
 }
 
 // Find a currently-in-DOM <img> with the same data-iig-instruction as the given element.
@@ -2628,16 +3775,19 @@ function attachRegenButton(imgEl) {
                 // Success path — apply new src and persist everywhere
                 liveImg.setAttribute('src', newImagePath);
                 liveImg.src = newImagePath;
+                // Remember the supersession PERSISTENTLY. Even if some store we
+                // can't reach (preset regex copies, display_text rebuilt by other
+                // extensions) resurrects the old src on a future re-render, the
+                // heal pass will swap it back to this new one on sight.
+                recordSrcRemap(origSrcAttr, newImagePath);
                 if (message && origSrcAttr) {
                     const replaced = replaceImageSrcEverywhere(message, origSrcAttr, newImagePath);
                     if (replaced) {
-                        // FORCE-save (not debounced). Without this, if the user
-                        // reloaded or switched chat within ~5s of the regen,
-                        // message.mes still held the OLD src and the previous
-                        // image (or error placeholder) silently re-appeared on
-                        // next render. The new image stayed on disk in the
-                        // gallery but vanished from the chat. Same fix we did
-                        // for retryFailedGeneration in 4.1.6.
+                        // FORCE save (not debounced). If the user reloads the chat
+                        // before the debounce fires (~5s), message.mes still has
+                        // the OLD src and the previous image silently re-appears.
+                        // Same bug fixed in retryFailedGeneration in 4.1.6 — this
+                        // is the regular-regen-success twin we missed.
                         try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
                     } else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
                 }
@@ -2679,6 +3829,11 @@ function attachRegenButton(imgEl) {
 function attachRegenButtonsInRoot(root) {
     if (!root) return;
 
+    // ZEROTH: self-heal any resurrected stale srcs (superseded by a regen).
+    // Runs before everything else so the rest of this pass — and the user —
+    // sees the current image, not whatever stale store ST re-rendered from.
+    try { healStaleImageSrcs(root); } catch (e) { iigLog('WARN', 'healStaleImageSrcs failed:', e.message); }
+
     // FIRST: rehydrate any stale error-img remnants. They may be <img src="error.svg">
     // OR the same img wrapped into a <span class="iig-img-wrap"> (if some earlier pass
     // gave them a regen overlay from an older version). Also catch broken-img fallbacks
@@ -2716,6 +3871,19 @@ function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
     return `${html}></video>`;
 }
 
+// ST's render/save pipeline can entity-encode non-ASCII inside the data-iig-instruction
+// attribute, so the prompt arrives here as literal "&#1040;&#1085;..." instead of
+// "Анна". Name-matching then searches for real Cyrillic and never finds it → refs
+// silently skipped. ASCII (English names) is never entity-encoded, which is exactly
+// why only Russian names broke. Only touches &#...; patterns — safe for everything
+// else. Bonus: the model also receives clean Cyrillic instead of entity text.
+function decodeNumericEntities(str) {
+    if (typeof str !== 'string' || str.indexOf('&#') === -1) return str;
+    return str
+        .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch (e) { return m; } })
+        .replace(/&#(\d+);/g, (m, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch (e) { return m; } });
+}
+
 // ╔═════════════════════════════════════════════════════════════╗
 // ║  generateImageWithRetry — THE CRITICAL MERGE POINT          ║
 // ╚═════════════════════════════════════════════════════════════╝
@@ -2723,6 +3891,17 @@ function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
     validateSettings();
     const settings = getSettings();
+    // Normalize the prompt BEFORE name-matching and before it's sent to the API.
+    // This is the single chokepoint where charInPrompt/userInPrompt are computed
+    // and where the request body is built, so decoding here fixes both.
+    {
+        const _before = prompt;
+        prompt = decodeNumericEntities(prompt);
+        if (prompt !== _before) {
+            const m = (_before.match(/&#x?[0-9a-fA-F]+;/g) || []).slice(0, 6).join(' ');
+            iigLog('INFO', `decoded numeric HTML entities in prompt (sample: ${m}) — Cyrillic names should now match`);
+        }
+    }
     // Override with user-selected SLAY style if configured
     if (settings.slayStyle) {
         style = settings.slayStyle;
@@ -2757,7 +3936,10 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     if (!settings.sendUserAvatar) iigLog('INFO', 'User ref disabled in settings (sendUserAvatar=false)');
 
     // ── Multimodal refs (base64 + labels) for Gemini AND OpenAI-compatible chat.completions ──
-    if (settings.apiType !== 'naistera') {
+    // Custom + images/generations body has no slot for refs — don't waste time
+    // downloading/encoding avatars that generateImageOpenAI would then discard.
+    const _skipRefs = settings.apiType === 'custom' && (settings.customBodyFormat || 'chat') === 'images';
+    if (settings.apiType !== 'naistera' && !_skipRefs) {
         const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
         const pushRef = (image, label, name = '') => {
             if (!image || !canPush()) return false;
@@ -2921,9 +4103,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             } else if (settings.apiType === 'gemini') {
                 // Strictly user's choice — don't auto-route via isGeminiModel().
                 // Some OpenAI-compat routers (llmrouter, openrouter) host Gemini
-                // models behind /v1/chat/completions, NOT /v1beta. If we override
-                // by model name, we'd 404 on those routers despite the user
-                // explicitly picking OpenAI-compatible.
+                // models behind /v1/chat/completions, NOT /v1beta. Overriding by
+                // model name 404s on those routers despite the user explicitly
+                // picking OpenAI-compatible.
                 generated = await generateImageGemini(prompt, style, referenceImages, { ...options, refLabels, refNames });
             } else {
                 generated = await generateImageOpenAI(prompt, style, referenceImages, { ...options, refLabels, refNames });
@@ -3204,11 +4386,30 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         // the chat.
         if (message) {
             const errorImgPath = getErrorImagePath();
-            const replaced = replaceImageSrcEverywhere(message, errorImgPath, imagePath);
+            let replaced = replaceImageSrcEverywhere(message, errorImgPath, imagePath);
+            // LEGACY format: failed old-style tags are stored as literal
+            // [IMG:ERROR:reason] in the message text — there is no error.svg src
+            // to replace, so the block above no-ops and the retry result never
+            // persisted (error came back on reload). Rewrite those markers to
+            // the legacy success form in every store.
+            // indexOf guard, NOT .test() — a /g regex's test() advances lastIndex
+            // and silently fails on the next call.
+            const legacyRewrite = (str) => (typeof str === 'string' && str.indexOf('[IMG:ERROR:') !== -1)
+                ? str.replace(/\[IMG:ERROR:[^\]]*\]/g, `[IMG:✓:${imagePath}]`)
+                : null;
+            const tryField = (obj, key) => {
+                const out = legacyRewrite(obj?.[key]);
+                if (out !== null && out !== undefined) { obj[key] = out; replaced = true; }
+            };
+            tryField(message, 'mes');
+            if (message.extra) { tryField(message.extra, 'display_text'); tryField(message.extra, 'extblocks'); }
+            if (Array.isArray(message.swipes)) {
+                for (let i = 0; i < message.swipes.length; i++) {
+                    const out = legacyRewrite(message.swipes[i]);
+                    if (out !== null && out !== undefined) { message.swipes[i] = out; replaced = true; }
+                }
+            }
             if (replaced) {
-                // Force-save (not debounced). If user leaves chat quickly after
-                // a successful retry, debounced save may never fire and the old
-                // error.svg src persists in the chat file.
                 try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
             }
         }
@@ -3466,10 +4667,7 @@ function renderRefSlots() {
         else thumb.src = '';
         if (wrap) wrap.classList.toggle('has-image', !!(ref?.imagePath || ref?.imageBase64 || ref?.imageData));
     };
-    // Don't clobber a name input that the user is currently typing in. If the
-    // input has focus, leave its .value alone; on blur the saved value is
-    // already what's there. This prevents cursor jumps from SETTINGS_UPDATED
-    // re-renders that fire while typing.
+    // Don't clobber a name input that the user is currently typing in.
     const setNameInput = (input, value) => {
         if (!input) return;
         if (document.activeElement === input) return;
@@ -3498,9 +4696,6 @@ function renderRefSlots() {
     }
 }
 
-// Debounced re-render trigger for high-frequency events (SETTINGS_UPDATED
-// fires on every save). 200ms is short enough that persona-switch UI feels
-// snappy, long enough that bursts collapse to one render.
 let _renderRefSlotsDebounce = null;
 function renderRefSlotsDebounced() {
     clearTimeout(_renderRefSlotsDebounce);
@@ -3540,7 +4735,10 @@ function createSettingsUI() {
                     <!-- API -->
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-plug"></i> API</h4>
-                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option></select></div>
+                    <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option></select></div>
+                    <p class="hint ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются).</p>
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
@@ -4451,20 +5649,30 @@ function bindSettingsEvents() {
         const isNaistera = apiType === 'naistera';
         const isGemini = apiType === 'gemini';
         const isOpenAI = apiType === 'openai';
+        const isCustom = apiType === 'custom';
 
         document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
+        document.getElementById('slay_custom_format_row')?.classList.toggle('iig-hidden', !isCustom);
+        document.getElementById('slay_custom_hint')?.classList.toggle('iig-hidden', !isCustom);
 
         const currentNaisModel = normalizeNaisteraModel(settings.naisteraModel);
-        const supportsRefs = !isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana';
+        // Custom + images/generations body: no slot for reference images —
+        // hide the refs UI so users don't configure refs that silently vanish.
+        const isCustomImages = isCustom && (settings.customBodyFormat || 'chat') === 'images';
+        const supportsRefs = (!isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana') && !isCustomImages;
 
         document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
-        document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !isOpenAI);
+        // size (WxH) is used by openai dall-e style AND custom images/generations
+        document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !(isOpenAI || isCustomImages));
         document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
         document.getElementById('slay_naistera_model_row')?.classList.toggle('iig-hidden', !isNaistera);
         document.getElementById('slay_naistera_aspect_row')?.classList.toggle('iig-hidden', !isNaistera);
         // slay_naistera_preset_row removed — replaced by slay_style_row (always visible)
         document.getElementById('slay_naistera_hint')?.classList.toggle('iig-hidden', !isNaistera);
-        document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !isGemini);
+        // aspect_ratio + image_size live in "gemini params" but generateImageOpenAI
+        // injects them into the prompt too ([aspect_ratio: X] [image_size: Y]) —
+        // show for gemini, openai, and custom chat-format alike.
+        document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !(isGemini || isOpenAI || (isCustom && !isCustomImages)));
 
         document.getElementById('slay_refs_section')?.classList.toggle('iig-hidden', !supportsRefs);
         document.getElementById('slay_image_context_section')?.classList.toggle('iig-hidden', !supportsRefs);
@@ -4502,6 +5710,85 @@ function bindSettingsEvents() {
 
     document.getElementById('slay_enabled')?.addEventListener('change', (e) => { settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot(); });
     document.getElementById('slay_external_blocks')?.addEventListener('change', (e) => { settings.externalBlocks = e.target.checked; saveSettings(); });
+
+    // ── Connection profiles ──
+    // Saved {name, apiType, endpoint, apiKey, model} snapshots. Applying one
+    // copies its fields into live settings + syncs the visible inputs.
+    const getConnProfiles = () => {
+        if (!Array.isArray(settings.connectionProfiles)) settings.connectionProfiles = [];
+        return settings.connectionProfiles;
+    };
+    const renderConnProfiles = (selectedName = '') => {
+        const sel = document.getElementById('slay_conn_profile');
+        if (!sel) return;
+        const profiles = getConnProfiles();
+        sel.innerHTML = '<option value="">— профили подключений —</option>';
+        for (const p of profiles) {
+            const o = document.createElement('option');
+            o.value = p.name;
+            o.textContent = p.name;
+            if (p.name === selectedName) o.selected = true;
+            sel.appendChild(o);
+        }
+    };
+    renderConnProfiles();
+    document.getElementById('slay_conn_profile')?.addEventListener('change', (e) => {
+        const name = e.target.value;
+        if (!name) return;
+        const p = getConnProfiles().find(x => x.name === name);
+        if (!p) return;
+        settings.apiType = p.apiType || 'openai';
+        settings.endpoint = p.endpoint || '';
+        settings.apiKey = p.apiKey || '';
+        settings.model = p.model || '';
+        settings.customBodyFormat = p.customBodyFormat || 'chat';
+        saveSettings();
+        // Sync visible inputs to the applied profile
+        const typeSel = document.getElementById('slay_api_type');
+        if (typeSel) typeSel.value = settings.apiType;
+        const epInput = document.getElementById('slay_endpoint');
+        if (epInput) epInput.value = settings.endpoint;
+        const keyInput = document.getElementById('slay_api_key');
+        if (keyInput) keyInput.value = settings.apiKey;
+        const modelInput = document.getElementById('slay_model');
+        if (modelInput) modelInput.value = settings.model;
+        const fmtSel = document.getElementById('slay_custom_body_format');
+        if (fmtSel) fmtSel.value = settings.customBodyFormat;
+        updateVisibility();
+        toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
+    });
+    document.getElementById('slay_conn_profile_save')?.addEventListener('click', async () => {
+        const defaultName = settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
+        const raw = await slayPromptInput('Имя профиля подключения:', defaultName);
+        const name = (raw || '').trim();
+        if (!name) return;
+        const profiles = getConnProfiles();
+        const snapshot = {
+            name,
+            apiType: settings.apiType,
+            endpoint: settings.endpoint,
+            apiKey: settings.apiKey,
+            model: settings.model,
+            customBodyFormat: settings.customBodyFormat || 'chat',
+        };
+        const existing = profiles.findIndex(x => x.name === name);
+        if (existing >= 0) profiles[existing] = snapshot;
+        else profiles.push(snapshot);
+        saveSettings();
+        renderConnProfiles(name);
+        toastr.success(`Профиль «${name}» сохранён`, 'SLAY Images', { timeOut: 2000 });
+    });
+    document.getElementById('slay_conn_profile_delete')?.addEventListener('click', async () => {
+        const sel = document.getElementById('slay_conn_profile');
+        const name = sel?.value;
+        if (!name) { toastr.info('Выберите профиль для удаления', 'SLAY Images', { timeOut: 2000 }); return; }
+        if (!(await slayConfirm(`Удалить профиль «${name}»?`))) return;
+        settings.connectionProfiles = getConnProfiles().filter(x => x.name !== name);
+        saveSettings();
+        renderConnProfiles();
+        toastr.info(`Профиль «${name}» удалён`, 'SLAY Images', { timeOut: 2000 });
+    });
+
     document.getElementById('slay_api_type')?.addEventListener('change', (e) => {
         const next = e.target.value;
         const endpointInput = document.getElementById('slay_endpoint');
@@ -4510,7 +5797,10 @@ function bindSettingsEvents() {
         settings.apiType = next; saveSettings(); updateVisibility();
     });
     document.getElementById('slay_endpoint')?.addEventListener('input', (e) => { settings.endpoint = e.target.value; saveSettings(); });
-    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = e.target.value; saveSettings(); });
+    // sanitizeApiKey strips zero-width unicode + NBSP that ride in from
+    // clipboard (esp. Telegram) and would otherwise crash fetch with
+    // "String contains non ISO-8859-1 code point".
+    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = sanitizeApiKey(e.target.value); saveSettings(); });
     document.getElementById('slay_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('slay_api_key'); const icon = document.querySelector('#slay_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
@@ -4520,29 +5810,43 @@ function bindSettingsEvents() {
     // apiType choice should be respected.
     // Input event (not change) so typing freely is saved as user types.
     // Field is <input list="slay_model_list"> — users can either pick a
-    // suggestion or type any model name the API knows (recraft/whatever)
-    // that isn't in the auto-detected image-model whitelist.
+    // suggestion or type any model name the API knows that isn't in our
+    // auto-detected image-model whitelist.
     document.getElementById('slay_model')?.addEventListener('input', (e) => {
         settings.model = e.target.value.trim();
         saveSettings();
     });
+    // Fill the model autocomplete datalist. silent=true suppresses toasts
+    // (used for the auto-fill on settings open so it's quiet).
+    async function populateModelDatalist({ silent = false } = {}) {
+        if (!document.getElementById('slay_model_list')) return 0;
+        const models = await fetchModels();
+        // Re-resolve AFTER the await: ST can re-render the extensions drawer
+        // mid-fetch, detaching the original datalist — populating a detached
+        // node looks like "the dropdown is empty" to the user.
+        const dl = document.getElementById('slay_model_list');
+        if (!dl || !dl.isConnected) return 0;
+        dl.innerHTML = '';
+        for (const m of models) { const o = document.createElement('option'); o.value = m; dl.appendChild(o); }
+        if (!silent) toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
+        return models.length;
+    }
     document.getElementById('slay_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
-        try {
-            const models = await fetchModels();
-            const dl = document.getElementById('slay_model_list');
-            if (dl) {
-                dl.innerHTML = '';
-                for (const m of models) {
-                    const o = document.createElement('option');
-                    o.value = m;
-                    dl.appendChild(o);
-                }
-            }
-            toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
-        }
+        try { await populateModelDatalist({ silent: false }); }
         catch (e) { toastr.error('Ошибка загрузки', 'SLAY Images'); } finally { btn.classList.remove('loading'); }
     });
+    // Auto-fill the dropdown on settings open so the user doesn't have to press
+    // 🔄 to see models (the recurring "нет выпадающего списка" complaint).
+    // Guarded: only openai/gemini with creds present — skips custom (manual model)
+    // and naistera (no model list), and avoids fetchModels' "set endpoint" toast.
+    {
+        const _s = getSettings();
+        if ((_s.apiType === 'openai' || _s.apiType === 'gemini') && _s.endpoint && _s.apiKey) {
+            populateModelDatalist({ silent: true }).catch(() => {});
+        }
+    }
+    document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); updateVisibility(); });
     document.getElementById('slay_size')?.addEventListener('change', (e) => { settings.size = e.target.value; saveSettings(); });
     document.getElementById('slay_quality')?.addEventListener('change', (e) => { settings.quality = e.target.value; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
@@ -4586,6 +5890,14 @@ function bindSettingsEvents() {
                 const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
                 if (r?.ok) toastr.success('Connection OK', 'SLAY Images');
                 else toastr.warning('Endpoint ответил не-OK', 'SLAY Images');
+            } else if (currentSettings.apiType === 'custom') {
+                // Custom = full URL to a generation endpoint; there is no
+                // /v1/models to probe and a real POST would cost the user a
+                // generation. HEAD tells us at least that the host answers.
+                const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
+                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
+                if (r) toastr.success(`Endpoint отвечает (HTTP ${r.status}). Полная проверка — только реальной генерацией.`, 'SLAY Images', { timeOut: 4000 });
+                else toastr.warning('Endpoint недоступен (сеть/CORS). Проверь URL.', 'SLAY Images');
             } else {
                 const models = await fetchModels();
                 if (models.length > 0) toastr.success(`Connection OK — ${models.length} моделей`, 'SLAY Images');
@@ -4629,13 +5941,12 @@ function bindSettingsEvents() {
     });
     document.getElementById('slay_sw_describe_key')?.addEventListener('input', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
-        if (s) { s.describeKey = e.target.value; SillyTavern.getContext().saveSettingsDebounced(); }
+        if (s) { s.describeKey = sanitizeApiKey(e.target.value); SillyTavern.getContext().saveSettingsDebounced(); }
     });
     document.getElementById('slay_sw_describe_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('slay_sw_describe_key'); const icon = document.querySelector('#slay_sw_describe_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
     });
-    // Input event so typing freely is saved per keystroke.
     document.getElementById('slay_sw_describe_model')?.addEventListener('input', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.describeModel = e.target.value.trim(); SillyTavern.getContext().saveSettingsDebounced(); }
@@ -4645,11 +5956,11 @@ function bindSettingsEvents() {
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const ep = (swS.describeEndpoint || iigS.endpoint || '').replace(/\/$/, '');
+            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
             const key = swS.describeKey || iigS.apiKey || '';
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
-            const resp = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const models = (data.data || []).map(m => m.id).sort();
@@ -4672,11 +5983,11 @@ function bindSettingsEvents() {
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const ep = (swS.describeEndpoint || iigS.endpoint || '').replace(/\/$/, '');
+            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
             const key = swS.describeKey || iigS.apiKey || '';
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
-            const resp = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const count = (data.data || []).length;
@@ -4760,26 +6071,58 @@ function initLightbox() {
     overlay.addEventListener('pointerup', stop);
     overlay.addEventListener('mousedown', stop);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
-    document.getElementById('chat')?.addEventListener('click', (e) => {
-        // Match either the runtime-applied class (fresh generation) OR the
-        // persistent data-iig-instruction attribute that survives edit
-        // re-renders. The class is lost when ST rebuilds the img from
-        // message.mes — bot templates don't include the class, only the
-        // data attribute. Skip when the click landed on the regen button.
-        if (e.target.closest('.iig-regen-btn')) return;
-        const img = e.target.closest('img.iig-generated-image, img[data-iig-instruction]');
-        if (!img || img.tagName !== 'IMG') return;
-        // Skip error placeholders — they have their own retry button.
-        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) return;
-        // Skip imgs whose src is still the placeholder / error path.
+    // Lightbox click — bound on DOCUMENT with capture:true, not on #chat.
+    // Failure modes the old #chat-bubble listener died to:
+    //   1. ST re-creating #chat orphans listeners on the old element.
+    //   2. Third-party stopPropagation in bubble eats the event.
+    //   3. The visible <img> not being in the event path at all (covered by
+    //      an overlay, or pointer-events tricks) — solved by elementsFromPoint
+    //      fallback below: we look for an img directly under the click point.
+    // Eligibility is now src-based (/user/images/) OR marker-based — presets
+    // and regex scripts can strip our class/attribute from the tag, but the
+    // generated file path always survives (it IS what's being displayed).
+    const isOurImage = (img) => {
+        if (!img || img.tagName !== 'IMG') return false;
+        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) return false;
         const src = img.getAttribute('src') || '';
-        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) return;
+        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) return false;
+        return src.includes('/user/images/')
+            || img.classList.contains('iig-generated-image')
+            || img.hasAttribute('data-iig-instruction');
+    };
+    document.addEventListener('click', (e) => {
+        if (e.target.closest?.('.iig-regen-btn')) return;
+        // Interactive elements keep their clicks — capture-phase preventDefault
+        // here would hijack buttons/links/inputs that sit over a chat image
+        // (message action buttons, bot-template controls, edit textarea).
+        if (e.target.closest?.('button, input, textarea, select, a, [role="button"], [role="link"], [contenteditable="true"], .menu_button, .mes_button')) return;
+        if (overlay.classList.contains('open')) return; // lightbox itself is up
+        // 1) Normal path: img is in the event path
+        let img = e.target.tagName === 'IMG' ? e.target : e.target.closest?.('img');
+        // 2) Fallback: click landed on something covering the img — probe
+        //    everything under the pointer coordinates. GATED to clicks whose
+        //    actual target is inside #chat: without the gate, a click on the
+        //    settings drawer / any panel rendered ABOVE the chat would x-ray
+        //    through the UI to a chat image underneath and open the lightbox
+        //    (reported: clicking "save profile" opened the image behind the
+        //    drawer). Overlays that legitimately cover a chat image (regen
+        //    overlay, bot-template divs) all live inside #chat, so the gate
+        //    keeps the fallback working for them.
+        if ((!img || !isOurImage(img))
+            && e.target.closest?.('#chat')
+            && typeof document.elementsFromPoint === 'function') {
+            const under = document.elementsFromPoint(e.clientX, e.clientY);
+            img = under.find(el => el.tagName === 'IMG' && isOurImage(el)) || img;
+        }
+        if (!img || !isOurImage(img)) return;
+        if (!img.closest('#chat')) return; // only chat images
+        console.log('[IIG-LB] OPEN', (img.getAttribute('src') || '').slice(-60));
         e.preventDefault(); e.stopPropagation();
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
         overlay.classList.add('open');
         document.body.style.overflow = 'hidden'; // Prevent background scroll on iOS
-    });
+    }, { capture: true });
 }
 
 function updateHeaderStatusDot() {
@@ -4796,30 +6139,6 @@ function updateHeaderStatusDot() {
     const context = SillyTavern.getContext();
     iigLog('INFO', `Initializing Slay Images v${SLAY_VERSION}`);
 
-    // One-time reverse migration: if user tested the 4.2.0-preview build, their data lives
-    // under suffixed keys ('slay_wardrobe' + '_preview' / 'slay_image_gen' + '_preview').
-    // Move it back to the main keys on first run of stable 4.2.0. Using string concat so
-    // the future replace_all rename can't collapse both sides into the same literal.
-    const _PW = 'slay_wardrobe' + '_preview';
-    const _PG = 'slay_image_gen' + '_preview';
-    if (context.extensionSettings[_PW] && !context.extensionSettings.slay_wardrobe) {
-        context.extensionSettings.slay_wardrobe = structuredClone(context.extensionSettings[_PW]);
-        iigLog('INFO', 'Migrated ' + _PW + ' -> slay_wardrobe (one-time, preview upgrade)');
-    }
-    if (context.extensionSettings[_PG] && !context.extensionSettings.slay_image_gen) {
-        context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings[_PG]);
-        iigLog('INFO', 'Migrated ' + _PG + ' -> slay_image_gen (one-time, preview upgrade)');
-    }
-
-    // Legacy settings migration (pre-SLAY fork)
-    if (context.extensionSettings.silly_wardrobe && !context.extensionSettings.slay_wardrobe) {
-        context.extensionSettings.slay_wardrobe = structuredClone(context.extensionSettings.silly_wardrobe);
-        iigLog('INFO', 'Migrated silly_wardrobe -> slay_wardrobe');
-    }
-    if (context.extensionSettings.inline_image_gen && !context.extensionSettings.slay_image_gen) {
-        context.extensionSettings.slay_image_gen = structuredClone(context.extensionSettings.inline_image_gen);
-        iigLog('INFO', 'Migrated inline_image_gen -> slay_image_gen');
-    }
     if (context.extensionSettings.slay_image_gen) {
         const s = context.extensionSettings.slay_image_gen;
         if (typeof s.sendCharAvatar !== 'boolean') s.sendCharAvatar = true;
@@ -4878,9 +6197,9 @@ function updateHeaderStatusDot() {
     });
 
     // Persona switch (and many other settings changes) emits SETTINGS_UPDATED.
-    // We use it just to refresh ref-slot labels — the {{user}} title needs to
-    // follow whichever persona is currently active. Debounced so a burst of
-    // settings saves only rerenders once.
+    // Use it to refresh ref-slot labels — the {{user}} title needs to follow
+    // whichever persona is currently active. Debounced so a burst of settings
+    // saves rerenders only once.
     if (context.event_types.SETTINGS_UPDATED) {
         context.eventSource.on(context.event_types.SETTINGS_UPDATED, () => {
             renderRefSlotsDebounced();
@@ -4889,8 +6208,6 @@ function updateHeaderStatusDot() {
 
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, async (messageId) => {
         await onMessageReceived(messageId);
-        // After processing, attach regen buttons to any pre-existing images in THIS message
-        // (covers swipes, edits, reloaded messages)
         const mesEl = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
         if (mesEl) attachRegenButtonsInRoot(mesEl);
     });
@@ -4906,7 +6223,6 @@ function updateHeaderStatusDot() {
         const evType = context.event_types?.[evName];
         if (!evType) continue;
         context.eventSource.on(evType, (messageId) => {
-            // Defer one tick so DOM patch by ST has actually applied.
             setTimeout(() => {
                 const mesEl = (Number.isInteger(messageId))
                     ? document.querySelector(`#chat .mes[mesid="${messageId}"]`)

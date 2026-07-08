@@ -429,11 +429,14 @@
        `<div style="display:table;width:fit-content">`. Our span inserted
        between them used to create a circular sizing chain that landed on
        slightly-off values after ST re-rendered an edited message — visible
-       "broken frame" mismatch (wrap cropped or didn't resize to match).
+       "broken frame" mismatch.
        Pairing inline-block (sizes to content via shrink-to-fit) with
        width:auto !important on the child img (defeats the bot's inline
        style="width:100%" before it can trigger the circular dep) gives
-       us a stable layout in both portrait and landscape cases. */
+       us a stable layout in both portrait and landscape cases:
+         - portrait (intrinsic ≤ parent): wrap = intrinsic = img
+         - landscape (intrinsic > parent): both clamp to parent.contentWidth
+    */
     position: relative;
     display: inline-block;
     max-width: 100%;
@@ -1878,4 +1881,409 @@
     background: color-mix(in srgb, var(--slay-pink) 12%, transparent);
     border-color: color-mix(in srgb, var(--slay-pink) 35%, transparent);
     transform: translateY(-1px);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   v4.3: Preview popup (hover/long-press on wardrobe bar button)
+   ═══════════════════════════════════════════════════════════════════════ */
+.sw-preview-popup {
+    position: fixed;
+    z-index: 99998;
+    width: 320px;
+    max-width: calc(100vw - 16px);
+    /* Fixed height. Screen switches (main ↔ sub-picker) never change the
+       popup's outer size, so it doesn't "jump" when you tap a category.
+       On short viewports fall back to 100dvh - 24px. */
+    height: min(460px, calc(100dvh - 24px));
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: rgba(14, 14, 22, 0.98);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 32%, rgba(255,255,255,0.08));
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.18s, transform 0.18s;
+    pointer-events: none;
+    color: var(--SmartThemeBodyColor, #e2e2e2);
+    font-size: 13px;
+}
+.sw-pp-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.sw-pp-screen {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.sw-pp-screen[hidden] { display: none; }
+.sw-pp-screen-sub {
+    padding: 12px 14px;
+}
+.sw-pp-screen-main {
+    overflow-y: auto;
+}
+.sw-pp-subgrid-items {
+    /* Sub-picker grid is the one area allowed to scroll internally. Popup
+       itself stays put — only the grid of outfit tiles scrolls if too many. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 2px 4px 8px 2px; /* breathing room + scrollbar track */
+}
+.sw-pp-subgrid-items::-webkit-scrollbar { width: 5px; }
+.sw-pp-subgrid-items::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--slay-pink) 28%, transparent);
+    border-radius: 3px;
+}
+.sw-preview-popup.sw-pp-open {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+.sw-pp-close {
+    position: absolute;
+    top: 6px; right: 8px;
+    width: 26px; height: 26px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--SmartThemeBodyColor, #aaa);
+    opacity: 0.55;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 0.9em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    z-index: 2;
+}
+.sw-pp-close:hover {
+    opacity: 1;
+    color: var(--slay-pink);
+    background: color-mix(in srgb, var(--slay-pink) 12%, transparent);
+}
+.sw-pp-section {
+    padding: 14px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.sw-pp-section:last-of-type { border-bottom: none; }
+.sw-pp-title {
+    font-size: 0.72em;
+    color: rgba(255,255,255,0.42);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+.sw-pp-title-sub {
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--slay-pink, #f472b6);
+}
+.sw-pp-empty, .sw-pp-empty-line {
+    color: rgba(255,255,255,0.45);
+    font-size: 0.85em;
+    text-align: center;
+    padding: 18px 8px;
+}
+.sw-pp-preview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+.sw-pp-slot {
+    cursor: pointer;
+    text-align: center;
+    border-radius: 10px;
+    padding: 4px;
+    transition: background 0.15s;
+    /* Grid items inherit a min-content min-width — a long item name with
+       white-space: nowrap otherwise forces its column wider and breaks
+       `1fr 1fr` symmetry (one thumb huge, the other squished). min-width: 0
+       keeps both columns equal; ellipsis truncates long captions. */
+    min-width: 0;
+    overflow: hidden;
+}
+.sw-pp-slot:hover {
+    background: color-mix(in srgb, var(--slay-pink) 8%, transparent);
+}
+.sw-pp-thumb {
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    border-radius: 8px;
+    background-size: cover;
+    background-position: center top;
+    background-color: rgba(255,255,255,0.04);
+    margin-bottom: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.25);
+    font-size: 1.8em;
+}
+.sw-pp-thumb-empty {
+    background: repeating-linear-gradient(45deg,
+        rgba(255,255,255,0.03) 0,
+        rgba(255,255,255,0.03) 4px,
+        transparent 4px, transparent 8px);
+    border: 1px dashed rgba(255,255,255,0.12);
+}
+.sw-pp-slot-label {
+    font-size: 0.62em;
+    color: rgba(255,255,255,0.4);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 2px;
+}
+.sw-pp-slot-sub {
+    font-size: 0.82em;
+    font-weight: 500;
+    color: var(--SmartThemeBodyColor, #eee);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sw-pp-slot-meta {
+    font-size: 0.68em;
+    color: rgba(255,255,255,0.4);
+    margin-top: 2px;
+}
+.sw-pp-cats {
+    /* Grid instead of flex so a lone button on a second row doesn't stretch
+       edge-to-edge. Uses auto-fill + max-width per button so a single tag
+       doesn't blow up to full popup width. */
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(52px, 80px));
+    gap: 6px;
+    justify-content: start;
+}
+.sw-pp-cat-btn {
+    height: 50px;
+    padding: 3px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    color: var(--SmartThemeBodyColor, #eee);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    transition: all 0.15s;
+    font-family: inherit;
+    position: relative;
+}
+.sw-pp-cat-btn:hover {
+    background: color-mix(in srgb, var(--slay-pink) 14%, transparent);
+    border-color: color-mix(in srgb, var(--slay-pink) 45%, transparent);
+    transform: translateY(-1px);
+}
+.sw-pp-cat-btn.sw-pp-cat-multi {
+    border-color: color-mix(in srgb, var(--slay-pink) 32%, transparent);
+}
+.sw-pp-cat-ico { font-size: 1.15em; line-height: 1; }
+.sw-pp-cat-count {
+    font-size: 0.62em;
+    color: var(--slay-pink, #f472b6);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+@keyframes sw-pp-slide-in {
+    from { opacity: 0; transform: translateX(6px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+.sw-pp-screen-sub:not([hidden]) {
+    animation: sw-pp-slide-in 0.18s ease-out;
+}
+.sw-pp-subgrid-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+}
+.sw-pp-sub-back {
+    width: 22px; height: 22px;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: var(--SmartThemeBodyColor, #aaa);
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7em;
+    padding: 0;
+}
+.sw-pp-sub-back:hover {
+    color: var(--slay-pink);
+    border-color: color-mix(in srgb, var(--slay-pink) 50%, transparent);
+}
+.sw-pp-subgrid-title {
+    font-size: 0.78em;
+    font-weight: 500;
+    color: var(--slay-pink, #f472b6);
+}
+.sw-pp-subgrid-items {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    /* Bigger gap + slight row-gap so many tiles don't look like one mushy
+       wall of images. 12px horizontal, 14px vertical (for room under each
+       caption strip). */
+    gap: 14px 12px;
+    align-content: start;
+}
+.sw-pp-sub-item {
+    aspect-ratio: 3 / 4;
+    border-radius: 10px;
+    background-size: cover;
+    background-position: center top;
+    background-color: rgba(18, 18, 26, 0.95);
+    /* Thin bright border + dark glow so tiles visually separate from neighbours
+       even when their thumbnails are similar colours. Prevents "мешанина". */
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow:
+        0 2px 6px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    transition: transform 0.18s, border-color 0.15s, box-shadow 0.18s;
+    position: relative;
+    overflow: hidden;
+}
+.sw-pp-sub-item:hover {
+    border-color: var(--slay-pink);
+    transform: scale(1.05) translateY(-2px);
+    box-shadow:
+        0 6px 18px rgba(244, 114, 182, 0.35),
+        0 0 0 1px color-mix(in srgb, var(--slay-pink) 50%, transparent);
+    z-index: 1;
+}
+.sw-pp-sub-name {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 3px 4px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.78));
+    color: #fff;
+    font-size: 0.62em;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sw-pp-sub-fav {
+    position: absolute;
+    top: 3px; right: 5px;
+    color: #fbbf24;
+    font-size: 0.85em;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    z-index: 1;
+}
+.sw-pp-footer {
+    padding: 10px 12px;
+    background: rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.sw-pp-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    background: rgba(0,0,0,0.4);
+    border-radius: 6px;
+}
+.sw-pp-tab {
+    padding: 4px 10px;
+    font-size: 0.78em;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.55);
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+}
+.sw-pp-tab-active {
+    background: var(--slay-pink);
+    color: #0a0a0f;
+    font-weight: 600;
+}
+.sw-pp-open-full {
+    flex: 1;
+    padding: 7px 10px;
+    background: color-mix(in srgb, var(--slay-pink) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 32%, transparent);
+    color: var(--slay-pink-bright, #f9a8d4);
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.82em;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+.sw-pp-open-full:hover {
+    background: var(--slay-pink);
+    color: #0a0a0f;
+}
+
+/* Hold-to-zoom preview (triggered by 500ms hover on desktop / long-press on mobile
+   on a sub-picker tile). Floating element on <body> so it's not clipped by the
+   popup's overflow:hidden. Dismissed on mouseleave / touchend / popup close. */
+.sw-pp-peek {
+    position: fixed;
+    z-index: 100000;
+    background: rgba(14, 14, 22, 0.98);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 45%, rgba(255,255,255,0.1));
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow:
+        0 20px 48px rgba(0, 0, 0, 0.7),
+        0 0 0 1px rgba(0, 0, 0, 0.4),
+        0 0 40px color-mix(in srgb, var(--slay-pink) 18%, transparent);
+    pointer-events: none;  /* purely informational overlay */
+    opacity: 0;
+    transform: scale(0.92);
+    transition: opacity 0.18s ease-out, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+.sw-pp-peek.sw-pp-peek-show {
+    opacity: 1;
+    transform: scale(1);
+}
+.sw-pp-peek-img {
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    background-size: cover;
+    background-position: center top;
+    background-color: rgba(255,255,255,0.03);
+}
+.sw-pp-peek-name {
+    padding: 8px 10px;
+    text-align: center;
+    font-size: 0.82em;
+    font-weight: 500;
+    color: var(--SmartThemeBodyColor, #eee);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: rgba(0, 0, 0, 0.4);
+    border-top: 1px solid rgba(255,255,255,0.06);
+}
+.sw-pp-peek-fav {
+    color: #fbbf24;
+    margin-left: 2px;
 }
