@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0';
+const SLAY_VERSION = '4.3.1';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1103,8 +1103,8 @@ const SLAY_VERSION = '4.3.0';
             if (payload?.spec !== SW_CARD_SPEC || !payload.item) return null;
             const it = payload.item;
             return {
-                name: String(it.name || ''),
-                description: String(it.description || ''),
+                name: String(it.name || '').slice(0, 100),
+                description: String(it.description || '').slice(0, 2000),
                 category: CAT_KEYS.includes(it.category) ? it.category : 'full',
                 forWho: ['all', 'bot', 'user'].includes(it.forWho) ? it.forWho : 'all',
                 gender: GENDER_KEYS.includes(it.gender) ? it.gender : 'unisex',
@@ -1532,7 +1532,13 @@ const SLAY_VERSION = '4.3.0';
             try {
                 const { base64 } = await swResize(dataUrl, swGetSettings().maxDimension);
                 let autoDesc = card?.description?.trim() || null;
-                if (!autoDesc && swGetSettings().autoDescribe !== false) {
+                if (autoDesc) {
+                    // Never apply an imported description sight-unseen: it ends up
+                    // in the bot's prompt, so the user must see (and can defuse)
+                    // whatever the card author embedded there.
+                    const edited = await swShowDescInput('🧥 Описание из карточки (можете отредактировать)', autoDesc);
+                    if (edited !== null) autoDesc = edited;
+                } else if (swGetSettings().autoDescribe !== false) {
                     autoDesc = await swAnalyzeOutfit(base64, result.category);
                     if (autoDesc) {
                         const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
