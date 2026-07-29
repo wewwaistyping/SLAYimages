@@ -9,6 +9,8 @@ A merged extension combining the best of two worlds:
 
 Supports **OpenAI-compatible**, **Gemini / Nano-Banana**, and **Naistera / Grok** image generation APIs.
 
+Prompts catalogue to add to your preset: https://wewwaistyping.github.io/slayimagespromts/
+
 ---
 
 ## Features
