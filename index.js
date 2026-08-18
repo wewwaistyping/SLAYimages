@@ -1,10 +1,32 @@
 /**
  * 💅🔥 SLAY Images — Inline Image Generation + Wardrobe + Gallery
  * by Wewwa (https://github.com/wewwaistyping) — tg: @wewwajai
- * gallery update by hydall (https://github.com/hydall)
- * based on sillyimages by 0xl0cal and aceeenvw's NPC system
+ *
+ * Copyright (C) 2026  Wewwa (https://github.com/wewwaistyping)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Built on prior work by:
+ *   0xl0cal  — sillyimages (original inline image generation)
+ *   delidgi  — sillyimages wardrobe fork (wardrobe system, outfit management,
+ *              auto-analyze, avatar references, image context, video support)
+ *   aceeenvw — notsosillynotsoimages (NPC reference system, iOS support,
+ *              recursion protection, lightbox, debug logging) — AGPL-3.0,
+ *              which is why this project carries the same licence
+ *   hydall   — style gallery
  */
-const SLAY_VERSION = '4.3.1';
+const SLAY_VERSION = '5.0.0';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -16,7 +38,18 @@ const SLAY_VERSION = '4.3.1';
 
     function uid() { return Date.now().toString(36) + Math.random().toString(36).substring(2, 8); }
     function swLog(l, ...a) { (l === 'ERROR' ? console.error : l === 'WARN' ? console.warn : console.log)('[SW]', ...a); }
-    function esc(t) { const d = document.createElement('div'); d.textContent = t || ''; return d.innerHTML; }
+    // textContent→innerHTML escapes &, < and > but NOT quotes, because the HTML
+    // serializer only escapes quotes in attribute mode. esc() is interpolated into
+    // quoted attributes in 8 places, so a quote in the value closed the attribute
+    // early and everything after it parsed as real markup. Shared outfit cards made
+    // that reachable by a third party: a crafted name or description executed code
+    // in the SillyTavern page — API keys, chat history, requests as the user.
+    // Escaping the two quote characters closes every one of those sites at once.
+    function esc(t) {
+        const d = document.createElement('div');
+        d.textContent = t || '';
+        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     // ── Categories & Tags ──
     const CATEGORIES = Object.freeze({
@@ -39,7 +72,11 @@ const SLAY_VERSION = '4.3.1';
     });
     const TAG_KEYS = Object.keys(TAGS);
 
-    const GENDERS = Object.freeze({ unisex: '⚥', female: '♀️', male: '♂️' });
+    // No U+FE0F: that selector forces EMOJI presentation, and iOS then draws a
+    // full-colour glyph that is wider, taller and on a different baseline than the
+    // plain symbol — which is why the ♀ badge sat crooked on card corners while
+    // unisex (which never had the selector) looked fine. Text presentation for all three.
+    const GENDERS = Object.freeze({ unisex: '⚥', female: '♀', male: '♂' });
     const GENDER_KEYS = Object.keys(GENDERS);
     const GENDER_COLORS = Object.freeze({ unisex: '#a855f7', female: '#f472b6', male: '#60a5fa' });
 
@@ -47,6 +84,11 @@ const SLAY_VERSION = '4.3.1';
     const swDefaults = Object.freeze({
         items: [],
         activeOutfits: {},
+        // Master switch for the wardrobe, deliberately INDEPENDENT of the
+        // image-generation toggle: the outfit description reaches the prompt
+        // through this module's own hooks, so the wardrobe is fully usable as a
+        // pure outfit tracker with generation off and no image API configured.
+        wardrobeEnabled: true,
         maxDimension: 512,
         showFloatingBtn: false,
         autoDescribe: true,
@@ -55,6 +97,7 @@ const SLAY_VERSION = '4.3.1';
         describeEndpoint: '',
         describeKey: '',
         describePromptStyle: 'detailed',
+        describeManualModel: false,   // see manualModel in the main settings
         sendOutfitDescription: true,
         sendOutfitImageBot: true,
         sendOutfitImageUser: true,
@@ -155,6 +198,10 @@ const SLAY_VERSION = '4.3.1';
     }
     function swRemoveItem(id) {
         const s = swGetSettings();
+        // Take the file with the item. Deleting an outfit used to leave its
+        // picture on disk forever — the one fair complaint we got about clutter.
+        const doomed = s.items.find(o => o.id === id);
+        if (doomed?.imagePath) swDeleteImageFile(doomed.imagePath, { ignoreItemId: id });
         s.items = s.items.filter(o => o.id !== id);
         // Clear from all active outfits
         for (const cn of Object.keys(s.activeOutfits)) {
@@ -354,7 +401,30 @@ const SLAY_VERSION = '4.3.1';
     // fails with a bare FileReader error (the "Ошибка: read" reports).
     function swResize(src, maxDim) {
         return new Promise((res, rej) => {
-            const go = (dataUrl) => { const img = new Image(); img.onload = () => { let { width: w, height: h } = img; if (w > maxDim || h > maxDim) { const s = Math.min(maxDim / w, maxDim / h); w = Math.round(w * s); h = Math.round(h * s); } const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h); res({ base64: c.toDataURL('image/png').split(',')[1] }); }; img.onerror = () => rej(new Error('не удалось декодировать картинку (битый файл или формат не поддерживается)')); img.src = dataUrl; };
+            const go = (dataUrl) => {
+                const img = new Image();
+                img.onload = () => {
+                    let { width: w, height: h } = img;
+                    if (w > maxDim || h > maxDim) { const s = Math.min(maxDim / w, maxDim / h); w = Math.round(w * s); h = Math.round(h * s); }
+                    const c = document.createElement('canvas'); c.width = w; c.height = h;
+                    const cx = c.getContext('2d', { willReadFrequently: true });
+                    cx.drawImage(img, 0, 0, w, h);
+                    // Outfit shots are photographs; storing them losslessly cost ~450KB
+                    // where JPEG costs ~50KB — paid again on every upload, every describe
+                    // download and every wardrobe open, which hurts on mobile data.
+                    // Keep PNG only when the image actually uses transparency (a cut-out
+                    // garment on a clear background), which we can just look at.
+                    let opaque = true;
+                    try {
+                        const d = cx.getImageData(0, 0, w, h).data;
+                        for (let i = 3; i < d.length; i += 4) { if (d[i] !== 255) { opaque = false; break; } }
+                    } catch (e) { opaque = false; }   // tainted canvas → play it safe
+                    const fmt = opaque ? 'jpeg' : 'png';
+                    res({ base64: c.toDataURL(`image/${fmt}`, opaque ? 0.85 : undefined).split(',')[1], format: fmt });
+                };
+                img.onerror = () => rej(new Error('не удалось декодировать картинку (битый файл или формат не поддерживается)'));
+                img.src = dataUrl;
+            };
             if (typeof src === 'string') { go(src); return; }
             const r = new FileReader();
             r.onload = (e) => go(e.target.result);
@@ -370,13 +440,34 @@ const SLAY_VERSION = '4.3.1';
     }
 
     // ── Save wardrobe image to server file ──
-    async function swSaveImageToFile(base64, label) {
+    // Delete a wardrobe image from disk. Nothing in this extension ever removed
+    // a file before: deleting an item, replacing its picture or regenerating it
+    // all left the old file behind forever. Refuses to touch a path that is
+    // still referenced by another item, and never throws — losing the file is
+    // not worth failing the user's action over.
+    async function swDeleteImageFile(imagePath, { ignoreItemId = null } = {}) {
+        try {
+            if (!imagePath || !imagePath.includes('/wardrobe_refs/')) return false;
+            const stillUsed = swGetSettings().items.some(o => o.id !== ignoreItemId && o.imagePath === imagePath);
+            if (stillUsed) { swLog('INFO', `Not deleting ${imagePath} — another item still uses it`); return false; }
+            const ctx = SillyTavern.getContext();
+            const r = await fetch('/api/images/delete', {
+                method: 'POST', headers: ctx.getRequestHeaders(),
+                body: JSON.stringify({ path: imagePath.replace(/^\//, '') })
+            });
+            if (r.ok) { swLog('INFO', `Deleted wardrobe image: ${imagePath}`); return true; }
+            swLog('WARN', `Delete failed (${r.status}) for ${imagePath}`);
+            return false;
+        } catch (e) { swLog('WARN', 'swDeleteImageFile failed:', e?.message); return false; }
+    }
+
+    async function swSaveImageToFile(base64, label, format = 'png') {
         const ctx = SillyTavern.getContext();
         const safeName = label.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40);
         const filename = `wardrobe_${safeName}_${Date.now()}`;
         const response = await fetch('/api/images/upload', {
             method: 'POST', headers: ctx.getRequestHeaders(),
-            body: JSON.stringify({ image: base64, format: 'png', ch_name: 'wardrobe_refs', filename })
+            body: JSON.stringify({ image: base64, format: format === 'jpeg' ? 'jpg' : 'png', ch_name: 'wardrobe_refs', filename })
         });
         if (!response.ok) throw new Error(`Upload failed: ${response.status}`);
         const result = await response.json();
@@ -605,11 +696,70 @@ const SLAY_VERSION = '4.3.1';
         swRender();
         document.addEventListener('keydown', swEsc);
     }
-    function swEsc(e) { if (e.key === 'Escape') swCloseModal(); }
-    function swCloseModal() { swOpen = false; document.getElementById('sw-modal-overlay')?.remove(); document.removeEventListener('keydown', swEsc); }
+    // Innermost first: an open sub-form takes the Escape and the wardrobe stays
+    // put. Same as the crop dialog, which already swallows its own Escape. A
+    // second press then closes the wardrobe.
+    function swEsc(e) {
+        if (e.key !== 'Escape') return;
+        if (swAbortInline()) { e.stopPropagation(); return; }
+        swCloseModal();
+    }
+    function swCloseModal() {
+        swOpen = false;
+        // The ✕ and the backdrop mean "close the wardrobe", which takes any open
+        // form with it — so say out loud that the upload was dropped. Otherwise the
+        // panel just disappears and the item silently never arrives.
+        swAbortInline({ notify: true });
+        document.getElementById('sw-modal-overlay')?.remove();
+        document.removeEventListener('keydown', swEsc);
+    }
+
+    // Header counter, needed both by a full render and by a single card flip.
+    function swUpdateHiddenCount() {
+        const hdrToggle = document.getElementById('sw-show-hidden-toggle');
+        if (!hdrToggle) return;
+        const hiddenCount = (swGetSettings().items || []).filter(o => o.hidden).length;
+        const labelText = hdrToggle.childNodes[hdrToggle.childNodes.length - 1];
+        if (labelText && labelText.nodeType === 3) labelText.textContent = ` Скрытые: ${hiddenCount}`;
+    }
+
+    // Repaint ONE card instead of the whole modal. Starring an outfit used to call
+    // swRender(), which throws away every card and every binding to make a single
+    // icon yellow — on a 60-outfit wardrobe that is six hundred listeners rebuilt
+    // for one tap. A full render is still correct when the change pushes the item
+    // out of the view it is sitting in, otherwise the card would stay put and look
+    // like it had ignored the tap.
+    function swApplyCornerToggle(card, o, kind) {
+        const paint = (sel, on, title, iconClass) => {
+            const btn = card.querySelector(sel);
+            if (!btn) return;
+            btn.classList.toggle('sw-corner-active', on);
+            btn.title = title;
+            const i = btn.querySelector('i');
+            if (i) i.className = iconClass;
+        };
+        if (kind === 'fav') {
+            if (swFavFilter && !o.favourite) { swRender(); return; }
+            card.classList.toggle('sw-outfit-favourite', !!o.favourite);
+            paint('.sw-corner-fav', !!o.favourite,
+                o.favourite ? 'Убрать из избранного' : 'В избранное',
+                `fa-${o.favourite ? 'solid' : 'regular'} fa-star`);
+        } else {
+            if (!swGetSettings().showHidden && o.hidden) { swRender(); return; }
+            card.classList.toggle('sw-outfit-hidden', !!o.hidden);
+            paint('.sw-corner-hide', !!o.hidden,
+                o.hidden ? 'Показать' : 'Скрыть',
+                `fa-solid fa-eye${o.hidden ? '-slash' : ''}`);
+            swUpdateHiddenCount();
+        }
+    }
 
     function swRender() {
         const content = document.getElementById('sw-tab-content');
+        // Never paint over a live form. Its Save/Cancel buttons are in this very
+        // subtree; overwriting them without answering the form is what left the
+        // import awaiting a reply that could no longer come.
+        if (_savedContent !== null && content) { swAbortInline({ notify: true }); return; }
         const modeWrap = document.getElementById('sw-mode-switch');
         const catWrap = document.getElementById('sw-cat-tabs');
         const tagWrap = document.getElementById('sw-tag-filter');
@@ -777,7 +927,7 @@ const SLAY_VERSION = '4.3.1';
                     ${a ? '<div class="sw-active-badge"><i class="fa-solid fa-check"></i></div>' : ''}
                     <button class="sw-corner-btn sw-corner-fav ${fav ? 'sw-corner-active' : ''}" data-act="fav" title="${fav ? 'Убрать из избранного' : 'В избранное'}"><i class="fa-${fav ? 'solid' : 'regular'} fa-star"></i></button>
                     <button class="sw-corner-btn sw-corner-hide ${hid ? 'sw-corner-active' : ''}" data-act="hide" title="${hid ? 'Показать' : 'Скрыть'}"><i class="fa-solid fa-eye${hid ? '-slash' : ''}"></i></button>
-                    <div style="position:absolute;top:4px;left:4px;font-size:10px;padding:1px 5px;border-radius:6px;background:rgba(0,0,0,0.5);color:${GENDER_COLORS[o.gender || 'unisex']};">${GENDERS[o.gender || 'unisex']}</div>
+                    <div style="position:absolute;top:4px;left:4px;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:11px;border-radius:6px;background:rgba(0,0,0,0.5);color:${GENDER_COLORS[o.gender || 'unisex']};">${GENDERS[o.gender || 'unisex']}</div>
                 </div>
                 <div class="sw-outfit-footer"><span class="sw-outfit-name" title="${esc(o.description || o.name)}">${esc(o.name)}</span>
                     <div class="sw-outfit-btns">
@@ -790,42 +940,67 @@ const SLAY_VERSION = '4.3.1';
         h += '</div>';
         content.innerHTML = h;
 
-        // Update header hidden count
-        const hdrToggle = document.getElementById('sw-show-hidden-toggle');
-        if (hdrToggle) {
-            const hiddenCount = allItems.filter(o => o.hidden).length;
-            const labelText = hdrToggle.childNodes[hdrToggle.childNodes.length - 1];
-            if (labelText && labelText.nodeType === 3) labelText.textContent = ` Скрытые: ${hiddenCount}`;
+        swUpdateHiddenCount();
+
+        // ONE listener for the entire grid, bound once and left alone. The old code
+        // ran seven querySelector calls per card and hung ten closures on each —
+        // and since swRender() rebuilds the grid on every filter tap, all of it was
+        // thrown away and recreated each time a chip was touched.
+        if (content.dataset.swDelegated !== '1') {
+            content.dataset.swDelegated = '1';
+            content.addEventListener('click', (e) => {
+                const t = e.target;
+                if (!t || !t.closest) return;
+                const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+
+                // The two upload tiles carry no data-id, so they are matched first.
+                if (t.closest('#sw-upload-trigger')) { stop(); swUpload(); return; }
+                if (t.closest('#sw-import-trigger')) { stop(); swUpload(true); return; }
+
+                const card = t.closest('.sw-outfit-card[data-id]');
+                if (!card) return;
+                const id = card.dataset.id;
+
+                // Corner buttons sit over the picture, so they are tested before it.
+                if (t.closest('.sw-corner-fav')) {
+                    stop(); swToggleFavourite(id);
+                    const o = swFindItem(id); if (o) swApplyCornerToggle(card, o, 'fav');
+                    return;
+                }
+                if (t.closest('.sw-corner-hide')) {
+                    stop(); swToggleHidden(id);
+                    const o = swFindItem(id); if (o) swApplyCornerToggle(card, o, 'hide');
+                    return;
+                }
+                if (t.closest('.sw-btn-edit')) { stop(); swEdit(id); return; }
+                if (t.closest('.sw-btn-regen')) { stop(); swRegenDescription(id); return; }
+                if (t.closest('.sw-btn-delete')) {
+                    stop();
+                    if (confirm('Удалить?')) { swRemoveItem(id); swRender(); toastr.info('Удалён', 'Гардероб'); }
+                    return;
+                }
+                // Picture, missing-picture placeholder and the toggle button all
+                // mean the same thing: put this on, or take it off.
+                if (t.closest('.sw-outfit-img') || t.closest('.sw-img-missing') || t.closest('.sw-btn-activate')) {
+                    stop(); swToggle(id);
+                }
+            });
         }
 
-        // NB: wrap in arrows — a bare handler reference would receive the click
-        // event as the importMode argument (truthy) and break normal upload.
-        document.getElementById('sw-upload-trigger')?.addEventListener('click', () => swUpload());
-        document.getElementById('sw-import-trigger')?.addEventListener('click', () => swUpload(true));
-        for (const card of content.querySelectorAll('.sw-outfit-card[data-id]')) {
-            const id = card.dataset.id;
-            // Lost-image fallback: if the file 404s (deleted from disk), swap the
-            // broken <img> for a placeholder so the card isn't just a dark void.
-            const cardImg = card.querySelector('.sw-outfit-img');
-            cardImg?.addEventListener('error', () => {
+        // Lost-image fallback: if the file 404s (deleted from disk), swap the broken
+        // <img> for a placeholder so the card isn't just a dark void. This one stays
+        // per-image because error events do not bubble — but it is one listener per
+        // card now instead of ten, and the placeholder's own click is delegated.
+        for (const cardImg of content.querySelectorAll('.sw-outfit-card[data-id] .sw-outfit-img')) {
+            cardImg.addEventListener('error', () => {
                 const wrap = cardImg.closest('.sw-outfit-img-wrap');
                 if (!wrap || wrap.querySelector('.sw-img-missing')) return;
                 cardImg.remove();
                 const ph = document.createElement('div');
                 ph.className = 'sw-img-missing';
                 ph.innerHTML = '<i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span>';
-                ph.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
                 wrap.insertBefore(ph, wrap.firstChild);
-            });
-            cardImg?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            // Placeholder also acts as the toggle target (click = equip/unequip)
-            card.querySelector('.sw-img-missing')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            card.querySelector('.sw-btn-activate')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            card.querySelector('.sw-corner-fav')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleFavourite(id); swRender(); });
-            card.querySelector('.sw-corner-hide')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleHidden(id); swRender(); });
-            card.querySelector('.sw-btn-edit')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swEdit(id); });
-            card.querySelector('.sw-btn-regen')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swRegenDescription(id); });
-            card.querySelector('.sw-btn-delete')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (confirm('Удалить?')) { swRemoveItem(id); swRender(); toastr.info('Удалён', 'Гардероб'); } });
+            }, { once: true });
         }
 
         // ── Current outfit preview ──
@@ -893,7 +1068,7 @@ const SLAY_VERSION = '4.3.1';
                         <button class="sw-inline-btn" data-choice="manual" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">✏️ Ввести вручную</b><br><span style="font-size:11px;opacity:0.6;">Описать аутфит своими словами</span></button>
                         <button class="sw-inline-btn" data-choice="ai" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">🤖 Сгенерировать ИИ</b><br><span style="font-size:11px;opacity:0.6;">Отправить картинку на анализ</span></button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), 'Выбор описания отменён');
             if (!el) { resolve(null); return; }
             for (const btn of el.querySelectorAll('.sw-inline-btn')) {
                 btn.addEventListener('click', () => { swRestoreInline(); resolve(btn.dataset.choice); });
@@ -904,20 +1079,73 @@ const SLAY_VERSION = '4.3.1';
     // ── Upload modal (custom, replaces browser prompts) ──
     // Render sub-forms inside #sw-tab-content, replacing the grid temporarily
     let _savedContent = null;
-    function swShowInline(html) {
+    // Chrome that is meaningless while a sub-form is open. On a phone these four
+    // rows plus the worn-outfit strip ate well over 300px, which is why editing an
+    // outfit showed a three-line description box under a screenful of filters.
+    // The header row goes with the rest. While a form is up, Бот/Юзер answers a
+    // question the form is not asking — the upload form has its own «Для кого» field
+    // that does the same job — and «Скрытые» filters a grid nobody can see.
+    // The way out of a form is «Отмена», or Escape, both of which now leave the
+    // wardrobe standing; you are one tap from the tabs again, not trapped.
+    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter',
+        'sw-type-tabs', 'sw-show-hidden-toggle'];
+    let _savedScroll = 0;
+    // How to settle the open form's promise, and what to say if it is torn down
+    // from outside. A form resolves ONLY from its own Save/Cancel buttons, which
+    // live inside #sw-tab-content — so anything that wipes that subtree without
+    // answering leaves its caller awaiting forever AND leaves _savedContent set,
+    // which makes swShowInline refuse every later form until the page reloads.
+    let _inlineCancel = null;
+    let _inlineCancelMsg = '';
+
+    function swShowInline(html, onCancel = null, cancelMsg = '') {
         const el = document.getElementById('sw-tab-content');
         if (!el) return null;
+        // One slot holds the grid markup, so a second form opening over the first
+        // would overwrite it with the first FORM's markup and the grid would be
+        // gone for good. Reachable in practice: the AI-describe call blocks for up
+        // to a minute, and nothing stopped the user opening something else meanwhile.
+        if (_savedContent !== null) { swLog('WARN', 'inline form already open — not stacking another over it'); return null; }
         _savedContent = el.innerHTML;
+        _savedScroll = el.scrollTop;   // put the grid back where the user left it
+        _inlineCancel = onCancel;
+        _inlineCancelMsg = cancelMsg;
         el.innerHTML = html;
-        // Hide current outfit preview and filters while sub-form is open
-        const cur = document.getElementById('sw-current-outfit'); if (cur) cur.style.display = 'none';
+        el.scrollTop = 0;
+        for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = 'none'; }
         return el;
     }
     function swRestoreInline() {
         const el = document.getElementById('sw-tab-content');
-        if (el && _savedContent !== null) { el.innerHTML = _savedContent; _savedContent = null; }
-        const cur = document.getElementById('sw-current-outfit'); if (cur) cur.style.display = '';
+        // Release the slot even when the panel has already gone. The old `el &&`
+        // guard meant a restore arriving after the wardrobe closed left the slot
+        // occupied for the rest of the page's life — that is what turned a stray
+        // tap into "nothing in the wardrobe works until I reload".
+        if (_savedContent !== null) {
+            if (el) el.innerHTML = _savedContent;
+            _savedContent = null;
+        }
+        _inlineCancel = null;
+        _inlineCancelMsg = '';
+        for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = ''; }
+        if (!el) { _savedScroll = 0; return; }
         swRender(); // re-render to rebind events
+        const el2 = document.getElementById('sw-tab-content');
+        if (el2 && _savedScroll) { el2.scrollTop = _savedScroll; _savedScroll = 0; }
+    }
+
+    // Tear an open form down from outside and ANSWER it, so whoever is awaiting it
+    // stops waiting. Returns true if there was a form to close. Everything that
+    // can destroy #sw-tab-content goes through here: Escape, the ✕, the backdrop,
+    // and swRender itself.
+    function swAbortInline({ notify = false } = {}) {
+        if (_savedContent === null) return false;
+        const fn = _inlineCancel;
+        const msg = _inlineCancelMsg;
+        swRestoreInline();                       // puts the grid back, clears the slot
+        if (fn) { try { fn(); } catch (e) { swLog('WARN', 'inline cancel failed:', e?.message); } }
+        if (notify && msg) toastr.info(msg, '\u{1F45A} Гардероб', { timeOut: 2500 });
+        return true;
     }
 
     // ── Outfit card export/import (SillyTavern-card style: PNG + tEXt chunk) ──
@@ -988,6 +1216,11 @@ const SLAY_VERSION = '4.3.1';
             while (kEnd < dEnd && bytes[kEnd] !== 0) kEnd++;
             const kw = String.fromCharCode(...bytes.subarray(dStart, kEnd));
             if (kw !== keyword) return false;
+            // The chunk length comes from the file itself, so a crafted PNG can
+            // claim hundreds of megabytes and this loop will dutifully build the
+            // string one character at a time until the tab dies. Real outfit
+            // cards are a couple of KB; 1 MB is already absurdly generous.
+            if (dEnd - kEnd > 1048576) { swLog('WARN', `outfit card: tEXt chunk of ${dEnd - kEnd} bytes is not plausible — ignoring`); return true; }
             let text = '';
             for (let i = kEnd + 1; i < dEnd; i++) text += String.fromCharCode(bytes[i]);
             found = text;
@@ -1047,8 +1280,9 @@ const SLAY_VERSION = '4.3.1';
     async function swExportItem(id) {
         const o = swFindItem(id);
         if (!o) { toastr.error('Предмет не найден', 'Гардероб'); return; }
+        let _tExport = null;
         try {
-            toastr.info('Собираю карточку...', 'Гардероб', { timeOut: 4000 });
+            _tExport = toastr.info('Собираю карточку...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
             // Load the current image (path preferred, inline base64 fallback)
             const src = swGetOutfitSrc(o);
             if (!src) throw new Error('у предмета нет картинки');
@@ -1086,8 +1320,9 @@ const SLAY_VERSION = '4.3.1';
             document.body.appendChild(a);
             a.click();
             setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+            try { toastr.clear(_tExport); } catch (_) {}
             toastr.success(`Карточка «${o.name}» экспортирована`, 'Гардероб', { timeOut: 2500 });
-        } catch (e) { toastr.error('Экспорт не удался: ' + (e?.message || e), 'Гардероб'); }
+        } catch (e) { try { toastr.clear(_tExport); } catch (_) {} toastr.error('Экспорт не удался: ' + (e?.message || e), 'Гардероб'); }
     }
 
     // Try to read outfit-card metadata from a picked file. Returns item-shaped
@@ -1145,7 +1380,7 @@ const SLAY_VERSION = '4.3.1';
                         <button id="sw-upl-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-upl-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), defaults ? 'Импорт отменён' : 'Загрузка отменена');
             if (!el) { resolve(null); return; }
 
             const close = (val) => { swRestoreInline(); resolve(val); };
@@ -1175,7 +1410,7 @@ const SLAY_VERSION = '4.3.1';
                         <button id="sw-descinput-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), 'Ввод описания отменён');
             if (!el) { resolve(null); return; }
             const textarea = el.querySelector('#sw-descinput-text');
             const counter = el.querySelector('#sw-descinput-count');
@@ -1228,9 +1463,29 @@ const SLAY_VERSION = '4.3.1';
                         <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => { settleImage(false); resolve(null); }, 'Редактирование отменено');
             if (!el) { resolve(null); return; }
-            const close = (val) => { swRestoreInline(); resolve(val); };
+
+            // Replacing the picture used to write straight into the item and delete
+            // the old file on the spot, so «Отмена» could not undo it — there was
+            // nothing left to undo. The new file is now held aside and only becomes
+            // the item's picture if the user saves.
+            let pendingImagePath = null;
+            const settleImage = (commit) => {
+                if (!pendingImagePath) return;
+                if (commit) {
+                    const oldPath = item.imagePath;
+                    item.imagePath = pendingImagePath;
+                    item.base64 = '';
+                    if (oldPath && oldPath !== pendingImagePath) swDeleteImageFile(oldPath, { ignoreItemId: item.id });
+                } else {
+                    // Nothing ever pointed at it, so it is safe to take back off disk.
+                    swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
+                }
+                pendingImagePath = null;
+            };
+
+            const close = (val) => { settleImage(!!val); swRestoreInline(); resolve(val); };
             el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
             // ── Replace image: keep ALL metadata (name/desc/category/forWho/gender/tags),
             // swap only the picture. Mutates the live item + saves immediately (independent
@@ -1243,19 +1498,38 @@ const SLAY_VERSION = '4.3.1';
             replaceFile?.addEventListener('change', async () => {
                 const f = replaceFile.files?.[0];
                 if (!f) return;
+                let _tReplace = null;
                 try {
-                    toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 8000 });
-                    const { base64 } = await swResize(f, swGetSettings().maxDimension);
-                    const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`);
-                    item.imagePath = path;
-                    item.base64 = '';
-                    swSave();
-                    swUpdatePromptInjection();
+                    // Read the file NOW, while the picker handle is fresh — on Android a
+                    // File is a content:// ticket that expires while a dialog is open.
+                    const raw = await new Promise((res, rej) => {
+                        const r = new FileReader();
+                        r.onloadend = () => res(r.result);
+                        r.onerror = rej;
+                        r.readAsDataURL(f);
+                    });
+                    // Uploading a new outfit offers the crop; replacing the picture on an
+                    // existing one skipped straight past it, so the same photo came out
+                    // framed one way or the other depending on which button you pressed.
+                    let dataUrl = raw;
+                    if (slayCropEnabled()) {
+                        const cropped = await slayCropImage(dataUrl, { aspect: 0, title: 'Обрезать вещь', subtitle: 'Можно оставить как есть' });
+                        if (cropped === null) { replaceFile.value = ''; return; }
+                        dataUrl = cropped;
+                    }
+                    _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+                    const { base64, format } = await swResize(dataUrl, swGetSettings().maxDimension);
+                    const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
+                    // Picking a second picture before saving must not leave the first
+                    // one stranded on disk with nothing pointing at it.
+                    if (pendingImagePath && pendingImagePath !== path) swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
+                    pendingImagePath = path;
                     const thumb = el.querySelector('#sw-edit-thumb');
                     if (thumb) thumb.src = path + '?t=' + Date.now();
-                    toastr.success('Картинка заменена', 'Гардероб', { timeOut: 2000 });
+                    try { toastr.clear(_tReplace); } catch (_) {}
+                    toastr.info('Новая картинка выбрана — нажмите «Сохранить»', 'Гардероб', { timeOut: 3000 });
                 } catch (e) { toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
-                finally { replaceFile.value = ''; }
+                finally { replaceFile.value = ''; try { toastr.clear(_tReplace); } catch (_) {} }
             });
             el.querySelector('#sw-edit-save').addEventListener('click', () => {
                 const name = el.querySelector('#sw-edit-name').value.trim();
@@ -1354,17 +1628,28 @@ const SLAY_VERSION = '4.3.1';
         const maxDescLen = (category === 'hair') ? 250 : (promptStyle === 'simple' ? 400 : 600);
         const maxTokens = (category === 'hair') ? 80 : 300;
         swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}, maxLen=${maxDescLen}`);
-        toastr.info('Анализ образа...', 'Гардероб', { timeOut: 15000 });
+        const _tDescribe = toastr.info('Анализ образа...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
 
         // ── Direct API mode (recommended) ──
         if (mode === 'direct') {
             const iigSettings = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
+            // Resolve host and credential as a PAIR. Falling back independently
+            // meant that typing a custom describe endpoint while leaving its key
+            // blank (the field's placeholder invites exactly that) sent the main
+            // image-generation key to that other host — on the very first "Тест".
+            const useOwnEndpoint = !!swS.describeEndpoint;
             const endpoint = normalizeApiEndpoint(swS.describeEndpoint || iigSettings.endpoint || '');
-            const apiKey = swS.describeKey || iigSettings.apiKey || '';
+            const apiKey = useOwnEndpoint ? (swS.describeKey || '') : (iigSettings.apiKey || '');
+            if (useOwnEndpoint && !apiKey) {
+                toastr.error('Вы указали свой Endpoint для описаний, но не указали к нему ключ. Основной ключ туда не отправляется — впишите ключ или очистите Endpoint.', 'Гардероб', { timeOut: 10000 });
+                try { toastr.clear(_tDescribe); } catch (_) {}
+                return null;
+            }
             const modelSelect = document.getElementById('slay_sw_describe_model');
             const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.5-flash';
             if (!endpoint || !apiKey) {
                 toastr.warning('Настройте API для описания в секции Гардероб', 'Гардероб', { timeOut: 5000 });
+                try { toastr.clear(_tDescribe); } catch (_) {}
                 return null;
             }
             // Determine API format: user choice > auto-detect by model name
@@ -1394,9 +1679,12 @@ const SLAY_VERSION = '4.3.1';
                             }],
                             generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
                         };
-                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        // robustFetch, not bare fetch: this was the only request in the file with
+                        // no timeout at all, so a stalled describe hung the upload with no way out.
+                        const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
+                        try { toastr.clear(_tDescribe); } catch (_) {}
                         return result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
                     } else {
                         const url = `${endpoint}/v1/chat/completions`;
@@ -1412,9 +1700,12 @@ const SLAY_VERSION = '4.3.1';
                                 }
                             ]
                         };
-                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        // robustFetch, not bare fetch: this was the only request in the file with
+                        // no timeout at all, so a stalled describe hung the upload with no way out.
+                        const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
+                        try { toastr.clear(_tDescribe); } catch (_) {}
                         return result.choices?.[0]?.message?.content?.trim() || '';
                     }
                 };
@@ -1453,10 +1744,12 @@ const SLAY_VERSION = '4.3.1';
                     swLog('INFO', `Description truncated to ${desc.length} chars`);
                 }
                 if (desc && desc.length > 10) {
+                    try { toastr.clear(_tDescribe); } catch (_) {}
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
                 swLog('WARN', `Direct API: unusable result (len=${desc?.length || 0})`);
             } catch (e) { swLog('WARN', `Direct API failed (${model}):`, e.message); toastr.warning(`Ошибка: ${e.message}`, 'Гардероб', { timeOut: 5000 }); }
+            try { toastr.clear(_tDescribe); } catch (_) {}
             return null;
         }
 
@@ -1478,7 +1771,7 @@ const SLAY_VERSION = '4.3.1';
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
-                if (desc && desc.length > 10) { return desc; }
+                if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
@@ -1488,11 +1781,12 @@ const SLAY_VERSION = '4.3.1';
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
-                if (desc && desc.length > 10) { return desc; }
+                if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
         toastr.warning('Не удалось описать. Введите вручную.', 'Гардероб', { timeOut: 5000 });
+        try { toastr.clear(_tDescribe); } catch (_) {}
         return null;
     }
 
@@ -1514,7 +1808,14 @@ const SLAY_VERSION = '4.3.1';
             let bytes;
             try { bytes = new Uint8Array(await f.arrayBuffer()); }
             catch (e) { toastr.error('Не удалось прочитать файл — выберите его заново', 'Гардероб'); return; }
-            const dataUrl = `data:${f.type || 'image/png'};base64,${swBytesToBase64(bytes)}`;
+            let dataUrl = `data:${f.type || 'image/png'};base64,${swBytesToBase64(bytes)}`;
+            // Wardrobe items are photographed garments, not portraits, so the
+            // crop opens free-form rather than forcing them into a 3:4 frame.
+            if (slayCropEnabled()) {
+                const cropped = await slayCropImage(dataUrl, { aspect: 0, title: 'Обрезать вещь', subtitle: 'Можно оставить как есть' });
+                if (cropped === null) return;
+                dataUrl = cropped;
+            }
 
             // Outfit-card import: if the picked PNG carries our tEXt chunk,
             // pre-fill the form and reuse the embedded description (skipping
@@ -1530,7 +1831,7 @@ const SLAY_VERSION = '4.3.1';
             if (!result) return;
 
             try {
-                const { base64 } = await swResize(dataUrl, swGetSettings().maxDimension);
+                const { base64, format } = await swResize(dataUrl, swGetSettings().maxDimension);
                 let autoDesc = card?.description?.trim() || null;
                 if (autoDesc) {
                     // Never apply an imported description sight-unseen: it ends up
@@ -1539,13 +1840,35 @@ const SLAY_VERSION = '4.3.1';
                     const edited = await swShowDescInput('🧥 Описание из карточки (можете отредактировать)', autoDesc);
                     if (edited !== null) autoDesc = edited;
                 } else if (swGetSettings().autoDescribe !== false) {
-                    autoDesc = await swAnalyzeOutfit(base64, result.category);
+                    // Occupy the panel for the whole wait. Previously the form
+                    // closed, the ordinary grid came back, and the only sign of
+                    // life was a toast that expires after 15s — while the describe
+                    // request can run a full minute. People assumed nothing had
+                    // happened and started tapping things.
+                    swShowInline(`<div style="padding:28px 12px;text-align:center;color:#f0a0c0;">
+                        <i class="fa-solid fa-spinner iig-spin-anim" style="font-size:26px;"></i>
+                        <div style="margin-top:12px;font-size:14px;">🤖 ИИ описывает образ...</div>
+                        <div style="margin-top:4px;font-size:11px;color:#888;">это занимает до минуты, не закрывайте гардероб</div>
+                    </div>`);
+                    // No timeout here meant a model that never answered left the
+                    // spinner up forever with the form slot held — a hang nobody
+                    // had to do anything wrong to reach.
+                    try {
+                        autoDesc = await Promise.race([
+                            swAnalyzeOutfit(base64, result.category),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 120000)),
+                        ]);
+                    } catch (e) {
+                        swLog('WARN', `describe failed or timed out: ${e?.message}`);
+                        toastr.warning('ИИ не ответил — добавляю без описания', 'Гардероб', { timeOut: 4000 });
+                        autoDesc = null;
+                    } finally { swRestoreInline(); }
                     if (autoDesc) {
                         const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
                         if (edited !== null) autoDesc = edited;
                     }
                 }
-                const imagePath = await swSaveImageToFile(base64, `wardrobe_${result.name}`);
+                const imagePath = await swSaveImageToFile(base64, `wardrobe_${result.name}`, format);
                 swAddItem({
                     id: uid(),
                     name: result.name,
@@ -1564,7 +1887,11 @@ const SLAY_VERSION = '4.3.1';
                 toastr.success(`\u00AB${result.name}\u00BB ${card ? 'импортирован' : 'добавлен'}`, 'Гардероб');
             } catch (e) { toastr.error('Ошибка: ' + e.message, 'Гардероб'); }
         });
+        // Safari only opens the picker for an input that is in the document.
+        inp.style.display = 'none';
+        document.body.appendChild(inp);
         inp.click();
+        setTimeout(() => inp.remove(), 60000);
     }
 
     async function swEdit(id) {
@@ -1604,6 +1931,7 @@ const SLAY_VERSION = '4.3.1';
         try {
             const ctx = SillyTavern.getContext();
             if (typeof ctx.setExtensionPrompt !== 'function') { swLog('WARN', 'setExtensionPrompt not available'); return; }
+            if (swGetSettings().wardrobeEnabled === false) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const cn = swCharName();
             if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const co = swGetCharOutfit();
@@ -1648,6 +1976,7 @@ const SLAY_VERSION = '4.3.1';
 
 
     function swInjectFloatingBtn() {
+        if (swGetSettings().wardrobeEnabled === false) { $('#sw-bar-btn').remove(); return; }
         let $btn = $('#sw-bar-btn');
         if ($btn.length === 0) {
             $btn = $('<div id="sw-bar-btn" title="Гардероб"><i class="fa-solid fa-shirt"></i></div>');
@@ -2154,7 +2483,129 @@ const SLAY_VERSION = '4.3.1';
     }
 
     // ── Public API ──
+    // Compare what's on disk in wardrobe_refs against what any item actually
+    // references, and offer to remove the leftovers. Deliberately a manual,
+    // report-first action rather than a silent sweep — if our accounting is ever
+    // wrong, the user sees the number before anything is deleted.
+    // Sweep BOTH picture folders, not just the wardrobe's. iig_refs holds every
+    // character reference ever uploaded — hundreds of files in a long-running
+    // install — and nothing had ever looked at it. Now that slayCountPathUses()
+    // knows every place a path can be referenced (saved looks, all wardrobes,
+    // ref slots across every chat, the recent ribbon), one pass can cover the
+    // lot. Still report-then-confirm: a wrong count here deletes real work.
+    async function swFindOrphanImages() {
+        const ctx = SillyTavern.getContext();
+        const folders = [
+            { name: 'wardrobe_refs', label: 'гардероб' },
+            { name: 'iig_refs',      label: 'референсы' },
+        ];
+        const t = toastr.info('Сверяю файлы со всеми списками...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+        try {
+            const found = [];
+            let total = 0;
+            for (const f of folders) {
+                const r = await fetch('/api/images/list', {
+                    method: 'POST', headers: ctx.getRequestHeaders(),
+                    body: JSON.stringify({ folder: f.name })
+                });
+                if (!r.ok) { swLog('WARN', `orphan scan: ${f.name} list failed (${r.status})`); continue; }
+                const files = await r.json();
+                if (!Array.isArray(files)) continue;
+                for (const raw of files) {
+                    const name = String(typeof raw === 'string' ? raw : (raw && raw.name) || '').split('/').pop();
+                    if (!name) continue;
+                    total++;
+                    const path = `/user/images/${f.name}/${name}`;
+                    if (slayCountPathUses(path) === 0) found.push({ path, folder: f.label });
+                }
+            }
+            try { toastr.clear(t); } catch (_) {}
+
+            if (!total) { toastr.info('Картинок на диске не найдено', 'Гардероб'); return; }
+            if (!found.length) {
+                toastr.success(`Лишних нет — все ${total} картинок используются`, 'Гардероб', { timeOut: 4000 });
+                return;
+            }
+
+            const nWard = found.filter(x => x.folder === 'гардероб').length;
+            const nRefs = found.filter(x => x.folder === 'референсы').length;
+            const byFolder = found.reduce((acc, x) => { acc[x.folder] = (acc[x.folder] || 0) + 1; return acc; }, {});
+            const breakdown = Object.entries(byFolder).map(([k, v]) => `· ${v} в разделе «${k}»`).join('\n');
+            // Three outcomes, not two: someone may well want to clear hundreds of
+            // stale references while keeping every wardrobe picture, or the other
+            // way round. Forcing that into one yes/no was the wrong question.
+            const opts = [];
+            if (nRefs) opts.push({ key: 'refs', label: `Только референсы (${nRefs})` });
+            if (nWard) opts.push({ key: 'ward', label: `Только гардероб (${nWard})` });
+            if (nRefs && nWard) opts.push({ key: 'both', label: `И то и другое (${found.length})`, danger: true });
+            else if (opts.length === 1) opts[0].primary = true;
+
+            const pick = await slayChoose(
+                'Ничьи картинки',
+                `Проверено ${total} картинок во всех папках.@BR@@BR@` +
+                `На ${found.length} не ссылается ничего — ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате.@BR@@BR@` +
+                `Что удалить с диска?`,
+                opts);
+            if (!pick) return;
+            const doomed = pick === 'both' ? found
+                : pick === 'refs' ? found.filter(x => x.folder === 'референсы')
+                : found.filter(x => x.folder === 'гардероб');
+            if (!doomed.length) return;
+
+            const t2 = toastr.info('Удаляю...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+            // One refusal used to abort the whole run and report nothing — you
+            // never learnt that forty files had already gone. Now each failure is
+            // noted with its reason and the sweep carries on.
+            let killed = 0;
+            const failed = [];
+            for (const x of doomed) {
+                const name = x.path.split('/').pop();
+                try {
+                    const res = await fetch('/api/images/delete', {
+                        method: 'POST', headers: ctx.getRequestHeaders(),
+                        body: JSON.stringify({ path: x.path.replace(/^[/]/, '') })
+                    });
+                    if (res.ok) { killed++; continue; }
+                    const why = res.status === 403 ? 'нет доступа'
+                        : res.status === 404 ? 'файла уже нет'
+                        : res.status === 423 || res.status === 409 ? 'файл занят'
+                        : res.status >= 500 ? 'ошибка сервера'
+                        : `сервер ответил ${res.status}`;
+                    failed.push({ name, why });
+                } catch (e) {
+                    failed.push({ name, why: e?.message ? `нет связи (${e.message})` : 'нет связи' });
+                }
+            }
+            try { toastr.clear(t2); } catch (_) {}
+
+            if (!failed.length) {
+                toastr.success(`Удалено ${killed} из ${doomed.length}`, 'Гардероб', { timeOut: 5000 });
+            } else {
+                // Group by reason: ten files refused for one reason is one line,
+                // not ten. Names for the first few so the user can go look.
+                const byWhy = failed.reduce((acc, f) => { (acc[f.why] = acc[f.why] || []).push(f.name); return acc; }, {});
+                const lines = Object.entries(byWhy).map(([why, names]) => {
+                    const shown = names.slice(0, 3).join(', ');
+                    const more = names.length > 3 ? ` и ещё ${names.length - 3}` : '';
+                    return `· ${why}: ${shown}${more}`;
+                });
+                swLog('WARN', `orphan sweep: ${failed.length} failed`, byWhy);
+                toastr.warning(
+                    `Удалено ${killed} из ${doomed.length}. Не вышло ${failed.length}:<br>${lines.join('<br>')}`,
+                    'Гардероб',
+                    { timeOut: 12000, extendedTimeOut: 6000, escapeHtml: false });
+            }
+        } catch (e) {
+            try { toastr.clear(t); } catch (_) {}
+            toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб');
+        }
+    }
+
     window.slayWardrobe = {
+        // Re-apply the wardrobe's own on/off state without a page reload:
+        // clears or restores the prompt injection and the chat bar button.
+        refresh() { swUpdatePromptInjection(); swInjectFloatingBtn(); },
+        findOrphanImages: swFindOrphanImages,
         async getActiveOutfitBase64(type) {
             const cn = swCharName(); if (!cn) return null;
             const co = swGetCharOutfit(); if (!co) return null;
@@ -2303,8 +2754,17 @@ const defaultSettings = Object.freeze({
     enabled: true,
     externalBlocks: false,
     imageContextEnabled: false,
+    // Offer the crop step when a picture is uploaded. Stored as the opt-OUT so
+    // the checkbox can be worded the way it was asked for: «не предлагать кроп».
+    skipCrop: false,
+    // Whether the saved-characters panel is expanded. Closed by default so it
+    // doesn't push the ref slots down for someone who never opens it.
+    savedOpen: false,
     imageContextCount: 1,
     apiType: 'openai',
+    // false = pick from the fetched list (a real <select>); true = type it in.
+    // Forced on for providers that cannot list models, so nobody gets locked out.
+    manualModel: false,
     endpoint: '',
     apiKey: '',
     model: '',
@@ -2480,12 +2940,33 @@ function saveSettingsNow() { saveSettings(); }
 
 const LS_KEY = 'slay_iig_refs_v1';
 
+// Crash insurance for mobile: phones discard backgrounded tabs, sometimes before
+// ST has written settings to the server. The backup used to cover only the LEGACY
+// flat npcReferences field, while real refs live in perCharacterRefs — so it was
+// protecting almost nothing. Both go in now.
+// Everything worth not losing to a killed tab. JSON.stringify walks the live
+// objects directly — the old code cloned them first and threw the clone away one
+// line later, which was 75% of the work this function did.
+const LS_BACKUP_KEYS = ['npcReferences', 'perCharacterRefs', 'savedChars', 'refHashMap', 'recentRefs'];
+
 function persistRefsToLocalStorage() {
+    let settings;
+    try { settings = getSettings(); } catch (e) { return; }
+    const build = (keys) => {
+        const payload = { savedAt: Date.now() };
+        for (const k of keys) if (settings[k] !== undefined) payload[k] = settings[k];
+        return JSON.stringify(payload);
+    };
     try {
-        const settings = getSettings();
-        const refs = JSON.parse(JSON.stringify(settings.npcReferences || {}));
-        localStorage.setItem(LS_KEY, JSON.stringify(refs));
-    } catch (e) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e.message); }
+        localStorage.setItem(LS_KEY, build(LS_BACKUP_KEYS));
+    } catch (e) {
+        // Out of quota: drop the hash map (rebuildable — worst case one picture
+        // uploads twice) and keep the parts that represent real user work.
+        try {
+            localStorage.setItem(LS_KEY, build(['npcReferences', 'perCharacterRefs', 'savedChars']));
+            iigLog('WARN', 'localStorage backup trimmed: ' + e.message);
+        } catch (e2) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e2.message); }
+    }
 }
 
 function restoreRefsFromLocalStorage() {
@@ -2495,16 +2976,39 @@ function restoreRefsFromLocalStorage() {
         const backup = JSON.parse(raw);
         if (!backup || typeof backup !== 'object') return;
         const settings = getSettings();
-        settings.npcReferences = backup;
+        // New shape carries both maps under named keys; anything older is the bare
+        // npcReferences object this function used to write.
+        if (backup.npcReferences || backup.perCharacterRefs) {
+            if (backup.npcReferences) settings.npcReferences = backup.npcReferences;
+            if (backup.perCharacterRefs && !Object.keys(settings.perCharacterRefs || {}).length) {
+                settings.perCharacterRefs = backup.perCharacterRefs;
+            }
+        } else {
+            settings.npcReferences = backup;
+        }
+        // The rest of the backup only fills gaps. A populated live value is always
+        // newer than the copy, so overwriting it would undo real work.
+        if (Array.isArray(backup.savedChars) && !(settings.savedChars || []).length) {
+            settings.savedChars = backup.savedChars;
+            iigLog('INFO', `Restored ${backup.savedChars.length} saved characters from localStorage`);
+        }
+        if (backup.refHashMap && !Object.keys(settings.refHashMap || {}).length) {
+            settings.refHashMap = backup.refHashMap;
+        }
+        if (Array.isArray(backup.recentRefs) && !(settings.recentRefs || []).length) {
+            settings.recentRefs = backup.recentRefs;
+        }
         iigLog('INFO', 'Refs restored from localStorage');
     } catch (e) { iigLog('WARN', 'restoreRefsFromLocalStorage failed:', e.message); }
 }
 
 function initMobileSaveListeners() {
     const flush = () => {
+        // persistRefsToLocalStorage is the only one of these that can still finish
+        // on pagehide. The debounced save is scheduled a second out and the page is
+        // usually gone by then — harmless to ask for, useless to rely on.
         persistRefsToLocalStorage();
         try { SillyTavern.getContext().saveSettingsDebounced(); } catch (e) { }
-        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { _stSaveSettings(); } catch (e) { } }
     };
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
     window.addEventListener('pagehide', flush);
@@ -2745,30 +3249,96 @@ function getPreviousGeneratedImageUrls(messageId, requestedCount) {
     return urls;
 }
 
+// Per-message memo. A message with three image tags used to download the SAME
+// context references three times over — once per tag — because every tag ran
+// its own collection pass. Cleared when the message finishes processing.
+const _contextRefCache = new Map();
+function clearContextRefCache(messageId) {
+    for (const k of _contextRefCache.keys()) if (k.startsWith(`${messageId}|`)) _contextRefCache.delete(k);
+}
+
+// Message ids restart from zero in every chat, so an entry left behind by one
+// chat can be answered to a request from the next one — and the generation gets
+// a picture the user never put there. Wipe the lot whenever the chat changes.
+function clearAllContextRefCache() {
+    if (_contextRefCache.size) iigLog('INFO', `Dropping ${_contextRefCache.size} cached context refs (chat changed)`);
+    _contextRefCache.clear();
+}
+
 async function collectPreviousContextReferences(messageId, format, requestedCount) {
+    const cacheKey = `${messageId}|${format}|${requestedCount}`;
+    if (_contextRefCache.has(cacheKey)) return _contextRefCache.get(cacheKey);
+
     const urls = getPreviousGeneratedImageUrls(messageId, requestedCount);
     if (urls.length === 0) return [];
     const convert = format === 'dataUrl' ? imageUrlToDataUrl : imageUrlToBase64;
     const converted = await Promise.all(urls.map(url => convert(url)));
-    return converted.filter(Boolean);
+
+    // These were the only references sent at full size — every other ref path
+    // already goes through compressBase64Image. A generated image is ~300-500KB
+    // raw against ~40KB compressed, and they ride along on every request.
+    const shrink = async (v) => {
+        if (!v) return null;
+        try {
+            if (format === 'dataUrl') {
+                const b64 = String(v).split(',')[1];
+                if (!b64) return v;
+                return 'data:image/jpeg;base64,' + await compressBase64Image(b64, 768, 0.8);
+            }
+            return await compressBase64Image(v, 768, 0.8);
+        } catch (e) { iigLog('WARN', 'context ref compression failed, sending as-is:', e?.message); return v; }
+    };
+    const out = (await Promise.all(converted.filter(Boolean).map(shrink))).filter(Boolean);
+
+    _contextRefCache.set(cacheKey, out);
+    return out;
 }
 
 // ── Image utilities ──
+// Fallback compressor, reached when computeRefHashes could not decode the picture
+// on its own. It used to be able to hang forever: the body of onload had no
+// try/catch, there was no timeout, and iOS Safari gives up on images past roughly
+// 16 megapixels WITHOUT firing either load or error. The promise then never
+// settled and the await upstream waited for the rest of the session — no toast, no
+// placeholder, nothing at all. From the outside it looked like the upload button
+// simply did nothing, which is exactly what the iPhone reports described.
+//
+// It also announced every picture as image/jpeg regardless of what it really was;
+// PNG and WebP survived only because browsers sniff the bytes anyway.
+const COMPRESS_TIMEOUT_MS = 20000;
+
 function compressBase64Image(rawBase64, maxDim = 768, quality = 0.8) {
     return new Promise((resolve, reject) => {
         const img = new Image();
-        img.onload = () => {
-            let w = img.width, h = img.height;
-            if (w > maxDim || h > maxDim) { const scale = maxDim / Math.max(w, h); w = Math.round(w * scale); h = Math.round(h * scale); }
-            const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
-            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-            const dataUrl = canvas.toDataURL('image/jpeg', quality);
-            const b64 = dataUrl.split(',')[1];
-            iigLog('INFO', `Compressed: ${img.width}x${img.height} -> ${w}x${h}, ~${Math.round(b64.length / 1024)}KB`);
-            resolve(b64);
+        let settled = false;
+        const done = (fn, arg) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { img.src = ''; } catch (_) {}   // let the decoded bitmap go
+            fn(arg);
         };
-        img.onerror = () => reject(new Error('Failed to load image for compression'));
-        img.src = 'data:image/jpeg;base64,' + rawBase64;
+        const timer = setTimeout(
+            () => done(reject, new Error('Картинка слишком большая — устройство не смогло её открыть')),
+            COMPRESS_TIMEOUT_MS);
+
+        img.onload = () => {
+            try {
+                let w = img.width, h = img.height;
+                if (!w || !h) throw new Error('нулевой размер');
+                if (w > maxDim || h > maxDim) { const scale = maxDim / Math.max(w, h); w = Math.round(w * scale); h = Math.round(h * scale); }
+                const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+                canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                const b64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+                canvas.width = canvas.height = 0;
+                iigLog('INFO', `Compressed: ${img.width}x${img.height} -> ${w}x${h}, ~${Math.round(b64.length / 1024)}KB`);
+                done(resolve, b64);
+            } catch (e) {
+                done(reject, new Error('Не удалось уменьшить картинку: ' + (e?.message || e)));
+            }
+        };
+        img.onerror = () => done(reject, new Error('Не удалось открыть картинку — возможно, формат не поддерживается'));
+        img.src = `data:${detectImageMimeFromBase64(rawBase64)};base64,${rawBase64}`;
     });
 }
 
@@ -2843,6 +3413,223 @@ function removeRecentRef(path) {
     try { renderRecentRefsRibbon(); } catch (_) {}
 }
 
+// ── Библиотека сохранённых персонажей ──
+// Recent refs are a rolling window of 10 paths with no names — good for "the
+// picture I used a minute ago", useless for "Ева, the one I use in every chat".
+// This is the permanent half: a named entry keeps BOTH the portrait and the
+// comma-separated name list, so re-using a character in a new chat is one tap
+// instead of hunting for the file and retyping the names.
+// Global on purpose — the whole point is that it survives switching characters.
+// A CHARACTER owns the names; a LOOK owns a picture and its label.
+//   savedChars: [{ id, names, looks: [{ id, label, path, addedAt }] }]
+// The old shape stored one flat entry per picture, so the same person in four
+// AUs meant four cards with "Ден, Денис, Денчик" retyped into each. Names now
+// live once per character and pictures hang off them — which is also what the
+// prompt matcher wants, since it has only ever cared about the name list.
+const swUid = (p) => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+function getSavedChars() {
+    const settings = getSettings();
+    if (!Array.isArray(settings.savedChars)) settings.savedChars = [];
+    migrateSavedPortraits(settings);
+    // Drop empties defensively — a character with no pictures has nothing to show.
+    return settings.savedChars.filter(c => c && Array.isArray(c.looks) && c.looks.length);
+}
+
+// One-way lift of the old flat list. Entries group by ANY shared name rather
+// than an identical list: "Dana" and "Dana, Дана" are one person, and matching
+// the whole string filed them as two. This is the rule the ref matcher already
+// uses against a prompt, so the library agrees with what generation does.
+// Each old `note` becomes its look's label — what the note always meant anyway.
+function migrateSavedPortraits(settings) {
+    const old = settings.savedPortraits;
+    if (!Array.isArray(old) || !old.length) return;
+    // Grouping is by ANY shared name, so «Саша Иванов» and «Саша Петров» become
+    // one person. That is usually right and occasionally wrong, there is no
+    // un-merge, and the source list is deleted at the end — so keep a copy.
+    try { settings.savedPortraitsBackup = JSON.parse(JSON.stringify(old)); } catch (_) {}
+    for (const p of old) {
+        if (!p || !p.path) continue;
+        const mine = swNameList(p.name || '').map(x => x.toLowerCase());
+        let ch = mine.length
+            ? settings.savedChars.find(c => swNameList(c.names).some(n => mine.includes(n.toLowerCase())))
+            : null;
+        if (!ch) {
+            ch = { id: swUid('sc'), names: p.name || '', looks: [] };
+            settings.savedChars.push(ch);
+        } else {
+            // Union the names so the merged character still answers to both halves.
+            const have = new Set(swNameList(ch.names).map(x => x.toLowerCase()));
+            const extra = swNameList(p.name || '').filter(n => !have.has(n.toLowerCase()));
+            if (extra.length) ch.names = [...swNameList(ch.names), ...extra].join(', ');
+        }
+        if (!ch.looks.some(l => l.path === p.path)) {
+            ch.looks.push({ id: swUid('sl'), label: p.note || '', path: p.path, addedAt: p.addedAt || Date.now() });
+        }
+    }
+    delete settings.savedPortraits;
+    iigLog('INFO', `savedPortraits -> savedChars: ${old.length} -> ${settings.savedChars.length}`);
+    saveSettings();
+}
+
+// Fold one saved character into another: looks move over, names merge, source
+// disappears. The library can hold the same person twice — from the old flat
+// data or from a typo — and until now there was no way back out.
+function mergeSavedChars(fromId, intoId) {
+    const settings = getSettings();
+    const list = settings.savedChars || [];
+    const from = list.find(c => c.id === fromId);
+    const into = list.find(c => c.id === intoId);
+    if (!from || !into || from === into) return false;
+    for (const l of from.looks) if (!into.looks.some(x => x.path === l.path)) into.looks.push(l);
+    const have = new Set(swNameList(into.names).map(x => x.toLowerCase()));
+    const extra = swNameList(from.names).filter(n => !have.has(n.toLowerCase()));
+    if (extra.length) into.names = [...swNameList(into.names), ...extra].join(', ');
+    settings.savedChars = list.filter(c => c.id !== fromId);
+    saveSettings();
+    try { renderSavedPortraits(); } catch (_) {}
+    return true;
+}
+
+const swNameList = (s) => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+const normalizeNameKey = (s) => swNameList(s).map(x => x.toLowerCase()).sort().join('|');
+
+// Which saved character do these typed names belong to? Any single shared name
+// is enough — exactly the rule the ref matcher uses against a prompt, so what
+// the user sees here matches what actually happens during generation.
+function findSavedCharByNames(typed) {
+    const want = new Set(swNameList(typed).map(x => x.toLowerCase()));
+    if (!want.size) return null;
+    return getSavedChars().find(c => swNameList(c.names).some(n => want.has(n.toLowerCase()))) || null;
+}
+
+function findSavedCharByPath(path) {
+    if (!path) return null;
+    for (const c of getSavedChars()) if (c.looks.some(l => l.path === path)) return c;
+    return null;
+}
+
+// Add a look to an existing character, or create the character and start it off
+// with this one. Re-saving a picture that is already there just relabels it.
+function saveLook({ charId = null, names = '', label = '', path }) {
+    if (!path) return null;
+    const settings = getSettings();
+    if (!Array.isArray(settings.savedChars)) settings.savedChars = [];
+
+    let ch = charId ? settings.savedChars.find(c => c.id === charId) : null;
+    if (!ch) {
+        ch = { id: swUid('sc'), names: names || '', looks: [] };
+        settings.savedChars.unshift(ch);
+    } else if (names) {
+        ch.names = names;
+    }
+
+    const dupe = ch.looks.find(l => l.path === path);
+    if (dupe) { if (label) dupe.label = label; dupe.addedAt = Date.now(); }
+    else ch.looks.push({ id: swUid('sl'), label: label || '', path, addedAt: Date.now() });
+
+    saveSettings();
+    try { renderSavedPortraits(); } catch (_) {}
+    return ch;
+}
+
+// Everywhere a stored picture can be referenced from. Used before deleting a
+// file: the same path is routinely shared between a look, a wardrobe item and a
+// ref slot in some other chat, and removing it from under them is exactly the
+// quiet damage this extension has been apologising for all week.
+// 1 место, 2 места, 5 мест — и глагол тоже меняется. С оглядкой на 11-14, где
+// правило ломается: одиннадцать МЕСТ, а не одиннадцать место.
+function slayPlural(n, one, few, many) {
+    const a = Math.abs(n) % 100;
+    if (a >= 11 && a <= 14) return many;
+    const b = a % 10;
+    if (b === 1) return one;
+    if (b >= 2 && b <= 4) return few;
+    return many;
+}
+
+function slayCountPathUses(path) {
+    if (!path) return 0;
+    let n = 0;
+    try {
+        const all = SillyTavern.getContext().extensionSettings || {};
+        for (const [key, val] of Object.entries(all)) {
+            if (!val || typeof val !== 'object') continue;
+            // Saved characters and their looks
+            if (Array.isArray(val.savedChars)) {
+                for (const c of val.savedChars) for (const l of (c.looks || [])) if (l.path === path) n++;
+            }
+            // Wardrobe items, in this build and any other
+            if (key.startsWith('slay_wardrobe') && Array.isArray(val.items)) {
+                for (const it of val.items) if (it && it.imagePath === path) n++;
+            }
+            // Ref slots, per character
+            const pcr = val.perCharacterRefs;
+            if (pcr && typeof pcr === 'object') {
+                for (const refs of Object.values(pcr)) {
+                    if (!refs) continue;
+                    if (refs.charRef && refs.charRef.imagePath === path) n++;
+                    if (refs.userRef && refs.userRef.imagePath === path) n++;
+                    for (const npc of (refs.npcReferences || [])) if (npc && npc.imagePath === path) n++;
+                }
+            }
+            if (val.charRef && val.charRef.imagePath === path) n++;
+            if (val.userRef && val.userRef.imagePath === path) n++;
+            for (const npc of (val.npcReferences || [])) if (npc && npc.imagePath === path) n++;
+            // Recently-used ribbon
+            for (const r of (val.recentRefs || [])) {
+                const p = typeof r === 'string' ? r : (r && r.path);
+                if (p === path) n++;
+            }
+        }
+    } catch (e) { iigLog('WARN', 'slayCountPathUses failed:', e?.message); return 99; }
+    return n;
+}
+
+// Delete a stored picture from disk. Refuses if anything still points at it.
+async function slayDeleteStoredImage(path) {
+    try {
+        if (!path || !path.startsWith('/user/images/')) return false;
+        const uses = slayCountPathUses(path);
+        if (uses > 0) { iigLog('INFO', `not deleting ${path} — still used ${uses}×`); return false; }
+        const r = await fetch('/api/images/delete', {
+            method: 'POST', headers: SillyTavern.getContext().getRequestHeaders(),
+            body: JSON.stringify({ path: path.replace(/^\//, '') })
+        });
+        if (r.ok) { iigLog('INFO', `deleted ${path}`); return true; }
+        iigLog('WARN', `delete failed (${r.status}) for ${path}`);
+        return false;
+    } catch (e) { iigLog('WARN', 'slayDeleteStoredImage failed:', e?.message); return false; }
+}
+
+function removeSavedLook(charId, lookId) {
+    const settings = getSettings();
+    const ch = (settings.savedChars || []).find(c => c.id === charId);
+    if (!ch) return;
+    ch.looks = ch.looks.filter(l => l.id !== lookId);
+    // Last picture gone means the character has nothing left to be.
+    if (!ch.looks.length) settings.savedChars = settings.savedChars.filter(c => c.id !== charId);
+    saveSettings();
+    try { renderSavedPortraits(); } catch (_) {}
+}
+
+function renameSavedChar(charId, names) {
+    const ch = (getSettings().savedChars || []).find(c => c.id === charId);
+    if (!ch || names === undefined) return;
+    ch.names = names;
+    saveSettings();
+    try { renderSavedPortraits(); } catch (_) {}
+}
+
+function relabelSavedLook(charId, lookId, label) {
+    const ch = (getSettings().savedChars || []).find(c => c.id === charId);
+    const lk = ch?.looks.find(l => l.id === lookId);
+    if (!lk || label === undefined) return;
+    lk.label = label;
+    saveSettings();
+    try { renderSavedPortraits(); } catch (_) {}
+}
+
 // Detect image MIME type from base64 prefix (first few characters after base64-encoding the magic bytes)
 function detectImageMimeFromBase64(base64) {
     if (!base64) return 'image/jpeg';
@@ -2889,19 +3676,67 @@ async function pixelHashOfBase64(base64) {
     } catch (e) { iigLog('WARN', `pixelHash failed: ${e?.message}`); return null; }
 }
 
-// Compute BOTH hashes — byte (exact) and pixel (visual). Returns { byteHash, pixelHash }.
-async function computeRefHashes(rawBase64) {
-    const [byteHash, pixelHash] = await Promise.all([
-        sha256OfBase64(rawBase64),
-        pixelHashOfBase64(rawBase64),
-    ]);
-    return { byteHash, pixelHash };
+// Compute BOTH hashes — byte (exact) and pixel (visual) — AND the compressed
+// copy, from a SINGLE decode. Callers used to run computeRefHashes and then
+// compressBase64Image, each decoding the original file at full resolution: a
+// 12 MP phone photo is ~48 MB as a bitmap, so two of them plus the base64
+// string regularly killed the tab on mid-range devices during a ref upload.
+// The pixel hash is still taken from the same full-resolution source drawn to
+// 32×32, so values are byte-identical to before and existing dedup entries
+// keep matching. Returns { byteHash, pixelHash, compressed }.
+async function computeRefHashes(rawBase64, { compress = true, maxDim = 768, quality = 0.8 } = {}) {
+    const byteHashP = sha256OfBase64(rawBase64);
+    let pixelHash = null, compressed = null;
+    try {
+        const mime = detectImageMimeFromBase64(rawBase64);
+        const img = new Image();
+        img.decoding = 'sync';
+        img.src = `data:${mime};base64,${rawBase64}`;
+        await img.decode();
+
+        // Pixel hash: 32×32, channels quantized to 4 bits so the same picture
+        // re-encoded at a different quality still lands on the same hash.
+        try {
+            const c = document.createElement('canvas');
+            c.width = 32; c.height = 32;
+            const cx = c.getContext('2d', { willReadFrequently: true });
+            cx.drawImage(img, 0, 0, 32, 32);
+            const { data } = cx.getImageData(0, 0, 32, 32);
+            const quantized = new Uint8Array(data.length);
+            for (let i = 0; i < data.length; i++) quantized[i] = data[i] & 0xF0;
+            const digest = await crypto.subtle.digest('SHA-256', quantized);
+            pixelHash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+        } catch (e) { iigLog('WARN', `pixelHash failed: ${e?.message}`); }
+
+        if (compress) {
+            let w = img.width, h = img.height;
+            if (w > maxDim || h > maxDim) { const scale = maxDim / Math.max(w, h); w = Math.round(w * scale); h = Math.round(h * scale); }
+            const c2 = document.createElement('canvas');
+            c2.width = w; c2.height = h;
+            c2.getContext('2d').drawImage(img, 0, 0, w, h);
+            compressed = c2.toDataURL('image/jpeg', quality).split(',')[1];
+            iigLog('INFO', `Compressed: ${img.width}x${img.height} -> ${w}x${h}, ~${Math.round(compressed.length / 1024)}KB (single decode)`);
+        }
+        img.src = '';   // let the decoded bitmap go before the next await
+    } catch (e) { iigLog('WARN', `decode for hashing/compression failed: ${e?.message}`); }
+    return { byteHash: await byteHashP, pixelHash, compressed };
 }
 
 // Quick HEAD probe to check if a previously-saved path still exists on disk.
 // If the user deleted it from /user/images manually, we shouldn't return a stale path.
 async function refFileStillExists(path) {
-    try { const r = await fetch(path, { method: 'HEAD' }); return r.ok; } catch (_) { return false; }
+    try {
+        const r = await fetch(path, { method: 'HEAD' });
+        // Only a real "gone" counts. Any other outcome — a dropped request, a
+        // busy server, a suspended tab — used to read as "file missing", which
+        // made the caller DELETE the dedup entry; re-adding that picture then
+        // wrote a second identical file into iig_refs.
+        if (r.status === 404 || r.status === 410) return false;
+        return true;
+    } catch (_) {
+        iigLog('WARN', `refFileStillExists: check failed for ${String(path).slice(-40)} — keeping the dedup entry`);
+        return true;
+    }
 }
 
 // Lookup existing path by hash. Returns path string or null.
@@ -2936,7 +3771,6 @@ async function lookupRefByHashes(hashes) {
         }
         settings.refHashMap[c.hash] = { path: existingPath, lastUsed: Date.now() };
         if (typeof saveSettings === 'function') saveSettings();
-        try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
         iigLog('INFO', `Ref dedup HIT (${c.kind}): reusing ${existingPath} (hash ${c.hash.slice(0, 8)}…, map ${mapSize})`);
         return existingPath;
     }
@@ -2959,12 +3793,43 @@ function recordRefHashes(hashes, path) {
         for (const [h] of entries.slice(0, entries.length - 1000)) delete settings.refHashMap[h];
     }
     if (typeof saveSettings === 'function') saveSettings();
-    try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
     iigLog('INFO', `Recording ref hashes (b:${hashes.byteHash?.slice(0,8)} p:${hashes.pixelHash?.slice(0,8)}) -> ${path} (map ${Object.keys(settings.refHashMap).length})`);
 }
 
 // Legacy single-hash lookup — still used elsewhere, thin wrapper for compat.
 async function lookupRefByHash(hash) { return lookupRefByHashes({ byteHash: hash }); }
+
+// Is this picked file one we wrote ourselves? The browser never reveals which
+// folder a file came from, but our own uploads are named `iig_ref_<label>_<ts>`,
+// so a matching name plus a matching size on disk is conclusive enough to skip
+// the upload entirely and just point at what is already there.
+//
+// Content hashing only recognises files saved AFTER we started recording the
+// hash of the written bytes — every ref from before that (hundreds, in a
+// long-running install) still hashed differently from its own stored copy and
+// got duplicated on every re-pick. Matching the filename covers all of them.
+async function resolveExistingRefByFileName(file, { edited = false } = {}) {
+    try {
+        // The shortcut identifies the file the user PICKED. If they cropped it
+        // since, the stored copy under that name is a different picture, and
+        // reusing it threw the crop away without a word.
+        if (edited) return null;
+        const name = String(file && file.name || '');
+        if (!/^iig_ref_.+\.(jpe?g|png|webp)$/i.test(name)) return null;
+        const path = `/user/images/iig_refs/${encodeURIComponent(name)}`;
+        const r = await fetch(path, { method: 'HEAD' });
+        if (!r.ok) return null;
+        // Same name AND same byte count — a rename collision would have to be
+        // deliberate to get past both.
+        const len = Number(r.headers.get('content-length') || 0);
+        if (len && file.size && len !== file.size) {
+            iigLog('INFO', `ref by name: "${name}" exists but size differs (${len} vs ${file.size}) — treating as new`);
+            return null;
+        }
+        iigLog('INFO', `ref by name: reusing ${path}, no copy written`);
+        return `/user/images/iig_refs/${name}`;
+    } catch (e) { return null; }
+}
 
 async function saveRefImageToFile(base64Data, label, opts = {}) {
     const context = SillyTavern.getContext();
@@ -2988,8 +3853,16 @@ async function saveRefImageToFile(base64Data, label, opts = {}) {
     if (!response.ok) { const err = await response.json().catch(() => ({ error: 'Unknown' })); throw new Error(err.error || `Upload failed: ${response.status}`); }
     const result = await response.json();
     iigLog('INFO', `Ref saved: ${result.path}`);
-    // Caller is responsible for recording hash(es) via recordRefHashes — it has access to
-    // both byte- and pixel-hash of the RAW base64 (pre-compression) which is more reliable.
+    // Callers record hashes of the RAW file they were handed. But what lands on
+    // disk is the COMPRESSED re-encode, whose bytes hash differently — so the
+    // moment a user re-adds a picture that came out of iig_refs (a re-download,
+    // a copy, the same file picked twice through different routes) nothing
+    // matched and we wrote yet another identical jpeg. Record the hashes of what
+    // we actually stored as well, so the stored file recognises itself later.
+    try {
+        const own = await computeRefHashes(base64Data, { compress: false });
+        recordRefHashes(own, result.path);
+    } catch (e) { iigLog('WARN', 'self-hash after save failed:', e?.message); }
     return result.path;
 }
 
@@ -3486,13 +4359,366 @@ function validateSettings() {
     if (errors.length > 0) throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
 }
 
-function sanitizeForHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+function sanitizeForHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text ?? '';
+    // Quotes too — same attribute-context problem as esc() in the wardrobe module.
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 // ── ST-native popups (with window.prompt/confirm fallback for old builds) ──
 // callGenericPopup lives in ST's popup.js and renders the same themed dialog
 // the rest of the UI uses. POPUP_TYPE: TEXT=1, CONFIRM=2, INPUT=3 (hardcoded
 // fallback numbers for ST builds that don't export POPUP_TYPE on the context).
+// ── Обрезка картинки перед загрузкой ─────────────────────────────────────
+// Built as its own overlay rather than through callGenericPopup: this needs
+// pointer-drag over the image and three custom actions, and a popup wrapper
+// would fight both. Returns a data URL (cropped or whole), or null if the user
+// backed out entirely — callers must treat null as "abandon the upload".
+//
+// Mobile is the primary case, not an afterthought: the stage is sized in dvh so
+// the browser chrome collapsing doesn't clip it, handles are finger-sized, the
+// aspect row scrolls instead of wrapping, and touch-action:none stops a drag
+// from scrolling the page underneath.
+function slayCropImage(dataUrl, opts = {}) {
+    const aspectDefault = typeof opts.aspect === 'number' ? opts.aspect : 0;   // w/h, 0 = free
+    // Free by default: forcing a frame onto a picture the user has not looked at
+    // yet is a decision made for them. The ratio buttons are right there.
+    const title = opts.title || 'Обрезать перед загрузкой';
+    const subtitle = opts.subtitle || '';
+
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-crop-ov';
+        ov.innerHTML = `
+            <div class="slay-crop-box" role="dialog" aria-label="${sanitizeForHtml(title)}">
+                <div class="slay-crop-head">
+                    <div>
+                        <div class="slay-crop-t">${sanitizeForHtml(title)}</div>
+                        ${subtitle ? `<div class="slay-crop-s">${sanitizeForHtml(subtitle)}</div>` : ''}
+                    </div>
+                    <button class="slay-crop-x" type="button" aria-label="Отмена"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="slay-crop-asp">
+                    <button class="slay-asp" data-a="0.75">3:4</button>
+                    <button class="slay-asp" data-a="1">1:1</button>
+                    <button class="slay-asp" data-a="0.667">2:3</button>
+                    <button class="slay-asp" data-a="1.333">4:3</button>
+                    <button class="slay-asp on" data-a="0">Свободно</button>
+                </div>
+                <div class="slay-crop-stage">
+                    <img class="slay-crop-img" alt="">
+                    <div class="slay-crop-rect">
+                        <span class="slay-crop-h nw" data-h="nw"></span><span class="slay-crop-h ne" data-h="ne"></span>
+                        <span class="slay-crop-h sw" data-h="sw"></span><span class="slay-crop-h se" data-h="se"></span>
+                    </div>
+                </div>
+                <div class="slay-crop-info"><span class="slay-crop-size">—</span><span class="slay-crop-cut"></span></div>
+                <div class="slay-crop-btns">
+                    <button class="slay-crop-b primary" data-act="crop">Обрезать</button>
+                    <button class="slay-crop-b" data-act="whole">Взять целиком</button>
+                    <button class="slay-crop-b ghost" data-act="reset" title="Сбросить рамку"><i class="fa-solid fa-rotate-left"></i></button>
+                </div>
+            </div>`;
+        document.body.appendChild(ov);
+
+        const box    = ov.querySelector('.slay-crop-box');
+        const stage  = ov.querySelector('.slay-crop-stage');
+        const img    = ov.querySelector('.slay-crop-img');
+        const rect   = ov.querySelector('.slay-crop-rect');
+        const sizeEl = ov.querySelector('.slay-crop-size');
+        const cutEl  = ov.querySelector('.slay-crop-cut');
+
+        let aspect = aspectDefault;
+        let b = { x: 0, y: 0, w: 0, h: 0 };            // stage pixels, for display
+        let nb = { x: 0, y: 0, w: 1, h: 1 };           // fractions of the picture — authoritative
+        const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+        const markAspect = () => {
+            for (const el of ov.querySelectorAll('.slay-asp')) {
+                el.classList.toggle('on', parseFloat(el.dataset.a) === aspect);
+            }
+        };
+
+        // Where the picture actually sits inside the stage. The stage is a flex
+        // box that centres the image, so a portrait in a wide stage leaves black
+        // bars either side — and measuring against the stage let the frame (and
+        // the crop maths) run out over that emptiness.
+        function imgBox() {
+            const sr = stage.getBoundingClientRect();
+            const ir = img.getBoundingClientRect();
+            return { x: ir.left - sr.left, y: ir.top - sr.top, w: ir.width, h: ir.height };
+        }
+
+        function fit() {
+            const box0 = imgBox();
+            if (!box0.w || !box0.h) return;
+            let w, h;
+            if (!aspect) { w = box0.w; h = box0.h; }
+            else if (box0.w / box0.h > aspect) { h = box0.h; w = h * aspect; }
+            else { w = box0.w; h = w / aspect; }
+            b = { x: box0.x + (box0.w - w) / 2, y: box0.y + (box0.h - h) / 2, w, h };
+            draw();
+        }
+
+        function draw() {
+            const box0 = imgBox();
+            if (!box0.w || !box0.h) return;
+            // The frame may never leave the picture: everything outside it is
+            // stage background, and cropping it would bake black bars into the ref.
+            b.w = clamp(b.w, 32, box0.w); b.h = clamp(b.h, 32, box0.h);
+            b.x = clamp(b.x, box0.x, box0.x + box0.w - b.w);
+            b.y = clamp(b.y, box0.y, box0.y + box0.h - b.h);
+            rect.style.left = b.x + 'px'; rect.style.top = b.y + 'px';
+            rect.style.width = b.w + 'px'; rect.style.height = b.h + 'px';
+            // Record the frame as fractions of the picture, every time it moves.
+            nb = {
+                x: (b.x - box0.x) / box0.w,
+                y: (b.y - box0.y) / box0.h,
+                w: b.w / box0.w,
+                h: b.h / box0.h,
+            };
+            if (img.naturalWidth) {
+                const sw = Math.round(nb.w * img.naturalWidth);
+                const sh = Math.round(nb.h * img.naturalHeight);
+                sizeEl.textContent = `${sw} × ${sh}`;
+                const cut = Math.max(0, Math.round((1 - nb.w * nb.h) * 100));
+                cutEl.textContent = cut ? `отброшено ${cut}%` : 'вся картинка';
+            }
+        }
+
+        // One pointer path for mouse and finger alike.
+        let drag = null;
+        stage.addEventListener('pointerdown', (e) => {
+            const h = e.target.closest('.slay-crop-h');
+            const inside = e.target === rect || rect.contains(e.target);
+            if (!h && !inside) return;
+            try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+            drag = { h: h ? h.dataset.h : null, sx: e.clientX, sy: e.clientY, b: { ...b } };
+            e.preventDefault();
+        });
+        stage.addEventListener('pointermove', (e) => {
+            if (!drag) return;
+            const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy, o = drag.b;
+            if (!drag.h) { b.x = o.x + dx; b.y = o.y + dy; draw(); return; }
+            // Resize from a corner, keeping the opposite corner pinned.
+            let nx = o.x, ny = o.y, nw = o.w, nh = o.h;
+            if (drag.h === 'se') { nw = o.w + dx; nh = aspect ? nw / aspect : o.h + dy; }
+            if (drag.h === 'sw') { nw = o.w - dx; nh = aspect ? nw / aspect : o.h + dy; nx = o.x + o.w - nw; }
+            if (drag.h === 'ne') { nw = o.w + dx; nh = aspect ? nw / aspect : o.h - dy; ny = o.y + o.h - nh; }
+            if (drag.h === 'nw') { nw = o.w - dx; nh = aspect ? nw / aspect : o.h - dy; nx = o.x + o.w - nw; ny = o.y + o.h - nh; }
+            if (nw < 32 || nh < 32) return;
+            b = { x: nx, y: ny, w: nw, h: nh };
+            draw();
+        });
+        const endDrag = (e) => { if (drag) { drag = null; try { stage.releasePointerCapture(e.pointerId); } catch (_) {} } };
+        stage.addEventListener('pointerup', endDrag);
+        stage.addEventListener('pointercancel', endDrag);
+
+        // Re-shape around the frame's current centre, and never larger than the
+        // picture — so switching 3:4 → 1:1 keeps you looking at the same spot.
+        function reshape() {
+            if (!aspect) { draw(); return; }
+            const box0 = imgBox();
+            if (!box0.w || !box0.h) return;
+            const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+            let w = Math.min(b.w, box0.w);
+            let h = w / aspect;
+            if (h > box0.h) { h = box0.h; w = h * aspect; }
+            b = { x: cx - w / 2, y: cy - h / 2, w, h };
+            draw();
+        }
+
+        ov.querySelector('.slay-crop-asp').addEventListener('click', (e) => {
+            const btn = e.target.closest('.slay-asp'); if (!btn) return;
+            aspect = parseFloat(btn.dataset.a);
+            markAspect();
+            reshape();
+        });
+
+        let settled = false;
+        const cleanups = [];
+        const finish = (val) => {
+            for (const fn of cleanups) { try { fn(); } catch (_) {} }
+            if (settled) return;
+            settled = true;
+            ov.remove();
+            document.removeEventListener('keydown', onKey, true);
+            resolve(val);
+        };
+        const onKey = (e) => {
+            if (e.key !== 'Escape' && e.key !== 'Enter') return;
+            // Capture phase + stop: Escape used to travel on to the wardrobe's
+            // own handler, so cropping something opened from the wardrobe closed
+            // the wardrobe too.
+            e.stopPropagation();
+            e.preventDefault();
+            if (e.key === 'Escape') finish(null);
+            else doCrop();
+        };
+        document.addEventListener('keydown', onKey, true);
+
+        function doCrop() {
+            if (!img.naturalWidth) return finish(dataUrl);
+            const NW = img.naturalWidth, NH = img.naturalHeight;
+            // Straight from the fractions the frame was drawn with — no second
+            // measurement, so nothing can have moved in between. Clamped so
+            // rounding can never ask for a pixel outside the image.
+            const cl = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+            let sx = Math.round(cl(nb.x, 0, 1) * NW);
+            let sy = Math.round(cl(nb.y, 0, 1) * NH);
+            let sw = Math.round(cl(nb.w, 0, 1) * NW);
+            let sh = Math.round(cl(nb.h, 0, 1) * NH);
+            sw = Math.max(1, Math.min(sw, NW - sx));
+            sh = Math.max(1, Math.min(sh, NH - sy));
+            // Whole picture selected — hand back the original bytes untouched so
+            // we never re-encode (and never lose) an image nobody wanted cropped.
+            if (sx <= 1 && sy <= 1 && sw >= NW - 2 && sh >= NH - 2) return finish(dataUrl);
+            try {
+                const c = document.createElement('canvas');
+                c.width = sw; c.height = sh;
+                c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+                const mime = /^data:image\/png/i.test(dataUrl) ? 'image/png' : 'image/jpeg';
+                finish(c.toDataURL(mime, mime === 'image/jpeg' ? 0.92 : undefined));
+            } catch (err) {
+                iigLog('WARN', 'crop failed, using original:', err?.message);
+                finish(dataUrl);
+            }
+        }
+
+        ov.querySelector('.slay-crop-btns').addEventListener('click', (e) => {
+            const btn = e.target.closest('.slay-crop-b'); if (!btn) return;
+            if (btn.dataset.act === 'crop') doCrop();
+            if (btn.dataset.act === 'whole') finish(dataUrl);
+            if (btn.dataset.act === 'reset') fit();
+        });
+        ov.querySelector('.slay-crop-x').addEventListener('click', () => finish(null));
+        // The overlay is a child of <body>, so every click inside it also reaches
+        // the document-level "clicked outside" handlers — which promptly closed
+        // the wardrobe modal and the ref popups. Pressing "Обрезать" tore down
+        // everything underneath. Swallow the whole family of pointer events at
+        // the overlay: the buttons' own listeners run first in the target phase,
+        // and nothing escapes afterwards. pointerdown on the backdrop itself
+        // still means cancel.
+        // Ignore backdrop taps for a moment after opening. On iOS the touch that
+        // dismisses the native photo picker arrives here as a pointerdown on the
+        // freshly-created overlay, which cancelled the crop before it was seen.
+        const openedAt = Date.now();
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) {
+            ov.addEventListener(type, (e) => {
+                if (type === 'pointerdown' && e.target === ov && Date.now() - openedAt > 400) finish(null);
+                e.stopPropagation();
+            });
+        }
+
+        img.addEventListener('load', () => { markAspect(); fit(); });
+        // If the browser cannot decode it (an odd format, a photo too large for
+        // the device), don't sit there with an empty frame — say so and let the
+        // upload continue uncropped rather than dying silently.
+        img.addEventListener('error', () => {
+            iigLog('WARN', 'crop: image failed to decode, continuing without cropping');
+            toastr.info('Не удалось открыть картинку для обрезки — загружаю как есть', 'SLAY Images', { timeOut: 3000 });
+            finish(dataUrl);
+        });
+        img.src = dataUrl;
+        // Refit on resize, and stop when the dialog is gone — otherwise the
+        // listener keeps firing against detached nodes for the rest of the session.
+        addEventListener('resize', fit, { passive: true });
+        cleanups.push(() => removeEventListener('resize', fit));
+    });
+}
+
+// Should we offer the crop step at all? Opt-out, phrased as the user asked:
+// the checkbox says "не предлагать", so the stored flag is the skip.
+// Crop a picture that is already saved. Writes a NEW file rather than replacing
+// the old one: the same path can be referenced by another character, another
+// look or a slot in a different chat, and silently reshaping it under them would
+// be the sort of quiet data damage we spent today removing. The old file stays
+// on disk for "найти ничьи картинки" to sweep up later.
+// Returns the new path, the original path if nothing changed, or null on cancel.
+async function slayRecropExisting(path, opts = {}) {
+    if (!path) return null;
+    try {
+        const b64 = await loadRefImageAsBase64(path);
+        if (!b64) { toastr.error('Не удалось открыть картинку', 'SLAY Images'); return null; }
+        const mime = detectImageMimeFromBase64(b64);
+        const out = await slayCropImage(`data:${mime};base64,${b64}`, {
+            aspect: typeof opts.aspect === 'number' ? opts.aspect : 0,
+            title: opts.title || 'Обрезать картинку',
+            subtitle: opts.subtitle || 'Исходный файл останется на месте',
+        });
+        if (out === null) return null;
+        const cropped = String(out).split(',')[1];
+        if (!cropped || cropped === b64) return path;          // untouched
+        const t = toastr.info('Сохраняю...', 'SLAY Images', { timeOut: 0, extendedTimeOut: 0 });
+        try {
+            const hashes = await computeRefHashes(cropped);
+            const payload = hashes.compressed || await compressBase64Image(cropped, 768, 0.8);
+            const saved = await saveRefImageToFile(payload, opts.label || 'crop', { skipDedupCheck: true });
+            recordRefHashes(hashes, saved);
+            return saved;
+        } finally { try { toastr.clear(t); } catch (_) {} }
+    } catch (e) {
+        toastr.error('Обрезка не удалась: ' + (e?.message || e), 'SLAY Images');
+        return null;
+    }
+}
+
+// Small chooser: a question with several named answers, because slayConfirm's
+// yes/no forces "delete everything or nothing" on a decision that has three
+// sensible outcomes. Returns the chosen key, or null.
+function slayChoose(title, text, options) {
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-choose-ov';
+        ov.innerHTML = `
+            <div class="slay-choose-box">
+                <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
+                <div class="slay-choose-x">${sanitizeForHtml(text).replace(/@BR@/g, '<br>')}</div>
+                <div class="slay-choose-btns">
+                    ${options.map(o => `<button class="slay-choose-b${o.danger ? ' danger' : ''}${o.primary ? ' primary' : ''}" data-k="${sanitizeForHtml(o.key)}">${sanitizeForHtml(o.label)}</button>`).join('')}
+                    <button class="slay-choose-b ghost" data-k="">Отмена</button>
+                </div>
+            </div>`;
+        document.body.appendChild(ov);
+        let done = false;
+        const finish = (k) => { if (done) return; done = true; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(k || null); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(null); } };
+        document.addEventListener('keydown', onKey, true);
+        // Same isolation the crop overlay needs: these clicks must not reach the
+        // document-level handlers that close the wardrobe and the ref popups.
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) {
+            ov.addEventListener(type, (e) => {
+                if (type === 'click') {
+                    const b = e.target.closest('.slay-choose-b');
+                    if (b) finish(b.dataset.k);
+                    else if (e.target === ov) finish(null);
+                }
+                e.stopPropagation();
+            });
+        }
+    });
+}
+
+function slayCropEnabled() {
+    try { return getSettings().skipCrop !== true; } catch (_) { return true; }
+}
+
+// Convenience wrapper for the upload paths: hands back raw base64, not a data
+// URL, because that is what every caller already works with. `null` means the
+// user cancelled and the upload must stop.
+async function slayMaybeCrop(rawBase64, opts = {}) {
+    if (!slayCropEnabled()) return rawBase64;
+    const mime = detectImageMimeFromBase64(rawBase64);
+    const out = await slayCropImage(`data:${mime};base64,${rawBase64}`, opts);
+    if (out === null) return null;
+    return String(out).split(',')[1] || rawBase64;
+}
+
 async function slayPromptInput(title, defaultValue = '') {
+    // A leftover toast paints above the popup layer and covers the very
+    // field the user is meant to type into. Clear the area before showing.
+    try { toastr.clear(); } catch (_) {}
     const ctx = SillyTavern.getContext();
     try {
         if (typeof ctx.callGenericPopup === 'function') {
@@ -3505,7 +4731,146 @@ async function slayPromptInput(title, defaultValue = '') {
     return v === null ? null : v;
 }
 
+// Name AND note in ONE dialog. Asking for them in two prompts back to back made
+// saving a portrait feel like an interrogation, and the second box gave no hint
+// that it belonged to the same action. Returns { name, note } or null if cancelled.
+// Save dialog for a portrait: is this a NEW character or ANOTHER look for one
+// we already know? The answer is usually obvious from the name already typed
+// into the slot, so we work it out first and let the user override.
+// Returns { charId, names, label } or null.
+// A <select> of seventeen people is unusable and only gets worse. This is a
+// filter box over a short list instead: type any part of a name and only those
+// who answer to it remain. Seeded by the caller, so the common case opens
+// already narrowed to the right person.
+function swBuildCharPicker(chars, opts) {
+    opts = opts || {};
+    const esc = sanitizeForHtml;
+    const box = document.createElement('div');
+    box.innerHTML = `
+        <input type="text" class="text_pole slk-search" placeholder="\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u0438\u043c\u0435\u043d\u0438" value="${esc(opts.seed || '')}" style="margin-bottom:5px;">
+        <div class="slk-list"></div>
+        <div class="slk-none" style="display:none;">\u041d\u0438\u043a\u0442\u043e \u043d\u0435 \u043f\u043e\u0434\u0445\u043e\u0434\u0438\u0442</div>`;
+    const search = box.querySelector('.slk-search');
+    const list = box.querySelector('.slk-list');
+    const none = box.querySelector('.slk-none');
+    let chosen = opts.selectedId || null;
+
+    const draw = () => {
+        const q = search.value.trim().toLowerCase();
+        // Match any single name, the same way a ref matches a prompt.
+        const hits = !q ? chars : chars.filter(c => swNameList(c.names).some(n => n.toLowerCase().includes(q)));
+        if (!hits.some(c => c.id === chosen)) chosen = hits.length ? hits[0].id : null;
+        none.style.display = hits.length ? 'none' : '';
+        list.innerHTML = hits.map(c => `
+            <button type="button" class="slk-row${c.id === chosen ? ' on' : ''}" data-id="${esc(c.id)}">
+                <img src="${esc(c.looks[0].path)}" alt="" loading="lazy">
+                <span class="slk-row-n">${esc(c.names)}</span>
+                <span class="slk-row-c">${c.looks.length}</span>
+            </button>`).join('');
+        for (const row of list.querySelectorAll('.slk-row')) {
+            row.addEventListener('click', (e) => { e.preventDefault(); chosen = row.dataset.id; draw(); });
+        }
+    };
+    search.addEventListener('input', draw);
+    draw();
+    return { el: box, get value() { return chosen; } };
+}
+
+async function slayPromptSaveLook(typedNames, path) {
+    // A leftover toast paints above the popup layer and covers the very
+    // field the user is meant to type into. Clear the area before showing.
+    try { toastr.clear(); } catch (_) {}
+    const ctx = SillyTavern.getContext();
+    const chars = getSavedChars();
+    const byPath = findSavedCharByPath(path);
+    const match = byPath || findSavedCharByNames(typedNames);
+    const esc2 = (v) => String(v == null ? '' : v)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    try {
+        if (typeof ctx.callGenericPopup === 'function') {
+            const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:4px;';
+            wrap.innerHTML = `
+                <div style="font-size:15px;font-weight:600;color:#f472b6;margin-bottom:6px;" id="slk_title"></div>
+                ${match ? `<div style="display:flex;gap:8px;align-items:flex-start;background:rgba(244,114,182,.10);border:1px solid rgba(244,114,182,.28);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;margin-bottom:8px;">
+                    <span style="color:#f472b6;">\u2665</span>
+                    <div><b>${esc2(match.names)}</b> \u2014 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c, ${match.looks.length} \u043e\u0431\u0440\u0430\u0437(\u0430).<br>
+                    <span style="opacity:.6;">\u041f\u043e\u0445\u043e\u0436\u0435, \u044d\u0442\u043e \u0435\u0449\u0451 \u043e\u0434\u0438\u043d \u0435\u0433\u043e \u043e\u0431\u0440\u0430\u0437.</span></div>
+                </div>` : ''}
+                ${chars.length ? `<div style="display:flex;gap:4px;background:rgba(0,0,0,.25);padding:3px;border-radius:9px;margin-bottom:6px;">
+                    <button type="button" id="slk_new" style="flex:1;padding:6px;border:none;border-radius:7px;background:transparent;color:#bbb;font:inherit;font-size:12px;cursor:pointer;">\u041d\u043e\u0432\u044b\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436</button>
+                    <button type="button" id="slk_add" style="flex:1;padding:6px;border:none;border-radius:7px;background:transparent;color:#bbb;font:inherit;font-size:12px;cursor:pointer;">\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437</button>
+                </div>` : ''}
+                <div id="slk_f_names">
+                    <label style="font-size:12px;opacity:.8;">\u0418\u043c\u0435\u043d\u0430 \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e</label>
+                    <input type="text" id="slk_names" class="text_pole" value="${esc2(typedNames)}" placeholder="\u0414\u0435\u043d, \u0414\u0435\u043d\u0438\u0441, \u0414\u0435\u043d\u0447\u0438\u043a">
+                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">\u043f\u043e \u043d\u0438\u043c \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435 \u0443\u0437\u043d\u0430\u0451\u0442 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430 \u0432 \u043f\u0440\u043e\u043c\u043f\u0442\u0435</div>
+                </div>
+                <div id="slk_f_who" style="display:none;">
+                    <label style="font-size:12px;opacity:.8;">\u041a\u043e\u043c\u0443</label>
+                    <div id="slk_who_host"></div>
+                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">\u0438\u043c\u0435\u043d\u0430 \u0443\u0436\u0435 \u0437\u0430\u043f\u0438\u0441\u0430\u043d\u044b \u2014 \u0432\u043f\u0438\u0441\u044b\u0432\u0430\u0442\u044c \u0437\u0430\u043d\u043e\u0432\u043e \u043d\u0435 \u043d\u0443\u0436\u043d\u043e</div>
+                </div>
+                <label style="font-size:12px;opacity:.8;">\u041e\u0431\u0440\u0430\u0437</label>
+                <input type="text" id="slk_label" class="text_pole" value="" placeholder="\u041c\u0430\u0444\u0438\u044f, \u041a\u043e\u043b\u0434\u043e\u0432\u0441\u0442\u0432\u043e\u0440\u0435\u0446, Basic">
+                <div style="font-size:11px;opacity:.55;">\u043f\u043e\u0434\u043f\u0438\u0441\u044c \u043f\u043e\u0434 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u043e\u0439, \u0432 \u043f\u0440\u043e\u043c\u043f\u0442 \u043d\u0435 \u043f\u043e\u043f\u0430\u0434\u0430\u0435\u0442</div>`;
+
+            let mode = match ? 'add' : 'new';
+            const bNew = wrap.querySelector('#slk_new'), bAdd = wrap.querySelector('#slk_add');
+            const setMode = (m) => {
+                mode = m;
+                wrap.querySelector('#slk_f_names').style.display = m === 'new' ? '' : 'none';
+                wrap.querySelector('#slk_f_who').style.display = m === 'add' ? '' : 'none';
+                wrap.querySelector('#slk_title').textContent = m === 'add'
+                    ? '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437'
+                    : '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430';
+                if (bNew && bAdd) {
+                    for (const [b, k] of [[bNew, 'new'], [bAdd, 'add']]) {
+                        const on = k === m;
+                        b.style.background = on ? 'rgba(244,114,182,.22)' : 'transparent';
+                        b.style.color = on ? '#f472b6' : '#bbb';
+                        b.style.fontWeight = on ? '600' : '400';
+                    }
+                }
+            };
+            if (bNew) bNew.addEventListener('click', (e) => { e.preventDefault(); setMode('new'); });
+            if (bAdd) bAdd.addEventListener('click', (e) => { e.preventDefault(); setMode('add'); });
+            setMode(mode);
+            // Seed the filter with the name already in the slot: saving
+            // "Dana, Дана" opens the list showing only the Danas.
+            const picker = swBuildCharPicker(chars, {
+                selectedId: match ? match.id : null,
+                seed: swNameList(match ? match.names : typedNames)[0] || '',
+            });
+            const whoHost = wrap.querySelector('#slk_who_host');
+            if (whoHost) whoHost.appendChild(picker.el);
+            const whoSel = { get value() { return picker.value; } };
+            // Re-saving a picture that is already filed: offer its current label.
+            if (byPath) {
+                const cur = byPath.looks.find(l => l.path === path);
+                if (cur) wrap.querySelector('#slk_label').value = cur.label || '';
+            }
+
+            const okd = await ctx.callGenericPopup(wrap, CONFIRM);
+            if (!okd) return null;
+            const label = (wrap.querySelector('#slk_label').value || '').trim();
+            if (mode === 'add' && whoSel) return { charId: whoSel.value, names: '', label };
+            return { charId: null, names: (wrap.querySelector('#slk_names').value || '').trim(), label };
+        }
+    } catch (e) { iigLog('WARN', 'save-look popup failed, falling back:', e.message); }
+
+    const n = window.prompt('\u0418\u043c\u0435\u043d\u0430 \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e:', match ? match.names : typedNames);
+    if (n === null) return null;
+    const lb = window.prompt('\u041f\u043e\u0434\u043f\u0438\u0441\u044c \u043e\u0431\u0440\u0430\u0437\u0430 (\u041c\u0430\u0444\u0438\u044f, Basic):', '');
+    return { charId: match ? match.id : null, names: n.trim(), label: lb === null ? '' : lb.trim() };
+}
+
 async function slayConfirm(text) {
+    // A leftover toast paints above the popup layer and covers the very
+    // field the user is meant to type into. Clear the area before showing.
+    try { toastr.clear(); } catch (_) {}
     const ctx = SillyTavern.getContext();
     try {
         if (typeof ctx.callGenericPopup === 'function') {
@@ -3586,9 +4951,31 @@ const IIG_SRC_REMAP_KEY = 'slay_iig_src_remap_v1';
 // ~150KB of localStorage, acceptable.
 const IIG_SRC_REMAP_MAX = 1000;
 
+// Entries expire, and the parsed map is cached. Before: nothing ever removed a
+// mapping — a rename recorded a year ago in a since-deleted chat still applied
+// to anything with a matching path — and resolveSrcRemap re-parsed the whole
+// blob (up to ~150 KB) once per image on every chat load.
+const IIG_SRC_REMAP_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
+let _srcRemapCache = null;
+
 function loadSrcRemap() {
-    try { return JSON.parse(localStorage.getItem(IIG_SRC_REMAP_KEY) || '{}') || {}; }
-    catch (e) { return {}; }
+    if (_srcRemapCache) return _srcRemapCache;
+    try {
+        const raw = JSON.parse(localStorage.getItem(IIG_SRC_REMAP_KEY) || '{}') || {};
+        const now = Date.now();
+        const fresh = {};
+        let dropped = 0;
+        for (const [k, v] of Object.entries(raw)) {
+            // Legacy entries are bare strings with no timestamp — keep them once,
+            // stamped as of now, so nobody loses working self-heal on upgrade.
+            if (typeof v === 'string') { fresh[k] = { to: v, at: now }; continue; }
+            if (v && typeof v.to === 'string' && (now - (v.at || 0)) < IIG_SRC_REMAP_TTL_MS) fresh[k] = v;
+            else dropped++;
+        }
+        if (dropped) iigLog('INFO', `src remap: dropped ${dropped} expired entr${dropped === 1 ? 'y' : 'ies'}`);
+        _srcRemapCache = fresh;
+        return fresh;
+    } catch (e) { _srcRemapCache = {}; return _srcRemapCache; }
 }
 
 function recordSrcRemap(oldSrc, newSrc) {
@@ -3598,9 +4985,10 @@ function recordSrcRemap(oldSrc, newSrc) {
     if (!oldSrc.includes('/user/images/') || !newSrc.includes('/user/images/')) return;
     try {
         const map = loadSrcRemap();
+        const now = Date.now();
         // Collapse chains: if something already maps to oldSrc, point it at newSrc
-        for (const k of Object.keys(map)) { if (map[k] === oldSrc) map[k] = newSrc; }
-        map[oldSrc] = newSrc;
+        for (const k of Object.keys(map)) { if (map[k]?.to === oldSrc) map[k] = { to: newSrc, at: now }; }
+        map[oldSrc] = { to: newSrc, at: now };
         const keys = Object.keys(map);
         if (keys.length > IIG_SRC_REMAP_MAX) {
             for (const k of keys.slice(0, keys.length - IIG_SRC_REMAP_MAX)) delete map[k];
@@ -3614,7 +5002,7 @@ function resolveSrcRemap(src) {
     const map = loadSrcRemap();
     let current = src;
     for (let hops = 0; hops < 10; hops++) {
-        const next = map[current];
+        const next = map[current]?.to;
         if (!next || next === current) break;
         current = next;
     }
@@ -3626,7 +5014,10 @@ function resolveSrcRemap(src) {
 // rebind hooks that re-attach regen buttons after edits/swipes/reloads.
 function healStaleImageSrcs(root) {
     if (!root) return;
-    const imgs = root.querySelectorAll('img[src*="/user/images/"]');
+    // Only OUR images. The selector used to match every /user/images/ picture in
+    // the chat, so this pass rewrote — and force-saved — images belonging to
+    // other extensions and to the user's own manual edits.
+    const imgs = root.querySelectorAll('img[data-iig-instruction][src*="/user/images/"]');
     if (!imgs.length) return;
     const ctx = SillyTavern.getContext();
     let healed = 0;
@@ -3689,6 +5080,7 @@ function attachRegenButton(imgEl) {
     btn.innerHTML = '<i class="fa-solid fa-rotate"></i>';
     btn.addEventListener('click', async (e) => {
         e.stopPropagation(); e.preventDefault();
+        if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
         if (btn.classList.contains('iig-regen-busy')) return;
         btn.classList.add('iig-regen-busy');
         const icon = btn.querySelector('i');
@@ -3832,8 +5224,25 @@ function attachRegenButton(imgEl) {
 
 // Scan a message element (or root) for generated images and attach regen buttons to them.
 // Safe to call on already-bound images (attachRegenButton is idempotent).
-function attachRegenButtonsInRoot(root) {
+// Remove every control this extension injected into the chat. Called when the
+// user switches generation off, so the UI matches the setting immediately
+// instead of only after a reload — and so our buttons stop sitting on top of
+// another extension's images.
+function iigStripOurUi() {
+    for (const b of document.querySelectorAll('#chat .iig-regen-btn, #chat .iig-regenerate-btn')) b.remove();
+    for (const img of document.querySelectorAll('#chat img[data-iig-instruction]')) delete img.dataset.iigRegenBound;
+}
+
+function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
     if (!root) return;
+    // "Off" has to mean off. This pass heals srcs, rewrites error placeholders
+    // and attaches regen buttons — and it used to run even with generation
+    // disabled. Because every extension in this family uses the same
+    // data-iig-instruction tag format, a disabled SLAY was grabbing ANOTHER
+    // extension's images: attaching its buttons to them, replacing their error
+    // cards with its own, and rewriting their srcs into the saved chat. Clicking
+    // any of those buttons then generated through SLAY's API while SLAY was off.
+    if (!getSettings().enabled) return;
 
     // ZEROTH: self-heal any resurrected stale srcs (superseded by a regen).
     // Runs before everything else so the rest of this pass — and the user —
@@ -3844,10 +5253,18 @@ function attachRegenButtonsInRoot(root) {
     // OR the same img wrapped into a <span class="iig-img-wrap"> (if some earlier pass
     // gave them a regen overlay from an older version). Also catch broken-img fallbacks
     // (src like /error.svg that 404'd).
+    // Deliberately NOT requiring [data-iig-instruction]: a tag whose instruction
+    // attribute got mangled (an apostrophe in the prompt truncates it) would
+    // otherwise stay a broken-image icon forever, which is exactly what users
+    // reported as "my pictures disappeared". Without the instruction the retry
+    // button can't refire, but the user still gets a readable error card instead
+    // of a dead square. 'error.svg' and the legacy markers are matched too, so
+    // chats already damaged by older builds heal on their next render.
     const errorSelectors = [
-        'img.iig-error-image[data-iig-instruction]',
-        'img[data-iig-instruction][src*="error.svg"]',
-        'img[data-iig-instruction][src*="[IMG:ERROR"]',
+        'img.iig-error-image',
+        'img[data-iig-error]',
+        'img[src*="error.svg"]',
+        'img[src*="[IMG:ERROR"]',
     ].join(', ');
     for (const stale of root.querySelectorAll(errorSelectors)) {
         const instr = stale.getAttribute('data-iig-instruction') || '';
@@ -3856,6 +5273,25 @@ function attachRegenButtonsInRoot(root) {
         // replace the WHOLE wrap, not just the img — otherwise the overlay circle stays visible.
         const wrap = stale.closest('.iig-img-wrap');
         (wrap || stale).replaceWith(errorEl);
+    }
+
+    // SECOND: revive tags whose generation never finished. A phone that discards
+    // a backgrounded tab (or ST restarting) kills the in-flight request while
+    // message.mes still holds the unfilled [IMG:GEN] tag — nothing rewrote it,
+    // so on the next load the user got no image, no error and no button at all,
+    // just a gap where a picture should be. Only on load / chat-switch passes:
+    // during an active generation the placeholder is a <div>, not one of these,
+    // but the flag keeps us from ever racing a live request.
+    if (rehydratePending) {
+        const pending = root.querySelectorAll('img[data-iig-instruction][src*="[IMG:GEN"], img[data-iig-instruction][src=""]');
+        for (const el of pending) {
+            const mesEl = el.closest('.mes');
+            const mid = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : NaN;
+            if (Number.isInteger(mid) && processingMessages.has(mid)) continue;
+            const instr = el.getAttribute('data-iig-instruction') || '';
+            const errorEl = createErrorPlaceholder(`iig-interrupted-${Date.now()}`, 'Генерация была прервана — вкладка закрылась или связь оборвалась', { fullMatch: `data-iig-instruction='${instr}'` });
+            (el.closest('.iig-img-wrap') || el).replaceWith(errorEl);
+        }
     }
 
     // THEN: attach regen button to normal generated images. Skip anything error-ish.
@@ -4126,7 +5562,22 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         } catch (error) {
             lastError = error;
             console.error(`[IIG] Attempt ${attempt + 1} failed:`, error);
-            const isRetryable = error.message?.includes('429') || error.message?.includes('503') || error.message?.includes('502') || error.message?.includes('504') || error.message?.includes('timeout') || error.message?.includes('network');
+            // Case-insensitive, and matching what browsers ACTUALLY say. The old
+            // test looked for 'timeout'/'network' and matched none of the real
+            // connection failures: Android Chrome throws "Failed to fetch", iOS
+            // Safari "Load failed", our own iOS path "Network error (iOS)" (capital
+            // N) and "Request timed out ..." ("timed out", not "timeout"). So on
+            // mobile — the one place connections actually drop — a user who had
+            // deliberately turned retries on never got a single one.
+            // NOTE: this only makes the user's own maxRetries setting work. We do
+            // NOT retry beyond it: a retry is a paid request, and on a timeout the
+            // server may well have generated and billed the image already.
+            const m = String(error.message || '').toLowerCase();
+            const isRetryable = /\b(429|500|502|503|504)\b/.test(m)
+                || m.includes('failed to fetch') || m.includes('load failed')
+                || m.includes('network') || m.includes('networkerror')
+                || m.includes('timed out') || m.includes('timeout')
+                || error.name === 'AbortError';
             if (!isRetryable || attempt === maxRetries) break;
             const delay = baseDelay * Math.pow(2, attempt);
             onStatusUpdate?.(`Повтор через ${delay / 1000}с...`);
@@ -4230,41 +5681,91 @@ async function parseImageTags(text, options = {}) {
     return tags;
 }
 
-async function checkFileExists(path) { try { const r = await fetch(path, { method: 'HEAD' }); return r.ok; } catch (e) { return false; } }
+// Returns TRUE unless the server explicitly says the file is gone.
+// A dropped request, a busy server or a suspended tab must NOT read as
+// "file missing": the caller reacts to `false` by regenerating the image,
+// and a failed regeneration used to overwrite the still-valid path with an
+// error marker. That is how a phone-hosted user lost images that were sitting
+// on disk the whole time. Uncertainty never earns the right to destroy data.
+async function checkFileExists(path) {
+    try {
+        const r = await fetch(path, { method: 'HEAD' });
+        if (r.status === 404 || r.status === 410) return false;   // genuinely gone
+        return true;                                              // ok, or unknown → leave alone
+    } catch (e) {
+        iigLog('WARN', `checkFileExists: request failed for ${String(path).slice(-50)} — assuming the file is fine`);
+        return true;
+    }
+}
 
 // ── Error image path ──
+// Persistence marker for a failed generation: a 1×1 transparent GIF, inline.
+// Self-contained, so it cannot 404 no matter where the extension folder lives
+// or how it is capitalised — unlike the old error.svg path, which getErrorImagePath()
+// could never resolve (ST loads extensions via import(), so there is no <script>
+// tag to derive a path from; the stylesheet probe matches lowercase 'slay' but
+// the folder is "SLAYimages"; and the hardcoded fallback says "SLAYImages").
+// Windows hid the bug because its filesystem ignores case — everyone on Linux,
+// Termux or an iPhone host got a broken-image icon instead of our error card.
+// What the user actually SEES is createErrorPlaceholder(), swapped in by
+// attachRegenButtonsInRoot on every render pass; this src only has to persist
+// in message.mes and be recognisable later.
+const IIG_ERROR_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+// Is this src a real generated file worth protecting — as opposed to a marker,
+// a placeholder or an unfilled tag? Used to refuse destructive overwrites.
+function iigIsLiveImagePath(src) {
+    const s = String(src || '');
+    if (!s || s.startsWith('data:') || s.includes('[IMG:') || s.includes('error.svg')) return false;
+    return s.startsWith('/') && s.length > 5;
+}
+
+// Every src a failed tag may carry, across builds: the current marker, whatever
+// this install resolves error.svg to, and the legacy hardcoded guesses. Used
+// when a retry succeeds and we need to find the marker to replace.
+function iigErrorSrcCandidates() {
+    return [IIG_ERROR_SRC, getErrorImagePath(), ...IIG_LEGACY_ERROR_PATHS];
+}
+
+const IIG_LEGACY_ERROR_PATHS = [
+    '/scripts/extensions/third-party/SLAYImages/error.svg',
+    '/scripts/extensions/third-party/SLAYimages/error.svg',
+    '/scripts/extensions/third-party/SLAYImages_v4_draft/error.svg',
+    '/scripts/extensions/third-party/SLAYImages_v4_collage/error.svg',
+    '/scripts/extensions/third-party/notsosillynotsoimages/error.svg',
+    '/scripts/extensions/third-party/sillyimages/error.svg',
+];
+
 let _cachedErrorImagePath = null;
 function getErrorImagePath() {
     if (_cachedErrorImagePath) return _cachedErrorImagePath;
-    const scripts = document.querySelectorAll('script[src*="index.js"]');
-    for (const script of scripts) {
+    // Only used to RECOGNISE legacy error tags now — new failures are written
+    // with IIG_ERROR_SRC, which needs no path at all. Matching is case-INSENSITIVE:
+    // ST names the folder after the repo ("SLAYimages"), which contains no
+    // lowercase "slay", so the old case-sensitive probes never matched and every
+    // install fell through to a hardcoded guess with the wrong capitalisation.
+    // (The <script> probe below can never match either — ST loads extensions via
+    // await import(), which creates no script element — but it costs nothing and
+    // covers builds that inject a tag.)
+    const matchesUs = (p) => {
+        const s = p.toLowerCase();
+        return s.includes('slay') || s.includes('sillyimages') || s.includes('notsosillynotsoimages') || s.includes('inline_image_gen');
+    };
+    for (const script of document.querySelectorAll('script[src*="index.js"]')) {
         const src = script.getAttribute('src') || '';
-        if (src.includes('slay') || src.includes('sillyimages') || src.includes('notsosillynotsoimages') || src.includes('inline_image_gen')) {
+        if (matchesUs(src)) {
             _cachedErrorImagePath = `${src.substring(0, src.lastIndexOf('/'))}/error.svg`;
             return _cachedErrorImagePath;
         }
     }
-    const links = document.querySelectorAll('link[rel="stylesheet"][href*="style.css"]');
-    for (const link of links) {
+    for (const link of document.querySelectorAll('link[rel="stylesheet"][href*="style.css"]')) {
         const href = link.getAttribute('href') || '';
-        if (href.includes('slay') || href.includes('sillyimages') || href.includes('notsosillynotsoimages')) {
+        if (matchesUs(href)) {
             _cachedErrorImagePath = `${href.substring(0, href.lastIndexOf('/'))}/error.svg`;
             return _cachedErrorImagePath;
         }
     }
-    const possiblePaths = [
-        '/scripts/extensions/third-party/SLAYImages/error.svg',
-        '/scripts/extensions/third-party/SLAYImages_v4_draft/error.svg',
-        '/scripts/extensions/third-party/SLAYImages_v4_collage/error.svg',
-        '/scripts/extensions/third-party/notsosillynotsoimages/error.svg',
-        '/scripts/extensions/third-party/sillyimages/error.svg',
-    ];
-    _cachedErrorImagePath = possiblePaths[0];
-    (async () => {
-        for (const path of possiblePaths) {
-            try { const resp = await fetch(path, { method: 'HEAD' }); if (resp.ok) { _cachedErrorImagePath = path; return; } } catch (e) { }
-        }
-    })();
+    _cachedErrorImagePath = IIG_LEGACY_ERROR_PATHS[0];
     return _cachedErrorImagePath;
 }
 
@@ -4337,6 +5838,7 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
 // Replace error placeholder with loading, run generateImageWithRetry, then swap to final image
 // (or back to a new error placeholder if it fails again).
 async function retryFailedGeneration(errorEl, instructionJsonStr) {
+    if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
     if (!errorEl || !errorEl.isConnected) return;
     if (errorEl.dataset.iigRetrying === '1') return;
     errorEl.dataset.iigRetrying = '1';
@@ -4391,8 +5893,13 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         // bring the error placeholder back every time the user came back to
         // the chat.
         if (message) {
-            const errorImgPath = getErrorImagePath();
-            let replaced = replaceImageSrcEverywhere(message, errorImgPath, imagePath);
+            // Try every marker a failed tag may carry: the current inline one,
+            // whatever this install resolves error.svg to, and the legacy
+            // hardcoded paths — chats written by older builds still hold those.
+            let replaced = false;
+            for (const cand of iigErrorSrcCandidates()) {
+                if (cand && replaceImageSrcEverywhere(message, cand, imagePath)) replaced = true;
+            }
             // LEGACY format: failed old-style tags are stored as literal
             // [IMG:ERROR:reason] in the message text — there is no error.svg src
             // to replace, so the block above no-ops and the retry result never
@@ -4428,6 +5935,10 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         const newError = createErrorPlaceholder(tagId, errorMsg, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
         if (loading.isConnected) loading.replaceWith(newError);
         toastr.error(`Ошибка: ${errorMsg}`, 'SLAY Images');
+    } finally {
+        // Retry is the third path that fills the context-ref memo; only the
+        // automatic one ever emptied it.
+        if (Number.isInteger(messageId)) clearContextRefCache(messageId);
     }
 }
 
@@ -4536,8 +6047,20 @@ async function processMessageTags(messageId) {
             if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
             loadingPlaceholder.replaceWith(errorPlaceholder);
             if (tag.isNewFormat) {
-                const errorTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${getErrorImagePath()}"`);
-                replaceTagInMessageSource(message, tag, errorTag);
+                // NEVER trade a working image for an error marker. If this tag
+                // already points at a real generated file, the failure is ours
+                // to show on screen — the message keeps the picture it had.
+                // Without this guard a transient failure permanently erased the
+                // path while the file sat safely on disk.
+                const prevSrc = (tag.fullMatch.match(/src\s*=\s*(['"])([^'"]*)\1/i) || [])[2] || '';
+                if (iigIsLiveImagePath(prevSrc)) {
+                    iigLog('WARN', `Tag ${index} failed but already had an image — keeping it, error shown in DOM only`);
+                } else {
+                    const errorTag = tag.fullMatch
+                        .replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${IIG_ERROR_SRC}"`)
+                        .replace(/^<img\b/i, '<img data-iig-error="1"');
+                    replaceTagInMessageSource(message, tag, errorTag);
+                }
             } else {
                 replaceTagInMessageSource(message, tag, `[IMG:ERROR:${error.message.substring(0, 50)}]`);
             }
@@ -4552,11 +6075,12 @@ async function processMessageTags(messageId) {
         try {
             recentlyProcessed.set(messageId, Date.now());
             await context.saveChat();
-        } finally { processingMessages.delete(messageId); }
+        } finally { processingMessages.delete(messageId); clearContextRefCache(messageId); }
     }
 }
 
 async function regenerateMessageImages(messageId) {
+    if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
     if (!message) { toastr.error('Сообщение не найдено', 'SLAY Images'); return; }
@@ -4571,16 +6095,29 @@ async function regenerateMessageImages(messageId) {
     const mesTextEl = messageElement.querySelector('.mes_text');
     if (!mesTextEl) { processingMessages.delete(messageId); return; }
 
+    // Snapshot the target elements ONCE, before anything is replaced. The old
+    // code re-queried inside the loop and indexed by the loop counter: as soon
+    // as one tag failed, its element had been swapped for a placeholder that
+    // carries no data-iig-instruction, the list got shorter, and every later
+    // tag addressed the wrong image — regenerating tag N onto image N+1, then
+    // silently skipping the last one with no message at all.
+    const targetEls = [...mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction]')];
+
     for (let index = 0; index < tags.length; index++) {
         const tag = tags[index];
         const tagId = `iig-regen-${messageId}-${index}`;
+        let loadingPlaceholder = null;
         try {
-            const allInstructionImgs = mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction]');
-            const existingEl = allInstructionImgs[index] || null;
+            const existingEl = targetEls[index] || null;
             if (existingEl) {
                 const instruction = existingEl.getAttribute('data-iig-instruction');
-                const loadingPlaceholder = createLoadingPlaceholder(tagId);
-                existingEl.replaceWith(loadingPlaceholder);
+                loadingPlaceholder = createLoadingPlaceholder(tagId);
+                // Replace the WRAPPER when there is one. Replacing only the <img>
+                // left the old span.iig-img-wrap and its regen button in place,
+                // still closed over the detached image — so a later click on that
+                // button updated the picture on screen but never wrote it to the
+                // chat, and the old image came back on the next reload.
+                (existingEl.closest('.iig-img-wrap') || existingEl).replaceWith(loadingPlaceholder);
                 const statusEl = loadingPlaceholder.querySelector('.iig-status');
                 const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
                 const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
@@ -4591,10 +6128,14 @@ async function regenerateMessageImages(messageId) {
                 if (isGeneratedVideoResult(result)) {
                     const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
                     const videoEl = createGeneratedMediaElement({ ...result, dataUrl: videoPath }, tag);
+                    // createGeneratedMediaElement doesn't carry the instruction over,
+                    // so without this the element vanishes from every later lookup.
+                    if (instruction && !videoEl.getAttribute('data-iig-instruction')) videoEl.setAttribute('data-iig-instruction', instruction);
                     if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
                     loadingPlaceholder.replaceWith(videoEl);
+                    targetEls[index] = videoEl;
                     const persisted = buildPersistedVideoTag(tag.fullMatch, videoPath);
-                    message.mes = message.mes.replace(tag.fullMatch, persisted);
+                    replaceTagInMessageSource(message, tag, persisted);
                 } else {
                     const imagePath = await saveImageToFile(result);
                     const img = document.createElement('img');
@@ -4602,18 +6143,37 @@ async function regenerateMessageImages(messageId) {
                     if (instruction) img.setAttribute('data-iig-instruction', instruction);
                     if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
                     loadingPlaceholder.replaceWith(img);
+                    targetEls[index] = img;
+                    // Give the fresh image its own regen button — the previous one
+                    // went out with the wrapper we just replaced.
+                    try { attachRegenButton(img); } catch (e) { iigLog('WARN', 'attachRegenButton after regen failed:', e.message); }
                     const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                    message.mes = message.mes.replace(tag.fullMatch, updatedTag);
+                    // All stores, not just message.mes: ST re-renders from swipes
+                    // and display_text, so patching one field alone let the old
+                    // image resurrect on the next swipe or reload.
+                    replaceTagInMessageSource(message, tag, updatedTag);
                 }
                 toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
             }
         } catch (error) {
             iigLog('ERROR', `Regen failed tag ${index}:`, error.message);
+            // Clean up after ourselves. Without this the spinner stayed in the
+            // message forever — the image gone from view, no error card, no retry
+            // button — which is what users described as "it ate my picture".
+            if (loadingPlaceholder) {
+                if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
+                const errorEl = createErrorPlaceholder(tagId, error.message, tag);
+                loadingPlaceholder.replaceWith(errorEl);
+                targetEls[index] = errorEl;
+            }
             toastr.error(`Ошибка: ${error.message}`, 'SLAY Images');
         }
     }
 
     processingMessages.delete(messageId);
+    // The automatic path clears this in its finally block; the regenerate button
+    // never did, so its entries sat in the map until the tab closed.
+    clearContextRefCache(messageId);
     recentlyProcessed.set(messageId, Date.now());
     await context.saveChat();
 }
@@ -4630,6 +6190,7 @@ function addRegenerateButton(messageElement, messageId) {
 }
 
 function addButtonsToExistingMessages() {
+    if (!getSettings().enabled) return;
     const context = SillyTavern.getContext();
     if (!context.chat || context.chat.length === 0) return;
     for (const el of document.querySelectorAll('#chat .mes')) {
@@ -4719,7 +6280,7 @@ function createSettingsUI() {
             <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
             <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
             <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div>
-            <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
+            <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
         </div>`;
     }
 
@@ -4734,6 +6295,7 @@ function createSettingsUI() {
         <div class="inline-drawer-content">
             <div class="iig-settings">
                 <label class="checkbox_label"><input type="checkbox" id="slay_enabled" ${settings.enabled ? 'checked' : ''}><span>Включить генерацию</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="slay_sw_enabled" ${swSettings.wardrobeEnabled !== false ? 'checked' : ''}><span>Включить гардероб</span></label>
                 <div id="slay_settings_body" class="${settings.enabled ? '' : 'iig-hidden'}">
                     <label class="checkbox_label"><input type="checkbox" id="slay_external_blocks" ${settings.externalBlocks ? 'checked' : ''}><span>External blocks (extblocks)</span></label>
                     <hr>
@@ -4748,7 +6310,8 @@ function createSettingsUI() {
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><input type="text" id="slay_model" class="text_pole flex1" list="slay_model_list" placeholder="введи название или выбери из списка" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><datalist id="slay_model_list"></datalist><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                    <label class="checkbox_label" id="slay_manual_model_row" style="margin-top:2px;"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
                     <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
                 </div>
                 <hr>
@@ -4764,33 +6327,47 @@ function createSettingsUI() {
                     </div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option></select></div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
-                    <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;"><i class="fa-solid fa-palette"></i> Выбрать</div></div></div>
+                    <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
                 </div>
 
                 <!-- NPC refs -->
                 <div id="slay_refs_section" class="iig-refs">
-                    <h4><i class="fa-solid fa-user-group"></i> Референсы персонажей</h4>
-                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
+                    <h4 class="iig-refs-h4">
+                        <span><i class="fa-solid fa-user-group"></i> Референсы персонажей</span>
+                        <button type="button" id="slay_saved_toggle" class="iig-saved-toggle" title="Сохранённые персонажи — портреты с именами, годятся для любого чата">
+                            <i class="fa-solid fa-heart"></i> Сохранённые <span id="slay_saved_count" class="iig-saved-count"></span>
+                        </button>
+                    </h4>
+                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
                     </div>
                     <!-- v4.2 Recent refs ribbon — populated on render -->
+                    <label class="checkbox_label" style="margin-top:10px;"><input type="checkbox" id="slay_skip_crop" ${settings.skipCrop ? 'checked' : ''}><span>Не предлагать кроп картинок</span></label>
+                    <p class="hint" style="margin-top:2px;font-size:0.75em;">Касается рефов, образов и вещей гардероба.</p>
                     <div id="slay_recent_refs_ribbon" class="iig-recent-refs-ribbon"></div>
+                    <!-- Saved character library — permanent, named, survives chat switches -->
+                    <div id="slay_saved_portraits" class="iig-saved-panel iig-hidden"></div>
                 </div>
                 <!-- v4.2 Floating popup for slot options (Файл / Вставить / Недавние) -->
                 <div id="slay_slot_options_popup" class="iig-slot-options-popup"></div>
                 <!-- v4.2 Floating popup for "assign recent to slot" -->
                 <div id="slay_assign_popup" class="iig-assign-popup"></div>
 
-                <!-- Wardrobe -->
+                </div>
+                <!-- Wardrobe — deliberately OUTSIDE #slay_settings_body: it must stay
+                     reachable when image generation is switched off, because the outfit
+                     description keeps going into the prompt either way. Its position in
+                     the panel is unchanged. -->
+                <div id="slay_wardrobe_body" class="${swSettings.wardrobeEnabled !== false ? '' : 'iig-hidden'}">
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-shirt"></i> Гардероб</h4>
-                    <p class="hint" id="slay_wardrobe_hint">Загрузите аутфиты для бота и юзера. Изображение активного аутфита отправится как референс, а словесное описание будет добавлено в промпт.</p>
+                    <p class="hint" id="slay_wardrobe_hint">Загрузите аутфиты для бота и юзера. Словесное описание надетого добавляется в промпт <b>независимо от генерации картинок</b> — гардеробом можно пользоваться и с выключенной генерацией. Изображение активного аутфита отправляется как референс, когда генерация включена.</p>
                     <div class="flex-row"><div id="slay_sw_open_wardrobe" class="menu_button" style="width:100%;"><i class="fa-solid fa-shirt"></i> Открыть гардероб</div></div>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
                     <div id="slay_sw_describe_prompt_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:6px;">
@@ -4804,7 +6381,8 @@ function createSettingsUI() {
                             <div class="flex-row" style="margin-top:6px;"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
                             <div class="flex-row" style="margin-top:6px;"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
                             <div class="flex-row" style="margin-top:6px;"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><input type="text" id="slay_sw_describe_model" class="text_pole flex1" list="slay_sw_describe_model_list" placeholder="введи или выбери из списка" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}" autocomplete="off" spellcheck="false"><datalist id="slay_sw_describe_model_list"></datalist><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><select id="slay_sw_describe_model_select" class="text_pole flex1 ${swSettings.describeManualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_sw_describe_model" class="text_pole flex1 ${swSettings.describeManualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}" autocomplete="off" spellcheck="false"><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                            <label class="checkbox_label" style="margin-top:2px;"><input type="checkbox" id="slay_sw_describe_manual" ${swSettings.describeManualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
                             <div id="slay_sw_describe_test" class="menu_button iig-test-connection" style="margin-top:8px;"><i class="fa-solid fa-wifi"></i> Тест</div>
                             <p class="hint" style="margin-top:4px;">Оставьте Endpoint и API Key пустыми — будут использованы из основных настроек. Или укажите свои для отдельного подключения.</p>
                         </div>
@@ -4816,7 +6394,7 @@ function createSettingsUI() {
                     <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image_user" ${swSettings.sendOutfitImageUser !== false ? 'checked' : ''}><span>Отправлять картинку одежды юзера</span></label>
                     <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
                     <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Плавающая кнопка в чате</span></label>
+                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Иконка гардероба в окне чата</span></label>
                     <div class="flex-row" style="margin-top:6px;"><label>Макс. размер (px)</label><input type="number" id="slay_sw_max_dim" class="text_pole flex1" value="${swSettings.maxDimension || 512}" min="128" max="1024" step="64"></div>
                     <div class="flex-row" style="margin-top:6px;"><label>Размер гардероба (ПК)</label><select id="slay_sw_modal_width" class="flex1">
                         <option value="compact" ${swSettings.modalWidth === 'compact' ? 'selected' : ''}>Компактный (480px)</option>
@@ -4826,8 +6404,13 @@ function createSettingsUI() {
                         <option value="full" ${swSettings.modalWidth === 'full' ? 'selected' : ''}>Во весь экран</option>
                     </select></div>
                     <p class="hint" style="margin-top:4px;font-size:0.75em;">На мобильных устройствах всегда полноэкранный режим.</p>
+                    <div class="flex-row" style="margin-top:10px;"><div id="slay_sw_find_orphans" class="menu_button" style="width:100%;"><i class="fa-solid fa-broom"></i> Найти ничьи картинки</div></div>
+                    <p class="hint" style="margin-top:4px;font-size:0.75em;">Покажет, сколько картинок в папке гардероба не привязано ни к одной вещи, и предложит их удалить.</p>
                 </div>
 
+                </div>
+                <!-- back inside the generation-only block -->
+                <div id="slay_settings_body2" class="${settings.enabled ? '' : 'iig-hidden'}">
                 <!-- Image context -->
                 <div id="slay_image_context_section" class="iig-section">
                     <h4><i class="fa-solid fa-layer-group"></i> Контекст изображений</h4>
@@ -4861,19 +6444,62 @@ function createSettingsUI() {
                     v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank" style="color:inherit;text-decoration:underline;">Wewwa</a>
                     · <a href="https://t.me/wewwajai" target="_blank" style="color:inherit;text-decoration:underline;">tg for support</a><br>
                     gallery update by <a href="https://github.com/hydall" target="_blank" style="color:inherit;text-decoration:underline;">hydall</a>
-                    · based on sillyimages by <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a>
-                    and <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a>'s NPC system
+                    · based on sillyimages by <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a>,
+                    wardrobe system by <a href="https://github.com/delidgi/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">delidgi</a>,
+                    NPC system by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a>
                 </p>
                 <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
         </div>
     </div>`;
 
+    // Exactly one settings panel, always.
+    // SillyTavern re-runs an extension's module when it hot-reloads it (dropping
+    // new files into the folder does this), and APP_READY can fire more than
+    // once — each run appended ANOTHER full panel. Two panels means two sets of
+    // ref slots sharing the same ids, so querySelector answered with the first,
+    // invisible one: portraits saved to settings but the thumbnail the user was
+    // looking at never changed, and the "Куда применить?" list showed every NPC
+    // twice. Worse, both popups get re-parented to <body> when first opened, so
+    // they outlive their panel and pile up on screen with nothing able to close
+    // the orphan. Clear all of it before building.
+    for (const stale of container.querySelectorAll('.iig-settings')) {
+        const drawer = stale.closest('.inline-drawer');
+        if (drawer) drawer.remove(); else stale.remove();
+    }
+    for (const orphan of document.querySelectorAll('body > #slay_assign_popup, body > #slay_slot_options_popup, body > .iig-assign-popup, body > .iig-slot-options-popup')) {
+        orphan.remove();
+    }
     container.insertAdjacentHTML('beforeend', html);
     bindSettingsEvents();
     bindRefSlotEvents();
     renderRefSlots();
     renderRecentRefsRibbon();
+
+    // Saved-character library: collapsed by default so it doesn't push the ref
+    // slots down, but the counter on the button shows it has something in it.
+    // Restore the panel's last state before anything else touches it.
+    if (settings.savedOpen) {
+        document.getElementById('slay_saved_portraits')?.classList.remove('iig-hidden');
+        document.getElementById('slay_saved_toggle')?.classList.add('iig-saved-toggle-on');
+    }
+    const savedToggle = document.getElementById('slay_saved_toggle');
+    savedToggle?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const panel = document.getElementById('slay_saved_portraits');
+        if (!panel) return;
+        const willShow = panel.classList.contains('iig-hidden');
+        panel.classList.toggle('iig-hidden', !willShow);
+        savedToggle.classList.toggle('iig-saved-toggle-on', willShow);
+        settings.savedOpen = willShow;
+        saveSettings();
+        if (willShow) renderSavedPortraits();
+    });
+    // Guarded like the other five call sites. This one runs mid-way through
+    // building the panel, so a throw here would silently skip everything after
+    // it — the lightbox, the regen buttons and the tab-close save net — leaving
+    // settings that look fine while half the extension is not wired up.
+    try { renderSavedPortraits(); } catch (e) { iigLog('WARN', 'renderSavedPortraits failed:', e?.message); }
 }
 
 // Write saved path to the correct ref slot (char / user / NPC N) AND update its thumbnail in UI.
@@ -4892,6 +6518,34 @@ function applyPathToSlot(slotEl, refType, npcIndex, savedPath) {
         const thumb = slotEl.querySelector('.iig-ref-thumb'); if (thumb) thumb.src = savedPath;
         const tw = slotEl.querySelector('.iig-ref-thumb-wrap'); if (tw) tw.classList.add('has-image');
     }
+}
+
+// Write a name into a slot — settings AND the visible input, so the user sees
+// it land. Mirrors the writeName() logic used by the name field's own handlers.
+function applyNameToSlot(slotEl, refType, npcIndex, name) {
+    const s = getCurrentCharacterRefs();
+    if (refType === 'char') s.charRef.name = name;
+    else if (refType === 'user') s.userRef.name = name;
+    else if (refType === 'npc') {
+        if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        s.npcReferences[npcIndex].name = name;
+    }
+    saveSettings();
+    const input = slotEl?.querySelector('.iig-ref-name');
+    if (input) input.value = name;
+}
+
+// Every slot matching a ref key. Normally one; returns more only when a stale
+// duplicate panel is still in the DOM, in which case updating all of them is
+// what keeps the VISIBLE one correct.
+function findAllSlotsByKey(key) {
+    if (!key) return [];
+    if (key === 'char' || key === 'user') {
+        return [...document.querySelectorAll(`.iig-ref-slot[data-ref-type="${key}"]`)];
+    }
+    const m = key.match(/^npc-(\d+)$/);
+    if (!m) return [];
+    return [...document.querySelectorAll(`.iig-ref-slot[data-ref-type="npc"][data-npc-index="${m[1]}"]`)];
 }
 
 // Find slot DOM element by its "ref key" ("char" / "user" / "npc-0" / "npc-1" / ...)
@@ -4931,6 +6585,306 @@ function renderRecentRefsRibbon() {
     html += '</div>';
     host.innerHTML = html;
     bindRecentRefsEvents(host);
+}
+
+// Selection survives re-renders so relabelling doesn't collapse the strip the
+// user is working in.
+let _swSelChar = null, _swSelLook = null;
+
+function renderSavedPortraits() {
+    const host = document.getElementById('slay_saved_portraits');
+    if (!host) return;
+    const chars = getSavedChars();
+    const countEl = document.getElementById('slay_saved_count');
+    if (countEl) countEl.textContent = chars.length ? String(chars.length) : '';
+
+    if (chars.length === 0) {
+        host.innerHTML = `<div class="iig-saved-empty">
+            Пока пусто. Нажмите на слот с картинкой → <b>дискета</b>, и персонаж окажется здесь —
+            вместе с именами, чтобы в следующем чате не вписывать их заново.
+        </div>`;
+        return;
+    }
+
+    // Keep the selection pointing at something real after a delete or rename.
+    const sel = chars.find(c => c.id === _swSelChar) || chars[0];
+    _swSelChar = sel.id;
+    const look = sel.looks.find(l => l.id === _swSelLook) || sel.looks[0];
+    _swSelLook = look.id;
+
+    const esc = sanitizeForHtml;
+    const firstName = (n) => (swNameList(n)[0] || 'без имени');
+
+    // Top row: one face per PERSON, not per picture. The row stays short even
+    // when someone has six AUs behind them; the badge says how many.
+    let html = `<div class="iig-recent-refs-head">
+        <span class="iig-recent-refs-title"><i class="fa-solid fa-heart"></i> Сохранённые</span>
+        <span class="iig-recent-refs-hint">персонаж → образ → слот</span>
+    </div><div class="iig-people-row">`;
+    for (const c of chars) {
+        const cover = c.looks[0];
+        html += `<div class="iig-person${c.id === sel.id ? ' on' : ''}" data-char="${esc(c.id)}" title="${esc(c.names)}" tabindex="0">
+            <div class="iig-person-thumb"><img src="${esc(cover.path)}" alt="" loading="lazy"></div>
+            ${c.looks.length > 1 ? `<span class="iig-person-badge">${c.looks.length}</span>` : ''}
+            <div class="iig-person-name">${esc(firstName(c.names))}</div>
+        </div>`;
+    }
+    html += `</div>`;
+
+    // Expansion: everything about the selected person and nothing about anyone
+    // else. Labels get real room here, which is why they can be read in full.
+    html += `<div class="iig-look-panel">
+        <div class="iig-look-head">
+            <span class="iig-look-names">${esc(sel.names || 'без имени')}</span>
+            <button class="iig-saved-btn iig-char-rename" title="Изменить имена"><i class="fa-solid fa-pen"></i></button>
+            ${chars.length > 1 ? `<button class="iig-saved-btn iig-char-merge" title="\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c \u0441 \u0434\u0440\u0443\u0433\u0438\u043c"><i class="fa-solid fa-code-merge"></i></button>` : ''}
+        </div>
+        <div class="iig-look-strip">`;
+    for (const l of sel.looks) {
+        html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
+            <div class="iig-look-thumb"><img src="${esc(l.path)}" alt="" loading="lazy"></div>
+            <div class="iig-look-label${l.label ? '' : ' iig-look-nolabel'}">${esc(l.label || '—')}</div>
+        </div>`;
+    }
+    html += `<div class="iig-look-add" id="slay_add_look" tabindex="0" title="\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437 \u044d\u0442\u043e\u043c\u0443 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0443">
+            <i class="fa-solid fa-plus"></i><span>\u0435\u0449\u0451 \u043e\u0431\u0440\u0430\u0437</span>
+        </div>`;
+    html += `</div>
+        <div class="iig-look-tools">
+            <button class="iig-look-tool" data-act="crop"><i class="fa-solid fa-crop-simple"></i><span>Обрезать</span></button>
+            <button class="iig-look-tool" data-act="replace"><i class="fa-solid fa-image"></i><span>Заменить</span></button>
+            <button class="iig-look-tool" data-act="label"><i class="fa-solid fa-pen"></i><span>Подпись</span></button>
+            <button class="iig-look-tool danger" data-act="remove"><i class="fa-solid fa-trash-can"></i><span>Убрать</span></button>
+        </div>
+        <div class="iig-look-assign">
+            <span class="iig-look-assign-lbl">Поставить в:</span>
+            <span class="iig-assign-chips" id="slay_look_slots"></span>
+        </div>
+    </div>`;
+
+    host.innerHTML = html;
+
+    // Slot buttons come from the DOM, so the NPC count always matches reality.
+    const chips = host.querySelector('#slay_look_slots');
+    if (chips) {
+        const btns = [`<button class="iig-look-chip" data-key="char">{{char}}</button>`,
+                      `<button class="iig-look-chip" data-key="user">{{user}}</button>`];
+        const seen = new Set();
+        document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]').forEach((sl, i) => {
+            const idx = String(sl.dataset.npcIndex != null ? sl.dataset.npcIndex : i);
+            if (seen.has(idx)) return;
+            seen.add(idx);
+            btns.push(`<button class="iig-look-chip" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
+        });
+        chips.innerHTML = btns.join('');
+    }
+
+    for (const el of host.querySelectorAll('.iig-person')) {
+        el.addEventListener('click', () => { _swSelChar = el.dataset.char; _swSelLook = null; renderSavedPortraits(); });
+    }
+    for (const el of host.querySelectorAll('.iig-look')) {
+        el.addEventListener('click', (e) => {
+            if (e.target.closest('.iig-look-acts')) return;
+            _swSelLook = el.dataset.look; renderSavedPortraits();
+        });
+    }
+
+    // Add a look straight from the library: pick a picture, label it, done. No
+    // detour through a ref slot. Runs the same dedup as a normal ref upload, so
+    // re-picking a file already in iig_refs reuses it instead of copying.
+    host.querySelector('#slay_add_look')?.addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = 'image/*';
+        inp.addEventListener('change', async () => {
+            const file = inp.files && inp.files[0];
+            if (!file) return;
+            try {
+                const loadingToast = toastr.info('\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044e...', 'SLAY Images', { timeOut: 0, extendedTimeOut: 0 });
+                let rawBase64 = await new Promise((res, rej) => {
+                    const r = new FileReader();
+                    r.onloadend = () => res(String(r.result).split(',')[1]);
+                    r.onerror = rej;
+                    r.readAsDataURL(file);
+                });
+                const beforeCrop = rawBase64;
+                rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать образ', subtitle: 'Плитка образа — пропорции 3:4' });
+                if (rawBase64 === null) { try { toastr.clear(loadingToast); } catch (_) {} return; }
+                // Cheapest check first: the file's own name — but only while the
+                // picture is still the one that file holds.
+                let savedPath = await resolveExistingRefByFileName(file, { edited: rawBase64 !== beforeCrop });
+                const hashes = await computeRefHashes(rawBase64);
+                if (!savedPath) savedPath = await lookupRefByHashes(hashes);
+                if (savedPath) {
+                    iigLog('INFO', 'add-look: reused existing ref, no copy written');
+                } else {
+                    const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
+                    savedPath = await saveRefImageToFile(compressed, 'look', { skipDedupCheck: true });
+                    recordRefHashes(hashes, savedPath);
+                }
+                // Dismiss the progress toast before the dialog opens, or it sits
+                // on top of the very field the user is meant to type into.
+                try { toastr.clear(loadingToast); } catch (_) { try { toastr.clear(); } catch (_) {} }
+                const label = await slayPromptInput('\u041f\u043e\u0434\u043f\u0438\u0441\u044c \u043e\u0431\u0440\u0430\u0437\u0430 \u2014 \u0447\u0435\u043c \u044d\u0442\u043e\u0442 \u043e\u0442\u043b\u0438\u0447\u0430\u0435\u0442\u0441\u044f \u043e\u0442 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0445 (\u041c\u0430\u0444\u0438\u044f, \u041a\u043e\u043b\u0434\u043e\u0432\u0441\u0442\u0432\u043e\u0440\u0435\u0446)', '');
+                if (label === null) return;
+                saveLook({ charId: sel.id, label: label.trim(), path: savedPath });
+                _swSelLook = null;
+                toastr.success(`${sel.names}${label.trim() ? ` \u2014 ${label.trim()}` : ''}`, 'SLAY Images', { timeOut: 2000 });
+            } catch (err) {
+                try { toastr.clear(); } catch (_) {}
+                toastr.error('\u041e\u0448\u0438\u0431\u043a\u0430: ' + (err && err.message ? err.message : err), 'SLAY Images');
+            }
+        });
+        // Safari only opens the picker for an input that is in the document.
+        inp.style.display = 'none';
+        document.body.appendChild(inp);
+        inp.click();
+        setTimeout(() => inp.remove(), 60000);
+    });
+
+    // Fold this character into another — for when the same person ended up in
+    // the library twice under slightly different name lists.
+    host.querySelector('.iig-char-merge')?.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const others = chars.filter(c => c.id !== sel.id);
+        if (!others.length) return;
+        const ctx2 = SillyTavern.getContext();
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:6px;';
+        wrap.innerHTML = `
+            <div style="font-size:15px;font-weight:600;color:#f472b6;">\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c</div>
+            <div style="font-size:12px;opacity:.75;line-height:1.5;">\u041e\u0431\u0440\u0430\u0437\u044b <b>${sanitizeForHtml(sel.names)}</b> \u043f\u0435\u0440\u0435\u0435\u0434\u0443\u0442 \u043a \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u043c\u0443, \u0438\u043c\u0435\u043d\u0430 \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u044f\u0442\u0441\u044f.</div>
+            <div id="slk_merge_host"></div>`;
+        const picker = swBuildCharPicker(others, { seed: '' });
+        wrap.querySelector('#slk_merge_host').appendChild(picker.el);
+        const CONFIRM = ctx2.POPUP_TYPE && ctx2.POPUP_TYPE.CONFIRM ? ctx2.POPUP_TYPE.CONFIRM : 2;
+        const okd = await ctx2.callGenericPopup(wrap, CONFIRM);
+        if (!okd || !picker.value) return;
+        const targetId = picker.value;
+        if (mergeSavedChars(sel.id, targetId)) {
+            _swSelChar = targetId; _swSelLook = null;
+            renderSavedPortraits();
+            toastr.success('\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u044b', 'SLAY Images', { timeOut: 1800 });
+        }
+    });
+
+    host.querySelector('.iig-char-rename')?.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const next = await slayPromptInput('Имена через запятую — по ним расширение узнаёт персонажа в промпте', sel.names || '');
+        if (next !== null) renameSavedChar(sel.id, next.trim());
+    });
+    // All four act on the SELECTED look — the one the strip is highlighting.
+    host.querySelector('.iig-look-tools')?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.iig-look-tool');
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+        const act = btn.dataset.act;
+
+        if (act === 'crop') {
+            const next = await slayRecropExisting(look.path, {
+                title: 'Обрезать образ', subtitle: look.label || sel.names, label: 'look',
+            });
+            if (!next || next === look.path) return;
+            look.path = next;
+            saveSettings();
+            renderSavedPortraits();
+            toastr.success('Обрезано', 'SLAY Images', { timeOut: 1600 });
+            return;
+        }
+
+        if (act === 'replace') {
+            // Swap the picture, keep the label and the character it belongs to.
+            const inp = document.createElement('input');
+            inp.type = 'file'; inp.accept = 'image/*';
+            inp.addEventListener('change', async () => {
+                const file = inp.files && inp.files[0];
+                if (!file) return;
+                const t = toastr.info('Загружаю...', 'SLAY Images', { timeOut: 0, extendedTimeOut: 0 });
+                try {
+                    let raw = await new Promise((res, rej) => {
+                        const r = new FileReader();
+                        r.onloadend = () => res(String(r.result).split(',')[1]);
+                        r.onerror = rej;
+                        r.readAsDataURL(file);
+                    });
+                    const rawBefore = raw;
+                    raw = await slayMaybeCrop(raw, { title: 'Обрезать образ', subtitle: look.label || sel.names });
+                    if (raw === null) { try { toastr.clear(t); } catch (_) {} return; }
+                    // Same reuse-before-write path as every other upload, so
+                    // picking a file already in iig_refs writes no second copy.
+                    let saved = await resolveExistingRefByFileName(file, { edited: raw !== rawBefore });
+                    const hashes = await computeRefHashes(raw);
+                    if (!saved) saved = await lookupRefByHashes(hashes);
+                    if (!saved) {
+                        const payload = hashes.compressed || await compressBase64Image(raw, 768, 0.8);
+                        saved = await saveRefImageToFile(payload, 'look', { skipDedupCheck: true });
+                        recordRefHashes(hashes, saved);
+                    }
+                    const oldPath = look.path;
+                    look.path = saved;
+                    saveSettings();
+                    try { toastr.clear(t); } catch (_) {}
+                    renderSavedPortraits();
+                    toastr.success(oldPath === saved ? 'Та же картинка' : 'Картинка заменена', 'SLAY Images', { timeOut: 1800 });
+                } catch (err) {
+                    try { toastr.clear(t); } catch (_) {}
+                    toastr.error('Ошибка: ' + (err && err.message ? err.message : err), 'SLAY Images');
+                }
+            });
+            // Safari only opens the picker for an input that is in the document.
+            inp.style.display = 'none';
+            document.body.appendChild(inp);
+            inp.click();
+            setTimeout(() => inp.remove(), 60000);
+            return;
+        }
+
+        if (act === 'label') {
+            const next = await slayPromptInput('Подпись образа — чем этот отличается от остальных (Мафия, Колдовстворец)', look.label || '');
+            if (next !== null) relabelSavedLook(sel.id, look.id, next.trim());
+            return;
+        }
+
+        if (act === 'remove') {
+            const doomedPath = look.path;
+            // How many places would still point at this file once the look is gone?
+            const otherUses = slayCountPathUses(doomedPath) - 1;
+            const last = sel.looks.length === 1;
+            const head = last
+                ? `Это последний образ «${sel.names}». Убрать его — значит убрать персонажа целиком.`
+                : `Убрать образ «${look.label || 'без подписи'}»?`;
+            const tail = otherUses > 0
+                ? `\n\nКартинка останется на диске — её ${slayPlural(otherUses, 'использует', 'используют', 'используют')} ещё ${otherUses} ${slayPlural(otherUses, 'место', 'места', 'мест')} (другой образ, вещь гардероба или слот в другом чате).`
+                : `\n\nБольше на эту картинку никто не ссылается — она будет удалена и с диска.`;
+            if (!(await slayConfirm(head + tail))) return;
+            _swSelLook = null;
+            removeSavedLook(sel.id, look.id);
+            if (otherUses <= 0) {
+                const gone = await slayDeleteStoredImage(doomedPath);
+                if (gone) toastr.info('Картинка удалена с диска', 'SLAY Images', { timeOut: 2000 });
+            }
+        }
+    });
+
+    // Assigning sends the LOOK's picture and the CHARACTER's names together —
+    // that pairing is the entire point of the feature.
+    for (const chip of host.querySelectorAll('.iig-look-chip')) {
+        chip.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const slots = findAllSlotsByKey(chip.dataset.key);
+            if (!slots.length) return;
+            const refType = slots[0].dataset.refType;
+            const npcIndex = parseInt(slots[0].dataset.npcIndex, 10);
+            for (const sl of slots) {
+                applyPathToSlot(sl, refType, npcIndex, look.path);
+                applyNameToSlot(sl, refType, npcIndex, sel.names);
+            }
+            pushRecentRef(look.path);
+            const target = slots[slots.length - 1];
+            target.classList.add('iig-slot-flash');
+            setTimeout(() => target.classList.remove('iig-slot-flash'), 600);
+            toastr.success(`${sel.names}${look.label ? ` — ${look.label}` : ''}`, 'SLAY Images', { timeOut: 1800 });
+        });
+    }
 }
 
 function bindRecentRefsEvents(host) {
@@ -5017,7 +6971,10 @@ function closeAllRefPopups() {
 }
 
 // ── Assign popup ("Куда применить?") ──
-function showAssignPopup(anchor, path) {
+// `name` is optional and only comes from the saved-character library: assigning
+// a saved entry writes its comma-separated names into the slot as well, which is
+// the half of the chore that used to be done by hand every single time.
+function showAssignPopup(anchor, path, name = '') {
     const popup = document.getElementById('slay_assign_popup');
     if (!popup) return;
     // Toggle: same path + popup already open = close
@@ -5032,14 +6989,18 @@ function showAssignPopup(anchor, path) {
     const slotButtons = [];
     slotButtons.push(`<button class="iig-assign-btn" data-key="char">{{char}}</button>`);
     slotButtons.push(`<button class="iig-assign-btn" data-key="user">{{user}}</button>`);
-    const npcSlots = document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]');
-    npcSlots.forEach((slot, i) => {
-        const idx = slot.dataset.npcIndex || i;
+    // Dedupe by index: if a stale second panel is ever in the DOM, the same NPC
+    // must not appear twice in this list.
+    const seenNpc = new Set();
+    document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]').forEach((slot, i) => {
+        const idx = String(slot.dataset.npcIndex ?? i);
+        if (seenNpc.has(idx)) return;
+        seenNpc.add(idx);
         slotButtons.push(`<button class="iig-assign-btn" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
     });
     popup.innerHTML = `
         <button class="iig-popup-close" type="button" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
-        <div class="iig-assign-title">Куда применить?</div>
+        <div class="iig-assign-title">Куда применить?${name ? ` <span style="opacity:.75;font-weight:400;">— ${sanitizeForHtml(name)}</span>` : ''}</div>
         <div class="iig-assign-preview"><img src="${String(path).replace(/"/g, '&quot;')}" alt=""></div>
         <div class="iig-assign-buttons">${slotButtons.join('')}</div>
     `;
@@ -5060,16 +7021,20 @@ function showAssignPopup(anchor, path) {
         btn.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
             const key = btn.dataset.key;
-            const slot = findSlotByKey(key);
-            if (!slot) { closeAllRefPopups(); return; }
-            const refType = slot.dataset.refType;
-            const npcIndex = parseInt(slot.dataset.npcIndex, 10);
-            applyPathToSlot(slot, refType, npcIndex, path);
+            const slots = findAllSlotsByKey(key);
+            if (!slots.length) { closeAllRefPopups(); return; }
+            const refType = slots[0].dataset.refType;
+            const npcIndex = parseInt(slots[0].dataset.npcIndex, 10);
+            for (const sl of slots) {
+                applyPathToSlot(sl, refType, npcIndex, path);
+                if (name) applyNameToSlot(sl, refType, npcIndex, name);
+            }
+            const slot = slots[slots.length - 1];
             pushRecentRef(path);
             slot.classList.add('iig-slot-flash');
             setTimeout(() => slot.classList.remove('iig-slot-flash'), 600);
             closeAllRefPopups();
-            toastr.success('Реф применён', 'SLAY Images', { timeOut: 1500 });
+            toastr.success(name ? `Применён: ${name}` : 'Реф применён', 'SLAY Images', { timeOut: 1500 });
         });
     }
 }
@@ -5101,6 +7066,7 @@ function showSlotOptionsPopup(slot) {
             <button class="iig-slot-option-btn" data-act="file"><i class="fa-solid fa-folder-open"></i><span>Файл</span></button>
             <button class="iig-slot-option-btn" data-act="paste"><i class="fa-solid fa-clipboard"></i><span>Вставить</span></button>
             <button class="iig-slot-option-btn" data-act="recent"><i class="fa-solid fa-clock-rotate-left"></i><span>Недавние</span></button>
+            <button class="iig-slot-option-btn" data-act="library"><i class="fa-solid fa-heart"></i><span>Сохранённые</span></button>
         </div>
     `;
     popup.querySelector('.iig-popup-close')?.addEventListener('click', (e) => {
@@ -5134,6 +7100,27 @@ function showSlotOptionsPopup(slot) {
             setTimeout(() => ribbon.classList.remove('iig-recent-highlight'), 1500);
         }
     });
+    // Open the saved-character library and scroll to it.
+    popup.querySelector('[data-act="library"]')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+        openSavedPortraits({ scroll: true });
+    });
+}
+
+// Show the library panel (and optionally scroll it into view).
+function openSavedPortraits({ scroll = false } = {}) {
+    const panel = document.getElementById('slay_saved_portraits');
+    if (!panel) return;
+    panel.classList.remove('iig-hidden');
+    document.getElementById('slay_saved_toggle')?.classList.add('iig-saved-toggle-on');
+    try { const st = getSettings(); st.savedOpen = true; saveSettings(); } catch (_) {}
+    renderSavedPortraits();
+    if (scroll) {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        panel.classList.add('iig-recent-highlight');
+        setTimeout(() => panel.classList.remove('iig-recent-highlight'), 1500);
+    }
 }
 
 // Paste image from clipboard → upload → apply to slot
@@ -5153,12 +7140,14 @@ async function pasteFromClipboardToSlot(slot) {
             toastr.warning('В буфере нет картинки', 'SLAY Images', { timeOut: 2500 });
             return;
         }
-        const rawBase64 = await new Promise((res, rej) => {
+        let rawBase64 = await new Promise((res, rej) => {
             const r = new FileReader();
             r.onloadend = () => res(String(r.result).split(',')[1]);
             r.onerror = rej;
             r.readAsDataURL(blob);
         });
+        rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать реф', subtitle: 'Вставлено из буфера обмена' });
+        if (rawBase64 === null) return;
         const hashes = await computeRefHashes(rawBase64);
         const refType = slot.dataset.refType;
         const npcIndex = parseInt(slot.dataset.npcIndex, 10);
@@ -5169,7 +7158,7 @@ async function pasteFromClipboardToSlot(slot) {
             toastr.success('Вставлено (из кеша, дубликат не создан)', 'SLAY Images', { timeOut: 1800 });
             return;
         }
-        const compressed = await compressBase64Image(rawBase64, 768, 0.8);
+        const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
         const label = refType === 'npc' ? `npc${npcIndex}` : refType;
         const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
         recordRefHashes(hashes, savedPath);
@@ -5195,10 +7184,72 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeAllRefPopups();
 });
 
+// Both popups are position:fixed and anchored to a slot's on-screen rect, so the
+// moment anything scrolls they detach from what they belong to and just hover
+// over unrelated content — with no obvious way to get rid of them. Dismiss on
+// any scroll or resize instead of trying to re-anchor them: the user was reaching
+// for something else anyway. Capture phase so inner scroll containers count too.
+(function bindPopupAutoDismiss() {
+    let armed = false;
+    const dismiss = () => {
+        const a = document.getElementById('slay_assign_popup');
+        const o = document.getElementById('slay_slot_options_popup');
+        if (!a?.classList.contains('show') && !o?.classList.contains('show')) return;
+        closeAllRefPopups();
+    };
+    const arm = () => {
+        if (armed) return;
+        armed = true;
+        window.addEventListener('scroll', dismiss, { capture: true, passive: true });
+        window.addEventListener('resize', dismiss, { passive: true });
+    };
+    arm();
+})();
+
 function bindRefSlotEvents() {
     for (const slot of document.querySelectorAll('.iig-ref-slot')) {
         const refType = slot.dataset.refType;
         const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+
+        // Floppy in the thumbnail corner: save this slot's portrait + names into
+        // the library. Lives on the slot rather than in the options popup — that
+        // popup is about FILLING a slot, and a fifth button no longer fitted.
+        // Re-crop whatever is already in this slot.
+        slot.querySelector('.iig-ref-crop-btn')?.addEventListener('click', async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const st = getCurrentCharacterRefs();
+            const ref = refType === 'char' ? st.charRef
+                : refType === 'user' ? st.userRef
+                : (st.npcReferences[npcIndex] || null);
+            const path = ref && ref.imagePath ? ref.imagePath : '';
+            if (!path) { toastr.warning('В этом слоте нет картинки', 'SLAY Images'); return; }
+            const next = await slayRecropExisting(path, {
+                aspect: 0,
+                title: 'Обрезать реф',
+                subtitle: (ref && ref.name) || '',
+                label: refType === 'npc' ? `npc${npcIndex}` : refType,
+            });
+            if (!next || next === path) return;
+            applyPathToSlot(slot, refType, npcIndex, next);
+            pushRecentRef(next);
+            toastr.success('Обрезано', 'SLAY Images', { timeOut: 1600 });
+        });
+
+        slot.querySelector('.iig-ref-save-btn')?.addEventListener('click', async (e) => {
+            e.preventDefault(); e.stopPropagation();   // must not open the slot popup
+            const st = getCurrentCharacterRefs();
+            const ref = refType === 'char' ? st.charRef
+                : refType === 'user' ? st.userRef
+                : (st.npcReferences[npcIndex] || null);
+            const path = ref && ref.imagePath ? ref.imagePath : '';
+            if (!path) { toastr.warning('\u0412 \u044d\u0442\u043e\u043c \u0441\u043b\u043e\u0442\u0435 \u043d\u0435\u0442 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', 'SLAY Images'); return; }
+            const res = await slayPromptSaveLook((ref && ref.name) || '', path);
+            if (!res) return;
+            const ch = saveLook({ charId: res.charId, names: res.names, label: res.label, path });
+            if (ch) { _swSelChar = ch.id; _swSelLook = null; }
+            openSavedPortraits({ scroll: true });
+            toastr.success(ch ? `${ch.names}${res.label ? ` \u2014 ${res.label}` : ''}` : '\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e', 'SLAY Images', { timeOut: 2200 });
+        });
         // Name input persistence — write to settings on every keystroke AND force a sync save
         // on blur/change. Debounced save alone was losing the last characters when users typed
         // quickly and then switched to another slot or closed the panel.
@@ -5214,11 +7265,15 @@ function bindRefSlotEvents() {
         };
         if (nameInput) {
             nameInput.addEventListener('input', (e) => { writeName(e.target.value); saveSettings(); });
-            // Flush to disk on blur/change/Enter — guarantees name survives even if user closes settings fast.
+            // Blur/change/Enter write the name once more. There used to be a
+            // second call here to a context method named saveSettings, added to
+            // force an immediate flush — but the context exposes only
+            // saveSettingsDebounced, so `?.` swallowed it and nothing happened.
+            // saveSettings() below covers it anyway: it writes the localStorage
+            // backup synchronously, which is what actually survives a killed tab.
             const flush = (e) => {
                 writeName(e.target.value);
                 saveSettings();
-                try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
             };
             nameInput.addEventListener('change', flush);
             nameInput.addEventListener('blur', flush);
@@ -5227,10 +7282,18 @@ function bindRefSlotEvents() {
         const fileHandler = async (e) => {
             const file = e.target.files?.[0]; if (!file) return;
             try {
-                const rawBase64 = await new Promise((res, rej) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+                let rawBase64 = await new Promise((res, rej) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+                // Crop BEFORE hashing: the cropped bytes are what gets stored, so
+                // they must be what the dedup index remembers.
+                const beforeCrop = rawBase64;
+                rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать реф', subtitle: 'Слот показывает картинку в пропорциях 3:4' });
+                if (rawBase64 === null) { e.target.value = ''; return; }
                 // Compute BOTH hashes (byte for exact match, pixel for "same image re-encoded differently")
                 const hashes = await computeRefHashes(rawBase64);
-                const cached = await lookupRefByHashes(hashes);
+                // A file picked straight out of iig_refs is already ours — match
+                // it by name before falling back to content hashing, which can
+                // only recognise refs saved after we began hashing stored bytes.
+                const cached = (await resolveExistingRefByFileName(file, { edited: rawBase64 !== beforeCrop })) || await lookupRefByHashes(hashes);
                 if (cached) {
                     applyPathToSlot(slot, refType, npcIndex, cached);
                     pushRecentRef(cached);
@@ -5238,14 +7301,17 @@ function bindRefSlotEvents() {
                     e.target.value = '';
                     return;
                 }
-                const compressed = await compressBase64Image(rawBase64, 768, 0.8);
+                const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
                 const label = refType === 'npc' ? `npc${npcIndex}` : refType;
                 const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
                 recordRefHashes(hashes, savedPath);
                 applyPathToSlot(slot, refType, npcIndex, savedPath);
                 pushRecentRef(savedPath);
                 toastr.success('Фото сохранено', 'SLAY Images', { timeOut: 2000 });
-            } catch (err) { iigLog('ERROR', `fileHandler: ${err?.message}`); toastr.error('Ошибка загрузки фото', 'SLAY Images'); }
+            } catch (err) {
+                iigLog('ERROR', `fileHandler: ${err?.message}`);
+                toastr.error(err?.message || 'Ошибка загрузки фото', 'SLAY Images', { timeOut: 6000 });
+            }
             e.target.value = '';
         };
         for (const fi of slot.querySelectorAll('.iig-ref-file-input')) fi.addEventListener('change', fileHandler);
@@ -5342,6 +7408,7 @@ async function openStylePickerModal() {
         lb.querySelector('.iig-lightbox-img').src = src;
         lb.querySelector('.iig-lightbox-caption').textContent = '';
         lb.classList.add('open');
+        lb.dispatchEvent(new Event('slay-lightbox-open'));   // reset any leftover zoom
         document.body.style.overflow = 'hidden';
     };
 
@@ -5470,7 +7537,10 @@ async function openStylePickerModal() {
             return `<div class="slay-sc-carousel slay-sc-no-media"><i class="fa-solid fa-image"></i></div>`;
         }
         const imgs = images.map((src, i) =>
-            `<img class="slay-sc-cimg" src="${src}" alt="" loading="${i === 0 ? 'eager' : 'lazy'}" data-src="${src}">`
+            // Lazy for all of them: the catalogue has dozens of cards and eagerly
+            // fetching the first preview of each meant downloading pictures for
+            // rows the user may never scroll to.
+            `<img class="slay-sc-cimg" src="${src}" alt="" loading="lazy" data-src="${src}">`
         ).join('');
         const dots = images.length > 1
             ? `<div class="slay-sc-dots">${images.map((_, i) => `<span class="slay-sc-dot${i === 0 ? ' active' : ''}"></span>`).join('')}</div>`
@@ -5499,15 +7569,15 @@ async function openStylePickerModal() {
             </article>`;
         }
         const badgeCls = s.stability === 'stable' ? 'slay-sc-badge-stable' : (s.stability === 'exp' ? 'slay-sc-badge-exp' : '');
-        const badgeHtml = s.stabilityText ? `<span class="slay-sc-badge ${badgeCls}">${s.stabilityText}</span>` : '';
+        const badgeHtml = s.stabilityText ? `<span class="slay-sc-badge ${badgeCls}">${sanitizeForHtml(s.stabilityText)}</span>` : '';
         return `<article class="slay-sc${isSel ? ' selected' : ''}">
           ${makeCarousel(s.images)}
           <div class="slay-sc-body slay-sc-selectable" data-style="${encodedPrompt}" data-name="${encodedName}">
             <div class="slay-sc-head">
-              <span class="slay-sc-name">${s.name}</span>
+              <span class="slay-sc-name">${sanitizeForHtml(s.name)}</span>
               ${badgeHtml}
             </div>
-            ${s.desc ? `<p class="slay-sc-desc">${s.desc}</p>` : ''}
+            ${s.desc ? `<p class="slay-sc-desc">${sanitizeForHtml(s.desc)}</p>` : ''}
           </div>
         </article>`;
     };
@@ -5658,6 +7728,7 @@ function bindSettingsEvents() {
         const isCustom = apiType === 'custom';
 
         document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
+        document.getElementById('slay_settings_body2')?.classList.toggle('iig-hidden', !settings.enabled);
         document.getElementById('slay_custom_format_row')?.classList.toggle('iig-hidden', !isCustom);
         document.getElementById('slay_custom_hint')?.classList.toggle('iig-hidden', !isCustom);
 
@@ -5714,7 +7785,21 @@ function bindSettingsEvents() {
         if (endpointInput) endpointInput.placeholder = getEndpointPlaceholder(apiType);
     };
 
-    document.getElementById('slay_enabled')?.addEventListener('change', (e) => { settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot(); });
+    document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { window.slayWardrobe?.findOrphanImages?.(); });
+    document.getElementById('slay_skip_crop')?.addEventListener('change', (e) => { settings.skipCrop = e.target.checked; saveSettings(); });
+    document.getElementById('slay_sw_enabled')?.addEventListener('change', (e) => {
+        const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (swS) swS.wardrobeEnabled = e.target.checked;
+        SillyTavern.getContext().saveSettingsDebounced();
+        document.getElementById('slay_wardrobe_body')?.classList.toggle('iig-hidden', !e.target.checked);
+        // Apply immediately: drop or restore the outfit injection and the bar button.
+        try { window.slayWardrobe?.refresh?.(); } catch (err) { iigLog('WARN', 'wardrobe refresh failed:', err.message); }
+    });
+    document.getElementById('slay_enabled')?.addEventListener('change', (e) => {
+        settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot();
+        if (settings.enabled) { addButtonsToExistingMessages(); attachRegenButtonsInRoot(document.getElementById('chat') || document.body); }
+        else iigStripOurUi();
+    });
     document.getElementById('slay_external_blocks')?.addEventListener('change', (e) => { settings.externalBlocks = e.target.checked; saveSettings(); });
 
     // ── Connection profiles ──
@@ -5800,7 +7885,21 @@ function bindSettingsEvents() {
         const endpointInput = document.getElementById('slay_endpoint');
         if (shouldReplaceEndpointForApiType(next, settings.endpoint)) { settings.endpoint = normalizeConfiguredEndpoint(next, ''); if (endpointInput) endpointInput.value = settings.endpoint; }
         else if (next === 'naistera') { settings.endpoint = normalizeConfiguredEndpoint(next, settings.endpoint); if (endpointInput) endpointInput.value = settings.endpoint; }
+        // Warn, don't clear: reusing one proxy across api types is legitimate, but
+        // pasting a new provider's key while the old provider's host is still in the
+        // field silently ships that key to the wrong place.
+        if (settings.endpoint && !shouldReplaceEndpointForApiType(next, settings.endpoint) && next !== 'naistera') {
+            try {
+                const host = new URL(settings.endpoint, location.origin).host;
+                toastr.info(`Endpoint остался прежним: ${host}. Если это адрес другого провайдера — поменяйте его перед вводом нового ключа.`, 'SLAY Images', { timeOut: 9000 });
+            } catch (e) { /* unparseable endpoint — nothing useful to say */ }
+        }
         settings.apiType = next; saveSettings(); updateVisibility();
+        // custom / naistera have no model listing — hand the user the text field.
+        iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' });
+        if (next !== 'custom' && next !== 'naistera' && !settings.manualModel && settings.endpoint && settings.apiKey) {
+            populateModelDatalist({ silent: true }).catch(() => {});
+        }
     });
     document.getElementById('slay_endpoint')?.addEventListener('input', (e) => { settings.endpoint = e.target.value; saveSettings(); });
     // sanitizeApiKey strips zero-width unicode + NBSP that ride in from
@@ -5815,27 +7914,70 @@ function bindSettingsEvents() {
     // OpenAI-compat routers expose Gemini models too, and user's explicit
     // apiType choice should be respected.
     // Input event (not change) so typing freely is saved as user types.
-    // Field is <input list="slay_model_list"> — users can either pick a
-    // suggestion or type any model name the API knows that isn't in our
-    // auto-detected image-model whitelist.
+    // This text field is the MANUAL half of the pair — the default view is the
+    // <select> below it, and the checkbox swaps between them.
     document.getElementById('slay_model')?.addEventListener('input', (e) => {
         settings.model = e.target.value.trim();
         saveSettings();
     });
+    document.getElementById('slay_model_select')?.addEventListener('change', (e) => {
+        settings.model = e.target.value;
+        const inp = document.getElementById('slay_model');
+        if (inp) inp.value = e.target.value;   // keep both views in sync
+        saveSettings();
+    });
+    document.getElementById('slay_manual_model')?.addEventListener('change', (e) => {
+        settings.manualModel = e.target.checked;
+        saveSettings();
+        iigSyncModelInputMode();
+        if (!e.target.checked) populateModelDatalist({ silent: true }).catch(() => {});
+    });
     // Fill the model autocomplete datalist. silent=true suppresses toasts
     // (used for the auto-fill on settings open so it's quiet).
+    // Fill the model <select>. This used to be an <input list> + <datalist>, and
+    // datalist FILTERS its suggestions by whatever is typed in the field — so once
+    // a model name was saved, exactly one suggestion matched and the list looked
+    // empty. That is the recurring "нет выпадающего списка" complaint, and it is
+    // not fixable with a datalist. A real <select> always opens in full, and on a
+    // phone it gets the native picker instead of datalist's awkward behaviour.
     async function populateModelDatalist({ silent = false } = {}) {
-        if (!document.getElementById('slay_model_list')) return 0;
+        if (!document.getElementById('slay_model_select')) return 0;
         const models = await fetchModels();
         // Re-resolve AFTER the await: ST can re-render the extensions drawer
-        // mid-fetch, detaching the original datalist — populating a detached
-        // node looks like "the dropdown is empty" to the user.
-        const dl = document.getElementById('slay_model_list');
-        if (!dl || !dl.isConnected) return 0;
-        dl.innerHTML = '';
-        for (const m of models) { const o = document.createElement('option'); o.value = m; dl.appendChild(o); }
+        // mid-fetch, and populating a detached node looks like an empty dropdown.
+        const sel = document.getElementById('slay_model_select');
+        if (!sel || !sel.isConnected) return 0;
+        const current = getSettings().model || '';
+        sel.innerHTML = '';
+        // Keep the saved model selectable even when the endpoint doesn't list it —
+        // plenty of proxies serve models they never advertise.
+        const list = current && !models.includes(current) ? [current, ...models] : models;
+        if (list.length === 0) {
+            const o = document.createElement('option');
+            o.value = ''; o.textContent = '— список пуст, включите ручной ввод —';
+            sel.appendChild(o);
+        }
+        for (const m of list) {
+            const o = document.createElement('option');
+            o.value = m; o.textContent = m;
+            if (m === current) o.selected = true;
+            sel.appendChild(o);
+        }
         if (!silent) toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
         return models.length;
+    }
+
+    // Nobody may end up locked out of typing: providers that cannot list models
+    // (custom, naistera) or a failed fetch force manual entry on.
+    function iigSyncModelInputMode({ forceManual = false } = {}) {
+        const st = getSettings();
+        if (forceManual && !st.manualModel) { st.manualModel = true; saveSettings(); }
+        const manual = !!st.manualModel;
+        const cb = document.getElementById('slay_manual_model');
+        if (cb) cb.checked = manual;
+        document.getElementById('slay_model')?.classList.toggle('iig-hidden', !manual);
+        document.getElementById('slay_model_select')?.classList.toggle('iig-hidden', manual);
+        document.getElementById('slay_refresh_models')?.classList.toggle('iig-hidden', manual);
     }
     document.getElementById('slay_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
@@ -5848,8 +7990,13 @@ function bindSettingsEvents() {
     // and naistera (no model list), and avoids fetchModels' "set endpoint" toast.
     {
         const _s = getSettings();
-        if ((_s.apiType === 'openai' || _s.apiType === 'gemini') && _s.endpoint && _s.apiKey) {
-            populateModelDatalist({ silent: true }).catch(() => {});
+        const canList = (_s.apiType === 'openai' || _s.apiType === 'gemini') && _s.endpoint && _s.apiKey;
+        // custom / naistera never return a list, so those users must type.
+        iigSyncModelInputMode({ forceManual: _s.apiType === 'custom' || _s.apiType === 'naistera' });
+        if (canList && !_s.manualModel) {
+            populateModelDatalist({ silent: true })
+                .then(n => { if (!n) iigSyncModelInputMode({ forceManual: true }); })
+                .catch(() => iigSyncModelInputMode({ forceManual: true }));
         }
     }
     document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); updateVisibility(); });
@@ -5957,27 +8104,55 @@ function bindSettingsEvents() {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.describeModel = e.target.value.trim(); SillyTavern.getContext().saveSettingsDebounced(); }
     });
+    document.getElementById('slay_sw_describe_model_select')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.describeModel = e.target.value; SillyTavern.getContext().saveSettingsDebounced(); }
+        const inp = document.getElementById('slay_sw_describe_model');
+        if (inp) inp.value = e.target.value;
+    });
+    document.getElementById('slay_sw_describe_manual')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.describeManualModel = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+        document.getElementById('slay_sw_describe_model')?.classList.toggle('iig-hidden', !e.target.checked);
+        document.getElementById('slay_sw_describe_model_select')?.classList.toggle('iig-hidden', e.target.checked);
+        document.getElementById('slay_sw_describe_refresh')?.classList.toggle('iig-hidden', e.target.checked);
+    });
     document.getElementById('slay_sw_describe_refresh')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
+            // Host and key resolve as a pair — never send the main key to a
+            // custom describe endpoint (see swAnalyzeOutfit for the full note).
             const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
-            const key = swS.describeKey || iigS.apiKey || '';
+            const key = swS.describeEndpoint ? (swS.describeKey || '') : (iigS.apiKey || '');
+            if (swS.describeEndpoint && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
             const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const models = (data.data || []).map(m => m.id).sort();
-            const dl = document.getElementById('slay_sw_describe_model_list');
-            if (dl) {
-                dl.innerHTML = '';
-                for (const m of models) {
+            // Same story as the main model field: a <select>, not a datalist.
+            const sel = document.getElementById('slay_sw_describe_model_select');
+            if (sel) {
+                const cur = swS.describeModel || 'gemini-2.5-flash';
+                const list = cur && !models.includes(cur) ? [cur, ...models] : models;
+                sel.innerHTML = '';
+                for (const m of list) {
                     const o = document.createElement('option');
-                    o.value = m;
-                    dl.appendChild(o);
+                    o.value = m; o.textContent = m;
+                    if (m === cur) o.selected = true;
+                    sel.appendChild(o);
                 }
+            }
+            if (models.length === 0) {
+                // Nothing to choose from — don't strand the user on an empty list.
+                swS.describeManualModel = true;
+                SillyTavern.getContext().saveSettingsDebounced();
+                document.getElementById('slay_sw_describe_manual')?.setAttribute('checked', 'checked');
+                document.getElementById('slay_sw_describe_model')?.classList.remove('iig-hidden');
+                document.getElementById('slay_sw_describe_model_select')?.classList.add('iig-hidden');
             }
             toastr.success(`Найдено моделей: ${models.length}`, 'Гардероб');
         } catch (error) { toastr.error(`Ошибка: ${error.message}`, 'Гардероб'); }
@@ -5989,8 +8164,11 @@ function bindSettingsEvents() {
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
+            // Host and key resolve as a pair — never send the main key to a
+            // custom describe endpoint (see swAnalyzeOutfit for the full note).
             const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
-            const key = swS.describeKey || iigS.apiKey || '';
+            const key = swS.describeEndpoint ? (swS.describeKey || '') : (iigS.apiKey || '');
+            if (swS.describeEndpoint && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
             const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
@@ -6066,8 +8244,68 @@ function initLightbox() {
     };
     overlay.querySelector('.iig-lightbox-backdrop').addEventListener('click', close);
     overlay.querySelector('.iig-lightbox-close').addEventListener('click', close);
-    // Touch: tap anywhere on image to close
-    overlay.querySelector('.iig-lightbox-img').addEventListener('click', close);
+
+    // ── Pinch-zoom, drag and double-tap, touch only ──────────────────────────
+    // SillyTavern's own viewport meta carries user-scalable=no, so the browser
+    // will not zoom the page — and the lightbox clamps the image to 90vw. On a
+    // 360px phone a 1024×1024 generation therefore renders about 324px wide and
+    // a face is roughly 40 pixels: the extension exists to make pictures and you
+    // could not actually look at them. Desktop is left alone (big window, working
+    // browser zoom, and a wheel handler would fight page scrolling).
+    const imgEl = overlay.querySelector('.iig-lightbox-img');
+    let sc = 1, tx = 0, ty = 0, startSc = 1, startDist = 0, sx = 0, sy = 0, panning = false, moved = false, lastTap = 0;
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const apply = () => { imgEl.style.transform = `translate(${tx}px,${ty}px) scale(${sc})`; };
+    const resetZoom = () => { sc = 1; tx = 0; ty = 0; imgEl.style.transition = 'transform .2s'; apply(); setTimeout(() => { imgEl.style.transition = ''; }, 220); };
+    // Reset whenever a new picture is shown, so you never open one already zoomed.
+    overlay.addEventListener('slay-lightbox-open', resetZoom);
+    imgEl.style.transformOrigin = 'center center';
+    imgEl.style.touchAction = 'none';
+
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    imgEl.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 2) { startDist = dist(e.touches); startSc = sc; panning = false; moved = true; }
+        else if (e.touches.length === 1) {
+            panning = sc > 1;                       // only drag once zoomed in
+            sx = e.touches[0].clientX - tx; sy = e.touches[0].clientY - ty;
+            moved = false;
+        }
+    }, { passive: true });
+
+    imgEl.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 2 && startDist > 0) {
+            e.preventDefault();
+            sc = clamp(startSc * (dist(e.touches) / startDist), 1, 6);
+            if (sc === 1) { tx = 0; ty = 0; }
+            apply(); moved = true;
+        } else if (panning && e.touches.length === 1) {
+            e.preventDefault();
+            tx = e.touches[0].clientX - sx; ty = e.touches[0].clientY - sy;
+            apply(); moved = true;
+        }
+    }, { passive: false });
+
+    imgEl.addEventListener('touchend', (e) => {
+        if (e.touches.length === 0) {
+            startDist = 0; panning = false;
+            const now = Date.now();
+            if (!moved) {
+                if (now - lastTap < 300) {          // double tap: toggle 1× / 2.5×
+                    if (sc > 1) resetZoom(); else { sc = 2.5; apply(); }
+                    lastTap = 0;
+                    return;
+                }
+                lastTap = now;
+                // Single tap closes, but only at 1× — otherwise every attempt to
+                // reposition a zoomed picture would dismiss it.
+                if (sc === 1) setTimeout(() => { if (Date.now() - lastTap >= 290 && sc === 1) close(e); }, 300);
+            }
+        }
+    }, { passive: true });
+
+    // Mouse click still closes (desktop behaviour unchanged).
+    imgEl.addEventListener('click', (e) => { if (e.detail > 0 && sc === 1) close(e); });
     // Eat all touch/pointer phases at the overlay boundary so nothing bubbles to the
     // drawer's outside-click listeners while the lightbox is up.
     const stop = e => e.stopPropagation();
@@ -6127,6 +8365,7 @@ function initLightbox() {
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
         overlay.classList.add('open');
+        overlay.dispatchEvent(new Event('slay-lightbox-open'));   // reset any leftover zoom
         document.body.style.overflow = 'hidden'; // Prevent background scroll on iOS
     }, { capture: true });
 }
@@ -6175,7 +8414,7 @@ function updateHeaderStatusDot() {
         updateHeaderStatusDot();
         initMobileSaveListeners();
         // Attach regen buttons to pre-existing generated images in chat
-        setTimeout(() => attachRegenButtonsInRoot(document.getElementById('chat') || document.body), 400);
+        setTimeout(() => attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true }), 400);
         // MutationObserver — catches re-renders that skip CHARACTER_MESSAGE_RENDERED
         // (swipes, edits, MESSAGE_UPDATED, etc.)
         const chatEl = document.getElementById('chat');
@@ -6194,11 +8433,14 @@ function updateHeaderStatusDot() {
     });
 
     context.eventSource.on(context.event_types.CHAT_CHANGED, () => {
+        // Before the timeout, not inside it: a generation can start during those
+        // 300 ms and would read the previous chat's entry on the way past.
+        clearAllContextRefCache();
         setTimeout(() => {
             restoreRefsFromLocalStorage();
             addButtonsToExistingMessages();
             renderRefSlots();
-            attachRegenButtonsInRoot(document.getElementById('chat') || document.body);
+            attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true });
         }, 300);
     });
 
