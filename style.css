@@ -465,14 +465,14 @@
     width: 34px;
     height: 34px;
     border-radius: 50%;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.7);
     color: #fff;
     border: 1px solid rgba(255, 255, 255, 0.25);
     cursor: pointer;
     opacity: 0;
     transition: opacity .2s, background .2s, transform .15s;
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    /* No backdrop-filter — same reasoning as .sw-corner-btn, and this one rides
+       the main reading surface. */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1017,9 +1017,11 @@
 
 #sw-modal-overlay {
     position: fixed; inset: 0;
-    background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    /* No backdrop-filter. This was the single most expensive thing the extension
+       drew: a full-viewport blur recomputed every frame for the whole time the
+       wardrobe was open, on every platform. The darker scrim separates the modal
+       from the chat just as well and costs one flat fill. */
+    background: rgba(0, 0, 0, 0.82);
     z-index: 99999;
     display: flex; align-items: center; justify-content: center;
     animation: sw-fade-in 0.25s ease-out;
@@ -1085,7 +1087,7 @@
     width: 26px;
     height: 26px;
     border-radius: 50%;
-    background: rgba(0, 0, 0, 0.55);
+    background: rgba(0, 0, 0, 0.65);
     color: rgba(255, 255, 255, 0.7);
     border: 1px solid rgba(255, 255, 255, 0.15);
     cursor: pointer;
@@ -1097,8 +1099,9 @@
     line-height: 1;
     opacity: 0;
     transition: opacity .18s, background .15s, color .15s, transform .12s;
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    /* No backdrop-filter: at 26px the frosted edge was invisible anyway, and the
+       @media (hover: none) rule below makes every one of these paint constantly
+       on a phone — a dozen live blurs while the grid scrolls. */
     z-index: 3;
 }
 .sw-corner-fav { top: 4px; right: 4px; }
@@ -1137,9 +1140,9 @@
     align-items: center;
     justify-content: center;
     gap: 10px;
-    background: rgba(8, 8, 14, 0.55);
-    backdrop-filter: blur(3px);
-    -webkit-backdrop-filter: blur(3px);
+    /* No backdrop-filter: the veil already hides the old picture, and this one
+       sits over an image that is being replaced anyway. */
+    background: rgba(8, 8, 14, 0.68);
     border-radius: 8px;
     z-index: 4;
     pointer-events: none;
@@ -1546,7 +1549,8 @@
 .slay-style-overlay {
     position: fixed; inset: 0; z-index: 99999;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(0,0,0,0.78); backdrop-filter: blur(6px);
+    /* No backdrop-filter — full-viewport blur, see #sw-modal-overlay. */
+    background: rgba(0,0,0,0.85);
 }
 .slay-style-modal {
     background: #0e0e16; border: 1px solid rgba(244,114,182,0.22);
@@ -1811,8 +1815,8 @@
     border-radius: 10px;
     padding: 10px 12px;
     box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
+    /* No backdrop-filter: the surface above is 97% opaque, so the blur was
+       computing something nobody could ever see. */
     z-index: 99999 !important;
     display: none;
     min-width: 220px;
@@ -1945,8 +1949,7 @@
     border: 1px solid color-mix(in srgb, var(--slay-pink) 32%, rgba(255,255,255,0.08));
     border-radius: 12px;
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    /* No backdrop-filter: 98% opaque above it. */
     opacity: 0;
     transform: translateY(8px);
     transition: opacity 0.18s, transform 0.18s;
@@ -2300,8 +2303,7 @@
     opacity: 0;
     transform: scale(0.92);
     transition: opacity 0.18s ease-out, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    /* No backdrop-filter: 98% opaque above it. */
 }
 .sw-pp-peek.sw-pp-peek-show {
     opacity: 1;
@@ -2929,7 +2931,7 @@
     position: fixed;
     inset: 0;
     z-index: 100000;                       /* above ST's own popup layer */
-    background: rgba(6, 6, 10, 0.86);
+    background: rgba(6, 6, 10, 0.91);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2937,8 +2939,7 @@
     /* Notch and home indicator on phones. */
     padding-top: max(12px, env(safe-area-inset-top));
     padding-bottom: max(12px, env(safe-area-inset-bottom));
-    -webkit-backdrop-filter: blur(3px);
-    backdrop-filter: blur(3px);
+    /* No backdrop-filter — full-viewport blur while the crop dialog is open. */
 }
 
 .slay-crop-box {

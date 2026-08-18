@@ -699,6 +699,46 @@ const SLAY_VERSION = '4.4.0-beta.1';
     function swEsc(e) { if (e.key === 'Escape') swCloseModal(); }
     function swCloseModal() { swOpen = false; document.getElementById('sw-modal-overlay')?.remove(); document.removeEventListener('keydown', swEsc); }
 
+    // Header counter, needed both by a full render and by a single card flip.
+    function swUpdateHiddenCount() {
+        const hdrToggle = document.getElementById('sw-show-hidden-toggle');
+        if (!hdrToggle) return;
+        const hiddenCount = (swGetSettings().items || []).filter(o => o.hidden).length;
+        const labelText = hdrToggle.childNodes[hdrToggle.childNodes.length - 1];
+        if (labelText && labelText.nodeType === 3) labelText.textContent = ` Скрытые: ${hiddenCount}`;
+    }
+
+    // Repaint ONE card instead of the whole modal. Starring an outfit used to call
+    // swRender(), which throws away every card and every binding to make a single
+    // icon yellow — on a 60-outfit wardrobe that is six hundred listeners rebuilt
+    // for one tap. A full render is still correct when the change pushes the item
+    // out of the view it is sitting in, otherwise the card would stay put and look
+    // like it had ignored the tap.
+    function swApplyCornerToggle(card, o, kind) {
+        const paint = (sel, on, title, iconClass) => {
+            const btn = card.querySelector(sel);
+            if (!btn) return;
+            btn.classList.toggle('sw-corner-active', on);
+            btn.title = title;
+            const i = btn.querySelector('i');
+            if (i) i.className = iconClass;
+        };
+        if (kind === 'fav') {
+            if (swFavFilter && !o.favourite) { swRender(); return; }
+            card.classList.toggle('sw-outfit-favourite', !!o.favourite);
+            paint('.sw-corner-fav', !!o.favourite,
+                o.favourite ? 'Убрать из избранного' : 'В избранное',
+                `fa-${o.favourite ? 'solid' : 'regular'} fa-star`);
+        } else {
+            if (!swGetSettings().showHidden && o.hidden) { swRender(); return; }
+            card.classList.toggle('sw-outfit-hidden', !!o.hidden);
+            paint('.sw-corner-hide', !!o.hidden,
+                o.hidden ? 'Показать' : 'Скрыть',
+                `fa-solid fa-eye${o.hidden ? '-slash' : ''}`);
+            swUpdateHiddenCount();
+        }
+    }
+
     function swRender() {
         const content = document.getElementById('sw-tab-content');
         const modeWrap = document.getElementById('sw-mode-switch');
@@ -881,42 +921,67 @@ const SLAY_VERSION = '4.4.0-beta.1';
         h += '</div>';
         content.innerHTML = h;
 
-        // Update header hidden count
-        const hdrToggle = document.getElementById('sw-show-hidden-toggle');
-        if (hdrToggle) {
-            const hiddenCount = allItems.filter(o => o.hidden).length;
-            const labelText = hdrToggle.childNodes[hdrToggle.childNodes.length - 1];
-            if (labelText && labelText.nodeType === 3) labelText.textContent = ` Скрытые: ${hiddenCount}`;
+        swUpdateHiddenCount();
+
+        // ONE listener for the entire grid, bound once and left alone. The old code
+        // ran seven querySelector calls per card and hung ten closures on each —
+        // and since swRender() rebuilds the grid on every filter tap, all of it was
+        // thrown away and recreated each time a chip was touched.
+        if (content.dataset.swDelegated !== '1') {
+            content.dataset.swDelegated = '1';
+            content.addEventListener('click', (e) => {
+                const t = e.target;
+                if (!t || !t.closest) return;
+                const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+
+                // The two upload tiles carry no data-id, so they are matched first.
+                if (t.closest('#sw-upload-trigger')) { stop(); swUpload(); return; }
+                if (t.closest('#sw-import-trigger')) { stop(); swUpload(true); return; }
+
+                const card = t.closest('.sw-outfit-card[data-id]');
+                if (!card) return;
+                const id = card.dataset.id;
+
+                // Corner buttons sit over the picture, so they are tested before it.
+                if (t.closest('.sw-corner-fav')) {
+                    stop(); swToggleFavourite(id);
+                    const o = swFindItem(id); if (o) swApplyCornerToggle(card, o, 'fav');
+                    return;
+                }
+                if (t.closest('.sw-corner-hide')) {
+                    stop(); swToggleHidden(id);
+                    const o = swFindItem(id); if (o) swApplyCornerToggle(card, o, 'hide');
+                    return;
+                }
+                if (t.closest('.sw-btn-edit')) { stop(); swEdit(id); return; }
+                if (t.closest('.sw-btn-regen')) { stop(); swRegenDescription(id); return; }
+                if (t.closest('.sw-btn-delete')) {
+                    stop();
+                    if (confirm('Удалить?')) { swRemoveItem(id); swRender(); toastr.info('Удалён', 'Гардероб'); }
+                    return;
+                }
+                // Picture, missing-picture placeholder and the toggle button all
+                // mean the same thing: put this on, or take it off.
+                if (t.closest('.sw-outfit-img') || t.closest('.sw-img-missing') || t.closest('.sw-btn-activate')) {
+                    stop(); swToggle(id);
+                }
+            });
         }
 
-        // NB: wrap in arrows — a bare handler reference would receive the click
-        // event as the importMode argument (truthy) and break normal upload.
-        document.getElementById('sw-upload-trigger')?.addEventListener('click', () => swUpload());
-        document.getElementById('sw-import-trigger')?.addEventListener('click', () => swUpload(true));
-        for (const card of content.querySelectorAll('.sw-outfit-card[data-id]')) {
-            const id = card.dataset.id;
-            // Lost-image fallback: if the file 404s (deleted from disk), swap the
-            // broken <img> for a placeholder so the card isn't just a dark void.
-            const cardImg = card.querySelector('.sw-outfit-img');
-            cardImg?.addEventListener('error', () => {
+        // Lost-image fallback: if the file 404s (deleted from disk), swap the broken
+        // <img> for a placeholder so the card isn't just a dark void. This one stays
+        // per-image because error events do not bubble — but it is one listener per
+        // card now instead of ten, and the placeholder's own click is delegated.
+        for (const cardImg of content.querySelectorAll('.sw-outfit-card[data-id] .sw-outfit-img')) {
+            cardImg.addEventListener('error', () => {
                 const wrap = cardImg.closest('.sw-outfit-img-wrap');
                 if (!wrap || wrap.querySelector('.sw-img-missing')) return;
                 cardImg.remove();
                 const ph = document.createElement('div');
                 ph.className = 'sw-img-missing';
                 ph.innerHTML = '<i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span>';
-                ph.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
                 wrap.insertBefore(ph, wrap.firstChild);
-            });
-            cardImg?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            // Placeholder also acts as the toggle target (click = equip/unequip)
-            card.querySelector('.sw-img-missing')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            card.querySelector('.sw-btn-activate')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggle(id); });
-            card.querySelector('.sw-corner-fav')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleFavourite(id); swRender(); });
-            card.querySelector('.sw-corner-hide')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swToggleHidden(id); swRender(); });
-            card.querySelector('.sw-btn-edit')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swEdit(id); });
-            card.querySelector('.sw-btn-regen')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); swRegenDescription(id); });
-            card.querySelector('.sw-btn-delete')?.addEventListener('click', (e) => { e.preventDefault(); e.stopImmediatePropagation(); if (confirm('Удалить?')) { swRemoveItem(id); swRender(); toastr.info('Удалён', 'Гардероб'); } });
+            }, { once: true });
         }
 
         // ── Current outfit preview ──
@@ -2741,16 +2806,29 @@ const LS_KEY = 'slay_iig_refs_v1';
 // ST has written settings to the server. The backup used to cover only the LEGACY
 // flat npcReferences field, while real refs live in perCharacterRefs — so it was
 // protecting almost nothing. Both go in now.
+// Everything worth not losing to a killed tab. JSON.stringify walks the live
+// objects directly — the old code cloned them first and threw the clone away one
+// line later, which was 75% of the work this function did.
+const LS_BACKUP_KEYS = ['npcReferences', 'perCharacterRefs', 'savedChars', 'refHashMap', 'recentRefs'];
+
 function persistRefsToLocalStorage() {
+    let settings;
+    try { settings = getSettings(); } catch (e) { return; }
+    const build = (keys) => {
+        const payload = { savedAt: Date.now() };
+        for (const k of keys) if (settings[k] !== undefined) payload[k] = settings[k];
+        return JSON.stringify(payload);
+    };
     try {
-        const settings = getSettings();
-        const payload = {
-            npcReferences: JSON.parse(JSON.stringify(settings.npcReferences || {})),
-            perCharacterRefs: JSON.parse(JSON.stringify(settings.perCharacterRefs || {})),
-            savedAt: Date.now(),
-        };
-        localStorage.setItem(LS_KEY, JSON.stringify(payload));
-    } catch (e) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e.message); }
+        localStorage.setItem(LS_KEY, build(LS_BACKUP_KEYS));
+    } catch (e) {
+        // Out of quota: drop the hash map (rebuildable — worst case one picture
+        // uploads twice) and keep the parts that represent real user work.
+        try {
+            localStorage.setItem(LS_KEY, build(['npcReferences', 'perCharacterRefs', 'savedChars']));
+            iigLog('WARN', 'localStorage backup trimmed: ' + e.message);
+        } catch (e2) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e2.message); }
+    }
 }
 
 function restoreRefsFromLocalStorage() {
@@ -2770,15 +2848,29 @@ function restoreRefsFromLocalStorage() {
         } else {
             settings.npcReferences = backup;
         }
+        // The rest of the backup only fills gaps. A populated live value is always
+        // newer than the copy, so overwriting it would undo real work.
+        if (Array.isArray(backup.savedChars) && !(settings.savedChars || []).length) {
+            settings.savedChars = backup.savedChars;
+            iigLog('INFO', `Restored ${backup.savedChars.length} saved characters from localStorage`);
+        }
+        if (backup.refHashMap && !Object.keys(settings.refHashMap || {}).length) {
+            settings.refHashMap = backup.refHashMap;
+        }
+        if (Array.isArray(backup.recentRefs) && !(settings.recentRefs || []).length) {
+            settings.recentRefs = backup.recentRefs;
+        }
         iigLog('INFO', 'Refs restored from localStorage');
     } catch (e) { iigLog('WARN', 'restoreRefsFromLocalStorage failed:', e.message); }
 }
 
 function initMobileSaveListeners() {
     const flush = () => {
+        // persistRefsToLocalStorage is the only one of these that can still finish
+        // on pagehide. The debounced save is scheduled a second out and the page is
+        // usually gone by then — harmless to ask for, useless to rely on.
         persistRefsToLocalStorage();
         try { SillyTavern.getContext().saveSettingsDebounced(); } catch (e) { }
-        if (typeof _stSaveSettings === 'function' && _stSaveSettings !== saveSettings) { try { _stSaveSettings(); } catch (e) { } }
     };
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
     window.addEventListener('pagehide', flush);
@@ -3027,6 +3119,14 @@ function clearContextRefCache(messageId) {
     for (const k of _contextRefCache.keys()) if (k.startsWith(`${messageId}|`)) _contextRefCache.delete(k);
 }
 
+// Message ids restart from zero in every chat, so an entry left behind by one
+// chat can be answered to a request from the next one — and the generation gets
+// a picture the user never put there. Wipe the lot whenever the chat changes.
+function clearAllContextRefCache() {
+    if (_contextRefCache.size) iigLog('INFO', `Dropping ${_contextRefCache.size} cached context refs (chat changed)`);
+    _contextRefCache.clear();
+}
+
 async function collectPreviousContextReferences(messageId, format, requestedCount) {
     const cacheKey = `${messageId}|${format}|${requestedCount}`;
     if (_contextRefCache.has(cacheKey)) return _contextRefCache.get(cacheKey);
@@ -3057,21 +3157,50 @@ async function collectPreviousContextReferences(messageId, format, requestedCoun
 }
 
 // ── Image utilities ──
+// Fallback compressor, reached when computeRefHashes could not decode the picture
+// on its own. It used to be able to hang forever: the body of onload had no
+// try/catch, there was no timeout, and iOS Safari gives up on images past roughly
+// 16 megapixels WITHOUT firing either load or error. The promise then never
+// settled and the await upstream waited for the rest of the session — no toast, no
+// placeholder, nothing at all. From the outside it looked like the upload button
+// simply did nothing, which is exactly what the iPhone reports described.
+//
+// It also announced every picture as image/jpeg regardless of what it really was;
+// PNG and WebP survived only because browsers sniff the bytes anyway.
+const COMPRESS_TIMEOUT_MS = 20000;
+
 function compressBase64Image(rawBase64, maxDim = 768, quality = 0.8) {
     return new Promise((resolve, reject) => {
         const img = new Image();
-        img.onload = () => {
-            let w = img.width, h = img.height;
-            if (w > maxDim || h > maxDim) { const scale = maxDim / Math.max(w, h); w = Math.round(w * scale); h = Math.round(h * scale); }
-            const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
-            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-            const dataUrl = canvas.toDataURL('image/jpeg', quality);
-            const b64 = dataUrl.split(',')[1];
-            iigLog('INFO', `Compressed: ${img.width}x${img.height} -> ${w}x${h}, ~${Math.round(b64.length / 1024)}KB`);
-            resolve(b64);
+        let settled = false;
+        const done = (fn, arg) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { img.src = ''; } catch (_) {}   // let the decoded bitmap go
+            fn(arg);
         };
-        img.onerror = () => reject(new Error('Failed to load image for compression'));
-        img.src = 'data:image/jpeg;base64,' + rawBase64;
+        const timer = setTimeout(
+            () => done(reject, new Error('Картинка слишком большая — устройство не смогло её открыть')),
+            COMPRESS_TIMEOUT_MS);
+
+        img.onload = () => {
+            try {
+                let w = img.width, h = img.height;
+                if (!w || !h) throw new Error('нулевой размер');
+                if (w > maxDim || h > maxDim) { const scale = maxDim / Math.max(w, h); w = Math.round(w * scale); h = Math.round(h * scale); }
+                const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+                canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                const b64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+                canvas.width = canvas.height = 0;
+                iigLog('INFO', `Compressed: ${img.width}x${img.height} -> ${w}x${h}, ~${Math.round(b64.length / 1024)}KB`);
+                done(resolve, b64);
+            } catch (e) {
+                done(reject, new Error('Не удалось уменьшить картинку: ' + (e?.message || e)));
+            }
+        };
+        img.onerror = () => done(reject, new Error('Не удалось открыть картинку — возможно, формат не поддерживается'));
+        img.src = `data:${detectImageMimeFromBase64(rawBase64)};base64,${rawBase64}`;
     });
 }
 
@@ -3489,7 +3618,6 @@ async function lookupRefByHashes(hashes) {
         }
         settings.refHashMap[c.hash] = { path: existingPath, lastUsed: Date.now() };
         if (typeof saveSettings === 'function') saveSettings();
-        try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
         iigLog('INFO', `Ref dedup HIT (${c.kind}): reusing ${existingPath} (hash ${c.hash.slice(0, 8)}…, map ${mapSize})`);
         return existingPath;
     }
@@ -3512,7 +3640,6 @@ function recordRefHashes(hashes, path) {
         for (const [h] of entries.slice(0, entries.length - 1000)) delete settings.refHashMap[h];
     }
     if (typeof saveSettings === 'function') saveSettings();
-    try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
     iigLog('INFO', `Recording ref hashes (b:${hashes.byteHash?.slice(0,8)} p:${hashes.pixelHash?.slice(0,8)}) -> ${path} (map ${Object.keys(settings.refHashMap).length})`);
 }
 
@@ -5651,6 +5778,10 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         const newError = createErrorPlaceholder(tagId, errorMsg, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
         if (loading.isConnected) loading.replaceWith(newError);
         toastr.error(`Ошибка: ${errorMsg}`, 'SLAY Images');
+    } finally {
+        // Retry is the third path that fills the context-ref memo; only the
+        // automatic one ever emptied it.
+        if (Number.isInteger(messageId)) clearContextRefCache(messageId);
     }
 }
 
@@ -5883,6 +6014,9 @@ async function regenerateMessageImages(messageId) {
     }
 
     processingMessages.delete(messageId);
+    // The automatic path clears this in its finally block; the regenerate button
+    // never did, so its entries sat in the map until the tab closed.
+    clearContextRefCache(messageId);
     recentlyProcessed.set(messageId, Date.now());
     await context.saveChat();
 }
@@ -6968,11 +7102,15 @@ function bindRefSlotEvents() {
         };
         if (nameInput) {
             nameInput.addEventListener('input', (e) => { writeName(e.target.value); saveSettings(); });
-            // Flush to disk on blur/change/Enter — guarantees name survives even if user closes settings fast.
+            // Blur/change/Enter write the name once more. There used to be a
+            // second call here to a context method named saveSettings, added to
+            // force an immediate flush — but the context exposes only
+            // saveSettingsDebounced, so `?.` swallowed it and nothing happened.
+            // saveSettings() below covers it anyway: it writes the localStorage
+            // backup synchronously, which is what actually survives a killed tab.
             const flush = (e) => {
                 writeName(e.target.value);
                 saveSettings();
-                try { SillyTavern.getContext()?.saveSettings?.(); } catch (_) {}
             };
             nameInput.addEventListener('change', flush);
             nameInput.addEventListener('blur', flush);
@@ -7006,7 +7144,10 @@ function bindRefSlotEvents() {
                 applyPathToSlot(slot, refType, npcIndex, savedPath);
                 pushRecentRef(savedPath);
                 toastr.success('Фото сохранено', 'SLAY Images', { timeOut: 2000 });
-            } catch (err) { iigLog('ERROR', `fileHandler: ${err?.message}`); toastr.error('Ошибка загрузки фото', 'SLAY Images'); }
+            } catch (err) {
+                iigLog('ERROR', `fileHandler: ${err?.message}`);
+                toastr.error(err?.message || 'Ошибка загрузки фото', 'SLAY Images', { timeOut: 6000 });
+            }
             e.target.value = '';
         };
         for (const fi of slot.querySelectorAll('.iig-ref-file-input')) fi.addEventListener('change', fileHandler);
@@ -8128,6 +8269,9 @@ function updateHeaderStatusDot() {
     });
 
     context.eventSource.on(context.event_types.CHAT_CHANGED, () => {
+        // Before the timeout, not inside it: a generation can start during those
+        // 300 ms and would read the previous chat's entry on the way past.
+        clearAllContextRefCache();
         setTimeout(() => {
             restoreRefsFromLocalStorage();
             addButtonsToExistingMessages();
