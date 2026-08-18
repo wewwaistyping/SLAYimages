@@ -2524,43 +2524,11 @@
 /* The name sits tight above its note instead of keeping its own bottom gap. */
 .iig-saved-card:has(.iig-saved-note) .iig-saved-name { padding-bottom: 1px; }
 
-/* Save-to-library floppy, tucked into the portrait's top-right corner.
-   The thumbnail is only 72x72, so this has to stay tiny — a 22px button ate a
-   third of the picture and landed square on the face. 16px, hard into the
-   corner, and barely there until you go for it. Hidden while the slot is empty:
-   nothing to save then. */
-.iig-ref-save-btn {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    width: 16px;
-    height: 16px;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    border-radius: 5px;
-    font-size: 8px;
-    line-height: 1;
-    color: #fff;
-    background: rgba(0, 0, 0, 0.5);
-    opacity: 0.35;
-    cursor: pointer;
-    z-index: 3;
-    transition: opacity .15s, background .15s, transform .12s;
-}
-.iig-ref-thumb-wrap.has-image .iig-ref-save-btn { display: inline-flex; }
-.iig-ref-thumb-wrap:hover .iig-ref-save-btn { opacity: 0.8; }
-.iig-ref-save-btn:hover {
-    opacity: 1;
-    background: var(--slay-pink, #f472b6);
-    color: #1a1a20;
-    transform: scale(1.1);
-}
-.iig-ref-save-btn:active { transform: scale(0.88); }
-/* No hover on touch to reveal it — keep it faint but permanently there. */
-@media (hover: none) {
-    .iig-ref-save-btn { opacity: 0.55; }
-}
+/* The save button lives in the slot action row with upload, crop and delete.
+   It used to float in the thumbnail corner, where 16px on top of a portrait was
+   invisible on a phone — and the absolute positioning left over from that
+   layout kept dragging it back out of the row into the card corner. Nothing to
+   position now: it is a .menu_button and the row lays it out with the others. */
 
 /* ============ Персонаж → образы (AU) ============ */
 /* One face per PERSON up top, their looks underneath. The old grid put one tile
