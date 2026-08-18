@@ -732,6 +732,8 @@
 }
 
 .iig-ref-upload-btn,
+.iig-ref-crop-btn,
+.iig-ref-save-btn,
 .iig-ref-delete-btn {
     padding: 4px 8px;
     cursor: pointer;
@@ -741,8 +743,17 @@
 }
 
 .iig-ref-slot:hover .iig-ref-upload-btn,
+.iig-ref-slot:hover .iig-ref-crop-btn,
+.iig-ref-slot:hover .iig-ref-save-btn,
 .iig-ref-slot:hover .iig-ref-delete-btn {
     opacity: 0.7;
+}
+/* Crop and save join the same hover treatment as upload, so all four read as
+   one row of equals instead of two bright newcomers next to two faded ones. */
+.iig-ref-crop-btn:hover,
+.iig-ref-save-btn:hover {
+    opacity: 1;
+    color: var(--slay-pink);
 }
 
 .iig-ref-upload-btn:hover {
@@ -3235,4 +3246,20 @@
        there isn't — unlike align-items:center, which centres past the edge. */
     margin: auto;
     max-height: none;
+}
+
+
+/* Same crash the crop dialog had: centring a panel taller than the screen
+   pushes its top out of reach, and the question scrolls off before the answers.
+   Auto margins centre it while there is room and stop when there isn't. */
+.slay-choose-ov {
+    align-items: flex-start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    height: 100vh;
+    height: 100dvh;
+    padding-top: max(16px, env(safe-area-inset-top));
+}
+.slay-choose-box {
+    margin: auto;
 }

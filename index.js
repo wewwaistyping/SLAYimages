@@ -1716,7 +1716,11 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 toastr.success(`\u00AB${result.name}\u00BB ${card ? 'импортирован' : 'добавлен'}`, 'Гардероб');
             } catch (e) { toastr.error('Ошибка: ' + e.message, 'Гардероб'); }
         });
+        // Safari only opens the picker for an input that is in the document.
+        inp.style.display = 'none';
+        document.body.appendChild(inp);
         inp.click();
+        setTimeout(() => inp.remove(), 60000);
     }
 
     async function swEdit(id) {
@@ -2550,6 +2554,9 @@ const defaultSettings = Object.freeze({
     // Offer the crop step when a picture is uploaded. Stored as the opt-OUT so
     // the checkbox can be worded the way it was asked for: «не предлагать кроп».
     skipCrop: false,
+    // Whether the saved-characters panel is expanded. Closed by default so it
+    // doesn't push the ref slots down for someone who never opens it.
+    savedOpen: false,
     imageContextCount: 1,
     apiType: 'openai',
     // false = pick from the fetched list (a real <select>); true = type it in.
@@ -6181,6 +6188,11 @@ function createSettingsUI() {
 
     // Saved-character library: collapsed by default so it doesn't push the ref
     // slots down, but the counter on the button shows it has something in it.
+    // Restore the panel's last state before anything else touches it.
+    if (settings.savedOpen) {
+        document.getElementById('slay_saved_portraits')?.classList.remove('iig-hidden');
+        document.getElementById('slay_saved_toggle')?.classList.add('iig-saved-toggle-on');
+    }
     const savedToggle = document.getElementById('slay_saved_toggle');
     savedToggle?.addEventListener('click', (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -6189,6 +6201,8 @@ function createSettingsUI() {
         const willShow = panel.classList.contains('iig-hidden');
         panel.classList.toggle('iig-hidden', !willShow);
         savedToggle.classList.toggle('iig-saved-toggle-on', willShow);
+        settings.savedOpen = willShow;
+        saveSettings();
         if (willShow) renderSavedPortraits();
     });
     renderSavedPortraits();   // fills the counter even while collapsed
@@ -6424,7 +6438,11 @@ function renderSavedPortraits() {
                 toastr.error('\u041e\u0448\u0438\u0431\u043a\u0430: ' + (err && err.message ? err.message : err), 'SLAY Images');
             }
         });
+        // Safari only opens the picker for an input that is in the document.
+        inp.style.display = 'none';
+        document.body.appendChild(inp);
         inp.click();
+        setTimeout(() => inp.remove(), 60000);
     });
 
     // Fold this character into another — for when the same person ended up in
@@ -6515,7 +6533,11 @@ function renderSavedPortraits() {
                     toastr.error('Ошибка: ' + (err && err.message ? err.message : err), 'SLAY Images');
                 }
             });
+            // Safari only opens the picker for an input that is in the document.
+            inp.style.display = 'none';
+            document.body.appendChild(inp);
             inp.click();
+            setTimeout(() => inp.remove(), 60000);
             return;
         }
 
@@ -6795,6 +6817,7 @@ function openSavedPortraits({ scroll = false } = {}) {
     if (!panel) return;
     panel.classList.remove('iig-hidden');
     document.getElementById('slay_saved_toggle')?.classList.add('iig-saved-toggle-on');
+    try { const st = getSettings(); st.savedOpen = true; saveSettings(); } catch (_) {}
     renderSavedPortraits();
     if (scroll) {
         panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
