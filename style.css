@@ -68,7 +68,7 @@
     font-weight: 600;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 2px;              /* the icon carries most of the spacing itself now */
     letter-spacing: 0.02em;
 }
 
@@ -76,6 +76,10 @@
     font-size: 0.85em;
     opacity: 0.85;
     transition: transform var(--slay-transition);
+    /* Spacing lived only in the h4 flex gap, so any theme that knocked the
+       heading back to display:block glued the icon straight onto the word.
+       A margin holds the gap open in either layout mode. */
+    margin-inline-end: 6px;
 }
 
 .iig-settings h4:hover i {
@@ -1018,9 +1022,11 @@
     max-height: min(90vh, calc(100dvh - 20px));
     display: flex; flex-direction: column;
     border-radius: 16px; overflow: hidden;
+    /* No backdrop-filter: the surface is 98% opaque, so a 24px blur of what is
+       behind it is invisible — it only cost mobile GPUs a full-screen blur pass
+       every frame the modal animated. The three genuinely translucent surfaces
+       (55-78% alpha) keep theirs. */
     background: rgba(20, 20, 30, 0.98);
-    backdrop-filter: blur(24px) saturate(1.3);
-    -webkit-backdrop-filter: blur(24px) saturate(1.3);
     border: 1px solid color-mix(in srgb, var(--slay-pink) 15%, var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08)));
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(244, 114, 182, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     animation: sw-modal-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1351,6 +1357,20 @@
         max-height: calc(100dvh - 70px);
         border-radius: 14px;
     }
+    /* One line each, scrolled sideways. Wrapping cost a whole extra row for a
+       single trailing chip ("Причёска" on its own line), and every row taken by
+       chrome is a row not showing clothes — the grid only gets what is left. */
+    #sw-cat-tabs, #sw-tag-filter, #sw-forwho-filter {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    #sw-cat-tabs::-webkit-scrollbar,
+    #sw-tag-filter::-webkit-scrollbar,
+    #sw-forwho-filter::-webkit-scrollbar { display: none; }
+    #sw-cat-tabs > *, #sw-tag-filter > *, #sw-forwho-filter > * { flex: 0 0 auto; }
     .sw-outfit-grid {
         grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
         gap: 8px;
@@ -1399,9 +1419,8 @@
     border-radius: 16px;
     overflow-y: auto;
     flex-shrink: 0;
+    /* Opaque at 98% — blur invisible, see note on .sw-modal above. */
     background: rgba(20, 20, 30, 0.98);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
     border: 1px solid rgba(244, 114, 182, 0.15);
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
     animation: sw-modal-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -2286,4 +2305,861 @@
 .sw-pp-peek-fav {
     color: #fbbf24;
     margin-left: 2px;
+}
+
+/* ==================== Saved character library ==================== */
+/* Permanent, named companion to the Recent ribbon: a portrait plus the
+   comma-separated names it should match, reusable across every chat.
+   Visual language deliberately mirrors .iig-recent-* so the two blocks read
+   as siblings rather than as two unrelated features. */
+
+.iig-refs-h4 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.iig-saved-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--slay-pink);
+    background: color-mix(in srgb, var(--slay-pink) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 25%, transparent);
+    transition: background .15s, border-color .15s, transform .12s;
+    /* Comfortable thumb target — this sits in a dense settings header. */
+    min-height: 30px;
+}
+.iig-saved-toggle:hover { background: color-mix(in srgb, var(--slay-pink) 18%, transparent); }
+.iig-saved-toggle:active { transform: scale(0.96); }
+.iig-saved-toggle-on {
+    background: color-mix(in srgb, var(--slay-pink) 26%, transparent);
+    border-color: color-mix(in srgb, var(--slay-pink) 45%, transparent);
+}
+.iig-saved-count:not(:empty) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    font-size: 0.85em;
+    background: var(--slay-pink);
+    color: #1a1a20;
+    font-weight: 700;
+}
+
+.iig-saved-panel {
+    /* Built exactly like .iig-recent-refs-ribbon above it — same margin, same
+       padding, same single dashed rule on top. It used to be a bordered, tinted,
+       rounded card, which made the gap between divider and content read as
+       different from its neighbour even where the numbers matched. Two blocks
+       doing the same job should be the same object. */
+    margin-top: 14px;
+    padding: 12px 12px 0;
+    border-top: 1px dashed color-mix(in srgb, var(--slay-pink) 14%, var(--SmartThemeBorderColor));
+}
+.iig-saved-panel.iig-recent-highlight { animation: iig-recent-pulse 1.4s ease-out; }
+
+.iig-saved-empty {
+    font-size: 0.75em;
+    line-height: 1.5;
+    opacity: 0.65;
+    text-align: center;
+    padding: 6px 4px;
+}
+
+.iig-saved-grid {
+    /* Two rows, then sideways. A wrapping grid grew downward without limit and
+       shoved the wardrobe off the screen once the library filled up; capping the
+       height at two rows keeps the panel a fixed size whether there are ten
+       characters or a hundred, and matches how the Recent ribbon already scrolls.
+       Columns must be a fixed width here — in column flow there is no track for
+       a fractional unit to divide. */
+    display: grid;
+    grid-template-rows: repeat(2, auto);
+    grid-auto-flow: column;
+    grid-auto-columns: 88px;
+    gap: 10px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 8px;
+    /* Room for the scrollbar so it never sits on top of the bottom row. */
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--slay-pink) 35%, transparent) transparent;
+}
+.iig-saved-grid::-webkit-scrollbar { height: 6px; }
+.iig-saved-grid::-webkit-scrollbar-track { background: transparent; }
+.iig-saved-grid::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--slay-pink) 30%, transparent);
+    border-radius: 99px;
+}
+.iig-saved-grid::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--slay-pink) 55%, transparent);
+}
+
+.iig-saved-card {
+    /* Column layout with a reserved text block: names run from "Liam" to
+       "Eva, Eve, Pozhukhla, Ева", and letting each card size to its own text
+       made every row ragged. Reserve the two lines up front so the grid is
+       even whether a card has one word or four. */
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    border-radius: 9px;
+    overflow: hidden;
+    cursor: pointer;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 16%, transparent);
+    transition: border-color .15s, transform .12s;
+}
+.iig-saved-card:active { transform: scale(0.97); }
+@media (hover: hover) {
+    .iig-saved-card:hover { border-color: color-mix(in srgb, var(--slay-pink) 45%, transparent); }
+}
+
+.iig-saved-thumb {
+    aspect-ratio: 3 / 4;
+    background: rgba(0, 0, 0, 0.35);
+}
+.iig-saved-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.iig-saved-name {
+    padding: 5px 6px;
+    min-height: 2.9em;      /* two lines, always — keeps rows level */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7em;
+    line-height: 1.3;
+    text-align: center;
+    overflow: hidden;
+    word-break: break-word;
+}
+/* Clamp the text itself rather than the flex box that centres it. */
+.iig-saved-name > span {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.iig-saved-noname { opacity: 0.45; font-style: italic; }
+
+.iig-saved-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 3px;
+    opacity: 0;
+    transition: opacity .15s;
+}
+.iig-saved-card:hover .iig-saved-actions { opacity: 1; }
+/* Touch devices never get :hover, so keep the controls permanently visible
+   there — dimmed enough not to fight the portrait. */
+@media (hover: none) {
+    .iig-saved-actions { opacity: 0.75; }
+}
+
+.iig-saved-btn {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 10px;
+    color: #eee;
+    background: rgba(0, 0, 0, 0.68);
+}
+.iig-saved-btn:hover { background: rgba(0, 0, 0, 0.85); }
+.iig-saved-remove:hover { background: rgba(220, 38, 38, 0.85); }
+
+/* Note line: the human's own scribble ("Имперская АУ") to tell three Danas
+   apart. Never sent anywhere — deliberately quieter than the name it sits
+   under, and clamped so a long note can't stretch the tile. */
+.iig-saved-note {
+    padding: 0 6px 6px;
+    font-size: 0.62em;
+    line-height: 1.25;
+    text-align: center;
+    opacity: 0.5;
+    font-style: italic;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+/* The name sits tight above its note instead of keeping its own bottom gap. */
+.iig-saved-card:has(.iig-saved-note) .iig-saved-name { padding-bottom: 1px; }
+
+/* Save-to-library floppy, tucked into the portrait's top-right corner.
+   The thumbnail is only 72x72, so this has to stay tiny — a 22px button ate a
+   third of the picture and landed square on the face. 16px, hard into the
+   corner, and barely there until you go for it. Hidden while the slot is empty:
+   nothing to save then. */
+.iig-ref-save-btn {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    font-size: 8px;
+    line-height: 1;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0.35;
+    cursor: pointer;
+    z-index: 3;
+    transition: opacity .15s, background .15s, transform .12s;
+}
+.iig-ref-thumb-wrap.has-image .iig-ref-save-btn { display: inline-flex; }
+.iig-ref-thumb-wrap:hover .iig-ref-save-btn { opacity: 0.8; }
+.iig-ref-save-btn:hover {
+    opacity: 1;
+    background: var(--slay-pink, #f472b6);
+    color: #1a1a20;
+    transform: scale(1.1);
+}
+.iig-ref-save-btn:active { transform: scale(0.88); }
+/* No hover on touch to reveal it — keep it faint but permanently there. */
+@media (hover: none) {
+    .iig-ref-save-btn { opacity: 0.55; }
+}
+
+/* ============ Персонаж → образы (AU) ============ */
+/* One face per PERSON up top, their looks underneath. The old grid put one tile
+   per PICTURE, so somebody with four AUs occupied four tiles and had their name
+   list retyped into each. Here the row length tracks how many people you have,
+   not how many pictures. */
+
+.iig-people-row {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 2px 2px 8px;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--slay-pink) 35%, transparent) transparent;
+}
+.iig-people-row::-webkit-scrollbar { height: 5px; }
+.iig-people-row::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--slay-pink) 30%, transparent);
+    border-radius: 99px;
+}
+
+.iig-person {
+    position: relative;
+    width: 54px;
+    flex-shrink: 0;
+    cursor: pointer;
+    text-align: center;
+}
+/* Portrait-shaped, not round. These are 3:4 character art — a circular crop cut
+   the head off centre and threw away most of the picture, which is exactly what
+   you need to recognise someone at this size. */
+.iig-person-thumb {
+    width: 54px; height: 72px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 2px solid transparent;
+    background: rgba(0, 0, 0, 0.3);
+    transition: border-color .15s, transform .12s;
+}
+.iig-person-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.iig-person.on .iig-person-thumb { border-color: var(--slay-pink); }
+.iig-person:active .iig-person-thumb { transform: scale(0.94); }
+@media (hover: hover) {
+    .iig-person:hover .iig-person-thumb { border-color: color-mix(in srgb, var(--slay-pink) 55%, transparent); }
+}
+.iig-person-name {
+    font-size: 9.5px;
+    margin-top: 4px;
+    color: #9d9aa6;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.iig-person.on .iig-person-name { color: var(--slay-pink); }
+/* Count of looks hiding behind this face. */
+.iig-person-badge {
+    position: absolute;
+    top: -2px; right: -2px;
+    min-width: 16px; height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: rgba(10, 10, 14, 0.9);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 50%, transparent);
+    color: var(--slay-pink);
+    font-size: 9px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+}
+
+.iig-look-panel {
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px dashed color-mix(in srgb, var(--slay-pink) 16%, var(--SmartThemeBorderColor));
+}
+.iig-look-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+}
+.iig-look-names {
+    font-size: 12px;
+    color: #e8e6ea;
+    line-height: 1.35;
+    word-break: break-word;
+    flex: 1;
+    min-width: 0;
+}
+
+.iig-look-strip {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--slay-pink) 35%, transparent) transparent;
+}
+.iig-look-strip::-webkit-scrollbar { height: 5px; }
+.iig-look-strip::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--slay-pink) 30%, transparent);
+    border-radius: 99px;
+}
+
+.iig-look {
+    position: relative;
+    width: 72px;
+    flex-shrink: 0;
+    cursor: pointer;
+    border-radius: 9px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.25);
+    border: 2px solid transparent;
+    transition: border-color .15s;
+}
+.iig-look.on { border-color: var(--slay-pink); }
+@media (hover: hover) {
+    .iig-look:hover { border-color: color-mix(in srgb, var(--slay-pink) 50%, transparent); }
+}
+.iig-look-thumb { aspect-ratio: 3 / 4; }
+.iig-look-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* The label is what separates "Мафия" from "Колдовстворец" — it gets two full
+   lines here rather than being squeezed onto a portrait. */
+.iig-look-label {
+    padding: 4px 5px;
+    font-size: 9.5px;
+    line-height: 1.25;
+    text-align: center;
+    color: #9d9aa6;
+    min-height: 2.5em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+.iig-look.on .iig-look-label { color: var(--slay-pink); }
+.iig-look-nolabel { opacity: 0.4; }
+
+.iig-look-acts {
+    position: absolute;
+    top: 3px; right: 3px;
+    display: flex; gap: 3px;
+    opacity: 0;
+    transition: opacity .15s;
+}
+.iig-look:hover .iig-look-acts { opacity: 1; }
+@media (hover: none) { .iig-look-acts { opacity: 0.7; } }
+
+.iig-look-assign {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 9px;
+}
+.iig-look-assign-lbl { font-size: 10.5px; color: #6c6976; }
+.iig-assign-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.iig-look-chip {
+    font-size: 10.5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--SmartThemeBorderColor);
+    color: #9d9aa6;
+    white-space: nowrap;
+    font-family: inherit;
+    transition: background .13s, color .13s, border-color .13s;
+}
+.iig-look-chip:hover {
+    background: var(--slay-pink);
+    border-color: var(--slay-pink);
+    color: #17171d;
+}
+.iig-look-chip:active { transform: scale(0.95); }
+
+
+/* Add-a-look tile, last in the strip. Puts "another AU for this character" one
+   tap away instead of routing through a slot and the floppy. */
+.iig-look-add {
+    width: 72px;
+    flex-shrink: 0;
+    cursor: pointer;
+    border-radius: 9px;
+    border: 2px dashed color-mix(in srgb, var(--slay-pink) 28%, transparent);
+    background: color-mix(in srgb, var(--slay-pink) 5%, transparent);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    color: var(--slay-pink);
+    min-height: 96px;
+    transition: background .15s, border-color .15s;
+}
+.iig-look-add i { font-size: 15px; opacity: .85; }
+.iig-look-add span { font-size: 9px; opacity: .75; text-align: center; line-height: 1.2; padding: 0 4px; }
+.iig-look-add:hover {
+    background: color-mix(in srgb, var(--slay-pink) 14%, transparent);
+    border-color: color-mix(in srgb, var(--slay-pink) 55%, transparent);
+}
+.iig-look-add:active { transform: scale(0.96); }
+
+
+/* ---- Character picker inside dialogs ---- */
+/* Replaces a <select> that had grown to seventeen entries. Filter first, pick
+   from what is left — the same "any single name matches" rule the prompt uses. */
+.slk-list {
+    max-height: 176px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    scrollbar-width: thin;
+}
+.slk-row {
+    display: grid;
+    grid-template-columns: 30px 1fr auto;
+    gap: 9px;
+    align-items: center;
+    width: 100%;
+    padding: 5px 7px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: rgba(0, 0, 0, 0.22);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.slk-row:hover { background: rgba(0, 0, 0, 0.35); }
+.slk-row.on {
+    border-color: var(--slay-pink);
+    background: color-mix(in srgb, var(--slay-pink) 12%, transparent);
+}
+.slk-row img {
+    width: 30px; height: 40px;
+    object-fit: cover;
+    border-radius: 5px;
+    display: block;
+}
+.slk-row-n { font-size: 12px; line-height: 1.3; word-break: break-word; }
+.slk-row.on .slk-row-n { color: var(--slay-pink); }
+/* How many looks this person has — the reason to pick them over a namesake. */
+.slk-row-c {
+    font-size: 10px;
+    min-width: 18px; height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.4);
+    color: #9d9aa6;
+    display: flex; align-items: center; justify-content: center;
+}
+.slk-row.on .slk-row-c { background: var(--slay-pink); color: #17171d; font-weight: 600; }
+.slk-none { font-size: 11px; opacity: .55; padding: 8px 2px; }
+
+/* ==================== Персонажи и образы: телефон ==================== */
+/* Everything below was built at desktop sizes first. On a phone the controls
+   were pixel-hunting: 22px action buttons and ~24px chips against a finger that
+   needs 36-44px, and dialog inputs small enough for iOS to zoom the whole page
+   the moment they got focus. */
+
+@media (max-width: 600px) {
+    /* Portraits get bigger — this is the row you scan to find a person, and a
+       54px-wide crop of character art on a phone screen is barely a thumbnail. */
+    .iig-person { width: 66px; }
+    .iig-person-thumb { width: 66px; height: 88px; }
+    .iig-person-name { font-size: 10.5px; }
+    .iig-person-badge { min-width: 18px; height: 18px; font-size: 10px; }
+
+    /* Look tiles: wider, so a label like "Колдовстворец" is legible instead of
+       clipped to two cramped lines. */
+    .iig-look { width: 86px; }
+    .iig-look-label { font-size: 10.5px; padding: 5px 6px; min-height: 2.6em; }
+    .iig-look-add { width: 86px; min-height: 112px; }
+    .iig-look-add i { font-size: 18px; }
+    .iig-look-add span { font-size: 10px; }
+
+    /* Pen and trash sat at 22px. Thumb-sized now, and spaced apart so deleting
+       is never a mis-tap away from relabelling. */
+    .iig-saved-btn { width: 32px; height: 32px; font-size: 13px; border-radius: 8px; }
+    .iig-look-acts { top: 4px; right: 4px; gap: 5px; }
+
+    /* Slot buttons: one scrolling row instead of wrapping into three cramped
+       lines, and tall enough to hit. Wrapping cost ~70px of panel height. */
+    .iig-look-assign { flex-wrap: nowrap; align-items: center; }
+    .iig-look-assign-lbl { flex-shrink: 0; font-size: 11px; }
+    .iig-assign-chips {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 4px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .iig-assign-chips::-webkit-scrollbar { display: none; }
+    .iig-look-chip {
+        font-size: 12.5px;
+        padding: 9px 14px;
+        flex-shrink: 0;
+    }
+
+    /* 16px or iOS zooms the entire page on focus and never zooms back out.
+       Applies to the picker's search box and every field in our dialogs. */
+    .slk-search,
+    .iig-settings .text_pole,
+    #slay_saved_portraits input {
+        font-size: 16px !important;
+        min-height: 40px;
+    }
+
+    /* Picker rows: bigger portrait, room to read the whole name list. */
+    .slk-row { grid-template-columns: 38px 1fr auto; padding: 8px 9px; gap: 10px; }
+    .slk-row img { width: 38px; height: 50px; }
+    .slk-row-n { font-size: 13px; }
+    .slk-row-c { min-width: 22px; height: 22px; font-size: 11px; }
+    .slk-list { max-height: 46vh; }
+
+    .iig-look-names { font-size: 13px; }
+}
+
+/* Touch without a narrow screen (tablets, convertibles) still has no hover, so
+   the controls must be reachable there too. */
+@media (hover: none) {
+    .iig-look-acts { opacity: 0.8; }
+    .iig-saved-btn { min-width: 30px; min-height: 30px; }
+}
+
+/* ==================== Панель не должна дёргать вёрстку ==================== */
+/* Expanding the saved-characters panel changes the content height, so the
+   scroll container gains or loses its scrollbar — and every form row jumps
+   sideways by the scrollbar's width. Reserving the gutter permanently keeps
+   the layout still whether the panel is open or shut.
+   Scoped with :has() so this only touches drawers that contain our settings. */
+.inline-drawer-content:has(.iig-settings) {
+    scrollbar-gutter: stable;
+}
+
+/* Second half of the same problem: nothing inside the panel may widen it.
+   Flex and grid children default to min-width:auto and refuse to shrink below
+   their content, which is how a long horizontal strip can push a container
+   wider instead of scrolling inside it. */
+#slay_saved_portraits,
+.iig-saved-panel {
+    max-width: 100%;
+    min-width: 0;
+}
+.iig-people-row,
+.iig-look-strip,
+.iig-look-panel,
+.iig-assign-chips,
+.iig-saved-grid {
+    min-width: 0;
+    max-width: 100%;
+}
+
+/* ==================== Кнопки с иконками ==================== */
+/* Every button in the panel is markup like `<i class="fa-..."></i> Текст`, and
+   the whole gap between them was a single collapsible space. Where the button
+   was narrow the label also broke onto a second line mid-phrase — "Найти ничьи
+   / картинки" — which reads as a rendering fault rather than a control.
+   Laying them out as flex rows fixes both: a real gap, and a label that stays
+   on one line and lets the button grow instead. */
+.iig-settings .menu_button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+.iig-settings .menu_button i {
+    flex-shrink: 0;
+}
+/* Icon-only buttons (save profile, delete profile, refresh models) have no
+   label to separate, so the gap would just pad them out unevenly. */
+.iig-settings .menu_button:not(:has(> *:not(i))) {
+    gap: 0;
+}
+
+/* ==================== Обрезка при загрузке ==================== */
+/* Mobile is the primary target here, not a media-query afterthought: the panel
+   is sized in dvh so collapsing browser chrome can't clip the actions, handles
+   are finger-sized from the start, and the stage refuses to hand a drag to the
+   page scroller. Desktop then gets a cap on width so it isn't absurdly wide. */
+
+.slay-crop-ov {
+    position: fixed;
+    inset: 0;
+    z-index: 100000;                       /* above ST's own popup layer */
+    background: rgba(6, 6, 10, 0.86);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    /* Notch and home indicator on phones. */
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+}
+
+.slay-crop-box {
+    background: var(--SmartThemeBlurTintColor, #1c1c24);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 26%, transparent);
+    border-radius: 14px;
+    box-shadow: 0 18px 52px rgba(0, 0, 0, 0.6);
+    padding: 12px;
+    width: 100%;
+    max-width: 560px;
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;                         /* lets the stage shrink instead of overflowing */
+}
+
+.slay-crop-head { display: flex; align-items: flex-start; gap: 10px; }
+.slay-crop-t { font-size: 14.5px; font-weight: 600; color: var(--slay-pink); line-height: 1.3; }
+.slay-crop-s { font-size: 11.5px; opacity: 0.6; margin-top: 2px; line-height: 1.35; }
+.slay-crop-x {
+    margin-left: auto;
+    width: 34px; height: 34px;             /* thumb-sized from the start */
+    flex-shrink: 0;
+    border: none;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.07);
+    color: inherit;
+    font-size: 14px;
+    cursor: pointer;
+}
+.slay-crop-x:hover { background: rgba(255, 255, 255, 0.14); }
+
+/* Aspect row scrolls rather than wrapping — wrapping stole a whole line of
+   height on narrow screens, and height is the scarce thing here. */
+.slay-crop-asp {
+    display: flex;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.28);
+    padding: 3px;
+    border-radius: 10px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-shrink: 0;
+}
+.slay-crop-asp::-webkit-scrollbar { display: none; }
+.slay-asp {
+    flex: 1 0 auto;
+    min-width: 58px;
+    min-height: 36px;
+    padding: 7px 11px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #ddd);
+    opacity: 0.65;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.slay-asp.on {
+    background: color-mix(in srgb, var(--slay-pink) 22%, transparent);
+    color: var(--slay-pink);
+    opacity: 1;
+    font-weight: 600;
+}
+
+.slay-crop-stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    /* dvh, not vh: the mobile URL bar collapsing would otherwise push the
+       buttons off-screen exactly when the user reaches for them. */
+    max-height: 58dvh;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    touch-action: none;                    /* a drag must not scroll the page */
+    user-select: none;
+    -webkit-user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.slay-crop-img {
+    display: block;
+    max-width: 100%;
+    max-height: 58dvh;
+    width: auto; height: auto;
+    pointer-events: none;
+}
+
+.slay-crop-rect {
+    position: absolute;
+    border: 2px solid var(--slay-pink);
+    box-shadow: 0 0 0 9999px rgba(6, 6, 10, 0.6);
+    cursor: move;
+}
+/* Thirds guides — the cheapest way to make framing a face obvious. */
+.slay-crop-rect::before, .slay-crop-rect::after {
+    content: "";
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background: linear-gradient(to right, transparent 33.33%, rgba(255,255,255,.2) 33.33%, rgba(255,255,255,.2) calc(33.33% + 1px), transparent calc(33.33% + 1px), transparent 66.66%, rgba(255,255,255,.2) 66.66%, rgba(255,255,255,.2) calc(66.66% + 1px), transparent calc(66.66% + 1px));
+}
+.slay-crop-rect::after {
+    background: linear-gradient(to bottom, transparent 33.33%, rgba(255,255,255,.2) 33.33%, rgba(255,255,255,.2) calc(33.33% + 1px), transparent calc(33.33% + 1px), transparent 66.66%, rgba(255,255,255,.2) 66.66%, rgba(255,255,255,.2) calc(66.66% + 1px), transparent calc(66.66% + 1px));
+}
+
+/* 28px corners: a fingertip covers roughly 40px, so anything smaller turns
+   resizing into a guessing game. They sit half outside the frame on purpose —
+   that is the part you can actually grab without covering the picture. */
+.slay-crop-h {
+    position: absolute;
+    width: 28px; height: 28px;
+    background: var(--slay-pink);
+    border: 2px solid #12121a;
+    border-radius: 7px;
+}
+.slay-crop-h.nw { left: -14px; top: -14px; cursor: nwse-resize; }
+.slay-crop-h.ne { right: -14px; top: -14px; cursor: nesw-resize; }
+.slay-crop-h.sw { left: -14px; bottom: -14px; cursor: nesw-resize; }
+.slay-crop-h.se { right: -14px; bottom: -14px; cursor: nwse-resize; }
+
+.slay-crop-info {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-size: 11px; opacity: 0.55;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+
+.slay-crop-btns { display: flex; gap: 8px; flex-shrink: 0; }
+.slay-crop-b {
+    flex: 1;
+    min-height: 44px;                      /* the one size a thumb never misses */
+    padding: 10px 14px;
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 30%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--slay-pink) 10%, transparent);
+    color: var(--slay-pink);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.slay-crop-b.primary { background: var(--slay-pink); color: #17171d; font-weight: 600; }
+.slay-crop-b.ghost { flex: 0 0 44px; background: rgba(255,255,255,.06); border-color: var(--SmartThemeBorderColor); color: inherit; opacity: .75; }
+.slay-crop-b:active { transform: scale(0.97); }
+
+/* Phones: give the stage more of the screen and stack the two real actions so
+   both sit under the thumb instead of side by side at half width. */
+@media (max-width: 600px) {
+    .slay-crop-ov { padding-left: 8px; padding-right: 8px; }
+    .slay-crop-box { padding: 10px; border-radius: 12px; gap: 8px; }
+    .slay-crop-stage, .slay-crop-img { max-height: 52dvh; }
+    .slay-crop-btns { flex-wrap: wrap; }
+    .slay-crop-b { flex: 1 1 100%; }
+    .slay-crop-b.ghost { flex: 1 1 100%; }
+}
+
+/* Very short viewports (landscape phone, keyboard up): the picture yields first,
+   because losing the buttons is worse than losing preview size. */
+@media (max-height: 520px) {
+    .slay-crop-stage, .slay-crop-img { max-height: 40dvh; }
+    .slay-crop-s, .slay-crop-info { display: none; }
+}
+
+/* ==================== Действия над выбранным образом ==================== */
+/* These used to be four 22px buttons floating on the tile itself. Four of them
+   need about 100px; the tile is 72 (86 on a phone), so they overlapped the
+   picture and each other. The strip already highlights the selected look, so
+   its actions live here instead — full size, labelled, and reachable. */
+.iig-look-tools {
+    display: flex;
+    gap: 5px;
+    margin-top: 9px;
+    flex-wrap: wrap;
+}
+.iig-look-tool {
+    flex: 1 1 auto;
+    min-width: 76px;
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: rgba(0, 0, 0, 0.28);
+    color: #9d9aa6;
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .13s, color .13s, border-color .13s;
+}
+.iig-look-tool i { font-size: 11px; opacity: .85; }
+.iig-look-tool:hover {
+    background: color-mix(in srgb, var(--slay-pink) 16%, transparent);
+    border-color: color-mix(in srgb, var(--slay-pink) 40%, transparent);
+    color: var(--slay-pink);
+}
+/* Removal is the one that can't be undone — it reads differently on hover. */
+.iig-look-tool.danger:hover {
+    background: rgba(220, 38, 38, 0.16);
+    border-color: rgba(220, 38, 38, 0.5);
+    color: #f87171;
+}
+.iig-look-tool:active { transform: scale(0.97); }
+
+@media (max-width: 600px) {
+    /* Two per row rather than four squeezed ones, and tall enough to hit. */
+    .iig-look-tool { flex: 1 1 calc(50% - 3px); min-height: 40px; font-size: 12.5px; }
 }
