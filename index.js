@@ -696,8 +696,23 @@ const SLAY_VERSION = '4.4.0-beta.1';
         swRender();
         document.addEventListener('keydown', swEsc);
     }
-    function swEsc(e) { if (e.key === 'Escape') swCloseModal(); }
-    function swCloseModal() { swOpen = false; document.getElementById('sw-modal-overlay')?.remove(); document.removeEventListener('keydown', swEsc); }
+    // Innermost first: an open sub-form takes the Escape and the wardrobe stays
+    // put. Same as the crop dialog, which already swallows its own Escape. A
+    // second press then closes the wardrobe.
+    function swEsc(e) {
+        if (e.key !== 'Escape') return;
+        if (swAbortInline()) { e.stopPropagation(); return; }
+        swCloseModal();
+    }
+    function swCloseModal() {
+        swOpen = false;
+        // The ✕ and the backdrop mean "close the wardrobe", which takes any open
+        // form with it — so say out loud that the upload was dropped. Otherwise the
+        // panel just disappears and the item silently never arrives.
+        swAbortInline({ notify: true });
+        document.getElementById('sw-modal-overlay')?.remove();
+        document.removeEventListener('keydown', swEsc);
+    }
 
     // Header counter, needed both by a full render and by a single card flip.
     function swUpdateHiddenCount() {
@@ -741,6 +756,10 @@ const SLAY_VERSION = '4.4.0-beta.1';
 
     function swRender() {
         const content = document.getElementById('sw-tab-content');
+        // Never paint over a live form. Its Save/Cancel buttons are in this very
+        // subtree; overwriting them without answering the form is what left the
+        // import awaiting a reply that could no longer come.
+        if (_savedContent !== null && content) { swAbortInline(); return; }
         const modeWrap = document.getElementById('sw-mode-switch');
         const catWrap = document.getElementById('sw-cat-tabs');
         const tagWrap = document.getElementById('sw-tag-filter');
@@ -1049,7 +1068,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <button class="sw-inline-btn" data-choice="manual" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">✏️ Ввести вручную</b><br><span style="font-size:11px;opacity:0.6;">Описать аутфит своими словами</span></button>
                         <button class="sw-inline-btn" data-choice="ai" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">🤖 Сгенерировать ИИ</b><br><span style="font-size:11px;opacity:0.6;">Отправить картинку на анализ</span></button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), 'Выбор описания отменён');
             if (!el) { resolve(null); return; }
             for (const btn of el.querySelectorAll('.sw-inline-btn')) {
                 btn.addEventListener('click', () => { swRestoreInline(); resolve(btn.dataset.choice); });
@@ -1063,10 +1082,21 @@ const SLAY_VERSION = '4.4.0-beta.1';
     // Chrome that is meaningless while a sub-form is open. On a phone these four
     // rows plus the worn-outfit strip ate well over 300px, which is why editing an
     // outfit showed a three-line description box under a screenful of filters.
-    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter'];
+    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter',
+        // The header row belongs here too. Both of these call swRender(), they sit
+        // ABOVE #sw-tab-content rather than inside it, and they stayed lit while a
+        // form was open — one tap repainted the grid over the form and stranded it.
+        'sw-type-tabs', 'sw-show-hidden-toggle'];
     let _savedScroll = 0;
+    // How to settle the open form's promise, and what to say if it is torn down
+    // from outside. A form resolves ONLY from its own Save/Cancel buttons, which
+    // live inside #sw-tab-content — so anything that wipes that subtree without
+    // answering leaves its caller awaiting forever AND leaves _savedContent set,
+    // which makes swShowInline refuse every later form until the page reloads.
+    let _inlineCancel = null;
+    let _inlineCancelMsg = '';
 
-    function swShowInline(html) {
+    function swShowInline(html, onCancel = null, cancelMsg = '') {
         const el = document.getElementById('sw-tab-content');
         if (!el) return null;
         // One slot holds the grid markup, so a second form opening over the first
@@ -1076,6 +1106,8 @@ const SLAY_VERSION = '4.4.0-beta.1';
         if (_savedContent !== null) { swLog('WARN', 'inline form already open — not stacking another over it'); return null; }
         _savedContent = el.innerHTML;
         _savedScroll = el.scrollTop;   // put the grid back where the user left it
+        _inlineCancel = onCancel;
+        _inlineCancelMsg = cancelMsg;
         el.innerHTML = html;
         el.scrollTop = 0;
         for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = 'none'; }
@@ -1083,11 +1115,35 @@ const SLAY_VERSION = '4.4.0-beta.1';
     }
     function swRestoreInline() {
         const el = document.getElementById('sw-tab-content');
-        if (el && _savedContent !== null) { el.innerHTML = _savedContent; _savedContent = null; }
+        // Release the slot even when the panel has already gone. The old `el &&`
+        // guard meant a restore arriving after the wardrobe closed left the slot
+        // occupied for the rest of the page's life — that is what turned a stray
+        // tap into "nothing in the wardrobe works until I reload".
+        if (_savedContent !== null) {
+            if (el) el.innerHTML = _savedContent;
+            _savedContent = null;
+        }
+        _inlineCancel = null;
+        _inlineCancelMsg = '';
         for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = ''; }
+        if (!el) { _savedScroll = 0; return; }
         swRender(); // re-render to rebind events
         const el2 = document.getElementById('sw-tab-content');
         if (el2 && _savedScroll) { el2.scrollTop = _savedScroll; _savedScroll = 0; }
+    }
+
+    // Tear an open form down from outside and ANSWER it, so whoever is awaiting it
+    // stops waiting. Returns true if there was a form to close. Everything that
+    // can destroy #sw-tab-content goes through here: Escape, the ✕, the backdrop,
+    // and swRender itself.
+    function swAbortInline({ notify = false } = {}) {
+        if (_savedContent === null) return false;
+        const fn = _inlineCancel;
+        const msg = _inlineCancelMsg;
+        swRestoreInline();                       // puts the grid back, clears the slot
+        if (fn) { try { fn(); } catch (e) { swLog('WARN', 'inline cancel failed:', e?.message); } }
+        if (notify && msg) toastr.info(msg, '\u{1F45A} Гардероб', { timeOut: 2500 });
+        return true;
     }
 
     // ── Outfit card export/import (SillyTavern-card style: PNG + tEXt chunk) ──
@@ -1321,7 +1377,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <button id="sw-upl-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-upl-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), defaults ? 'Импорт отменён' : 'Загрузка отменена');
             if (!el) { resolve(null); return; }
 
             const close = (val) => { swRestoreInline(); resolve(val); };
@@ -1351,7 +1407,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <button id="sw-descinput-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), 'Ввод описания отменён');
             if (!el) { resolve(null); return; }
             const textarea = el.querySelector('#sw-descinput-text');
             const counter = el.querySelector('#sw-descinput-count');
@@ -1404,7 +1460,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`);
+                </div>`, () => resolve(null), 'Редактирование отменено');
             if (!el) { resolve(null); return; }
             const close = (val) => { swRestoreInline(); resolve(val); };
             el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
@@ -1419,8 +1475,9 @@ const SLAY_VERSION = '4.4.0-beta.1';
             replaceFile?.addEventListener('change', async () => {
                 const f = replaceFile.files?.[0];
                 if (!f) return;
+                let _tReplace = null;
                 try {
-                    const _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+                    _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
                     const { base64, format } = await swResize(f, swGetSettings().maxDimension);
                     const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
                     const oldPath = item.imagePath;
@@ -1755,8 +1812,19 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <div style="margin-top:12px;font-size:14px;">🤖 ИИ описывает образ...</div>
                         <div style="margin-top:4px;font-size:11px;color:#888;">это занимает до минуты, не закрывайте гардероб</div>
                     </div>`);
-                    try { autoDesc = await swAnalyzeOutfit(base64, result.category); }
-                    finally { swRestoreInline(); }
+                    // No timeout here meant a model that never answered left the
+                    // spinner up forever with the form slot held — a hang nobody
+                    // had to do anything wrong to reach.
+                    try {
+                        autoDesc = await Promise.race([
+                            swAnalyzeOutfit(base64, result.category),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 120000)),
+                        ]);
+                    } catch (e) {
+                        swLog('WARN', `describe failed or timed out: ${e?.message}`);
+                        toastr.warning('ИИ не ответил — добавляю без описания', 'Гардероб', { timeOut: 4000 });
+                        autoDesc = null;
+                    } finally { swRestoreInline(); }
                     if (autoDesc) {
                         const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
                         if (edited !== null) autoDesc = edited;
@@ -3395,6 +3463,17 @@ function saveLook({ charId = null, names = '', label = '', path }) {
 // file: the same path is routinely shared between a look, a wardrobe item and a
 // ref slot in some other chat, and removing it from under them is exactly the
 // quiet damage this extension has been apologising for all week.
+// 1 место, 2 места, 5 мест — и глагол тоже меняется. С оглядкой на 11-14, где
+// правило ломается: одиннадцать МЕСТ, а не одиннадцать место.
+function slayPlural(n, one, few, many) {
+    const a = Math.abs(n) % 100;
+    if (a >= 11 && a <= 14) return many;
+    const b = a % 10;
+    if (b === 1) return one;
+    if (b >= 2 && b <= 4) return few;
+    return many;
+}
+
 function slayCountPathUses(path) {
     if (!path) return 0;
     let n = 0;
@@ -6690,7 +6769,7 @@ function renderSavedPortraits() {
                 ? `Это последний образ «${sel.names}». Убрать его — значит убрать персонажа целиком.`
                 : `Убрать образ «${look.label || 'без подписи'}»?`;
             const tail = otherUses > 0
-                ? `\n\nКартинка останется на диске — её использует ещё ${otherUses} мест${otherUses === 1 ? 'о' : 'а'} (другой образ, вещь гардероба или слот в другом чате).`
+                ? `\n\nКартинка останется на диске — её ${slayPlural(otherUses, 'использует', 'используют', 'используют')} ещё ${otherUses} ${slayPlural(otherUses, 'место', 'места', 'мест')} (другой образ, вещь гардероба или слот в другом чате).`
                 : `\n\nБольше на эту картинку никто не ссылается — она будет удалена и с диска.`;
             if (!(await slayConfirm(head + tail))) return;
             _swSelLook = null;
