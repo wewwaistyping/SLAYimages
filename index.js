@@ -759,7 +759,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
         // Never paint over a live form. Its Save/Cancel buttons are in this very
         // subtree; overwriting them without answering the form is what left the
         // import awaiting a reply that could no longer come.
-        if (_savedContent !== null && content) { swAbortInline(); return; }
+        if (_savedContent !== null && content) { swAbortInline({ notify: true }); return; }
         const modeWrap = document.getElementById('sw-mode-switch');
         const catWrap = document.getElementById('sw-cat-tabs');
         const tagWrap = document.getElementById('sw-tag-filter');
@@ -1082,11 +1082,12 @@ const SLAY_VERSION = '4.4.0-beta.1';
     // Chrome that is meaningless while a sub-form is open. On a phone these four
     // rows plus the worn-outfit strip ate well over 300px, which is why editing an
     // outfit showed a three-line description box under a screenful of filters.
-    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter',
-        // The header row belongs here too. Both of these call swRender(), they sit
-        // ABOVE #sw-tab-content rather than inside it, and they stayed lit while a
-        // form was open — one tap repainted the grid over the form and stranded it.
-        'sw-type-tabs', 'sw-show-hidden-toggle'];
+    // The header row (Бот/Юзер, Скрытые) deliberately stays OUT of this list.
+    // Hiding it did stop those taps stranding an open form, but it also took away
+    // the only way to leave the section while editing. They are safe to leave lit
+    // now: both call swRender(), and swRender cancels an open form properly before
+    // painting, so the tap does what the user meant — switch section, drop the edit.
+    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter'];
     let _savedScroll = 0;
     // How to settle the open form's promise, and what to say if it is torn down
     // from outside. A form resolves ONLY from its own Save/Cancel buttons, which
@@ -1460,9 +1461,29 @@ const SLAY_VERSION = '4.4.0-beta.1';
                         <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`, () => resolve(null), 'Редактирование отменено');
+                </div>`, () => { settleImage(false); resolve(null); }, 'Редактирование отменено');
             if (!el) { resolve(null); return; }
-            const close = (val) => { swRestoreInline(); resolve(val); };
+
+            // Replacing the picture used to write straight into the item and delete
+            // the old file on the spot, so «Отмена» could not undo it — there was
+            // nothing left to undo. The new file is now held aside and only becomes
+            // the item's picture if the user saves.
+            let pendingImagePath = null;
+            const settleImage = (commit) => {
+                if (!pendingImagePath) return;
+                if (commit) {
+                    const oldPath = item.imagePath;
+                    item.imagePath = pendingImagePath;
+                    item.base64 = '';
+                    if (oldPath && oldPath !== pendingImagePath) swDeleteImageFile(oldPath, { ignoreItemId: item.id });
+                } else {
+                    // Nothing ever pointed at it, so it is safe to take back off disk.
+                    swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
+                }
+                pendingImagePath = null;
+            };
+
+            const close = (val) => { settleImage(!!val); swRestoreInline(); resolve(val); };
             el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
             // ── Replace image: keep ALL metadata (name/desc/category/forWho/gender/tags),
             // swap only the picture. Mutates the live item + saves immediately (independent
@@ -1480,17 +1501,14 @@ const SLAY_VERSION = '4.4.0-beta.1';
                     _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
                     const { base64, format } = await swResize(f, swGetSettings().maxDimension);
                     const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
-                    const oldPath = item.imagePath;
-                    item.imagePath = path;
-                    item.base64 = '';
-                    swSave();
-                    // Old picture is unreferenced now — don't leave it on disk.
-                    if (oldPath && oldPath !== path) swDeleteImageFile(oldPath, { ignoreItemId: item.id });
-                    swUpdatePromptInjection();
+                    // Picking a second picture before saving must not leave the first
+                    // one stranded on disk with nothing pointing at it.
+                    if (pendingImagePath && pendingImagePath !== path) swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
+                    pendingImagePath = path;
                     const thumb = el.querySelector('#sw-edit-thumb');
                     if (thumb) thumb.src = path + '?t=' + Date.now();
                     try { toastr.clear(_tReplace); } catch (_) {}
-                    toastr.success('Картинка заменена', 'Гардероб', { timeOut: 2000 });
+                    toastr.info('Новая картинка выбрана — нажмите «Сохранить»', 'Гардероб', { timeOut: 3000 });
                 } catch (e) { toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
                 finally { replaceFile.value = ''; try { toastr.clear(_tReplace); } catch (_) {} }
             });
