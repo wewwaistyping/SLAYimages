@@ -1499,8 +1499,25 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 if (!f) return;
                 let _tReplace = null;
                 try {
+                    // Read the file NOW, while the picker handle is fresh — on Android a
+                    // File is a content:// ticket that expires while a dialog is open.
+                    const raw = await new Promise((res, rej) => {
+                        const r = new FileReader();
+                        r.onloadend = () => res(r.result);
+                        r.onerror = rej;
+                        r.readAsDataURL(f);
+                    });
+                    // Uploading a new outfit offers the crop; replacing the picture on an
+                    // existing one skipped straight past it, so the same photo came out
+                    // framed one way or the other depending on which button you pressed.
+                    let dataUrl = raw;
+                    if (slayCropEnabled()) {
+                        const cropped = await slayCropImage(dataUrl, { aspect: 0, title: 'Обрезать вещь', subtitle: 'Можно оставить как есть' });
+                        if (cropped === null) { replaceFile.value = ''; return; }
+                        dataUrl = cropped;
+                    }
                     _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
-                    const { base64, format } = await swResize(f, swGetSettings().maxDimension);
+                    const { base64, format } = await swResize(dataUrl, swGetSettings().maxDimension);
                     const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
                     // Picking a second picture before saving must not leave the first
                     // one stranded on disk with nothing pointing at it.
