@@ -2699,8 +2699,13 @@
     margin-top: 9px;
 }
 .iig-look-assign-lbl { font-size: 10.5px; color: #6c6976; }
-.iig-assign-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.iig-assign-chips { display: flex; gap: 5px; flex-wrap: wrap; flex: 1 1 auto; }
 .iig-look-chip {
+    /* Stretch to the panel edge, like the tool row directly above. Left as
+       natural width, the chips stopped short of the right margin while the
+       buttons above reached it — two rows, two different edges. */
+    flex: 1 1 auto;
+    text-align: center;
     font-size: 10.5px;
     padding: 5px 10px;
     border-radius: 7px;
@@ -2841,7 +2846,9 @@
     .iig-look-chip {
         font-size: 12.5px;
         padding: 9px 14px;
-        flex-shrink: 0;
+        /* The row scrolls sideways here, so keep natural widths — stretching
+           would defeat the scrolling and inflate two chips to half a screen. */
+        flex: 0 0 auto;
     }
 
     /* 16px or iOS zooms the entire page on focus and never zooms back out.
