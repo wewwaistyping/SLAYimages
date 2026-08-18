@@ -2352,17 +2352,34 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 return;
             }
 
+            const nWard = found.filter(x => x.folder === 'гардероб').length;
+            const nRefs = found.filter(x => x.folder === 'референсы').length;
             const byFolder = found.reduce((acc, x) => { acc[x.folder] = (acc[x.folder] || 0) + 1; return acc; }, {});
             const breakdown = Object.entries(byFolder).map(([k, v]) => `· ${v} в разделе «${k}»`).join('\n');
-            const ok = await slayConfirm(
-                `Проверено ${total} картинок во всех папках.\n\n` +
-                `На ${found.length} из них не ссылается ничего — ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате:\n${breakdown}\n\n` +
-                `Удалить их с диска?`);
-            if (!ok) return;
+            // Three outcomes, not two: someone may well want to clear hundreds of
+            // stale references while keeping every wardrobe picture, or the other
+            // way round. Forcing that into one yes/no was the wrong question.
+            const opts = [];
+            if (nRefs) opts.push({ key: 'refs', label: `Только референсы (${nRefs})` });
+            if (nWard) opts.push({ key: 'ward', label: `Только гардероб (${nWard})` });
+            if (nRefs && nWard) opts.push({ key: 'both', label: `И то и другое (${found.length})`, danger: true });
+            else if (opts.length === 1) opts[0].primary = true;
+
+            const pick = await slayChoose(
+                'Ничьи картинки',
+                `Проверено ${total} картинок во всех папках.@BR@@BR@` +
+                `На ${found.length} не ссылается ничего — ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате.@BR@@BR@` +
+                `Что удалить с диска?`,
+                opts);
+            if (!pick) return;
+            const doomed = pick === 'both' ? found
+                : pick === 'refs' ? found.filter(x => x.folder === 'референсы')
+                : found.filter(x => x.folder === 'гардероб');
+            if (!doomed.length) return;
 
             const t2 = toastr.info('Удаляю...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
             let killed = 0;
-            for (const x of found) {
+            for (const x of doomed) {
                 const res = await fetch('/api/images/delete', {
                     method: 'POST', headers: ctx.getRequestHeaders(),
                     body: JSON.stringify({ path: x.path.replace(/^[/]/, '') })
@@ -2370,7 +2387,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 if (res.ok) killed++;
             }
             try { toastr.clear(t2); } catch (_) {}
-            toastr.success(`Удалено ${killed} из ${found.length}`, 'Гардероб', { timeOut: 5000 });
+            toastr.success(`Удалено ${killed} из ${doomed.length}`, 'Гардероб', { timeOut: 5000 });
         } catch (e) {
             try { toastr.clear(t); } catch (_) {}
             toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб');
@@ -4344,6 +4361,42 @@ async function slayRecropExisting(path, opts = {}) {
     }
 }
 
+// Small chooser: a question with several named answers, because slayConfirm's
+// yes/no forces "delete everything or nothing" on a decision that has three
+// sensible outcomes. Returns the chosen key, or null.
+function slayChoose(title, text, options) {
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-choose-ov';
+        ov.innerHTML = `
+            <div class="slay-choose-box">
+                <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
+                <div class="slay-choose-x">${sanitizeForHtml(text).replace(/@BR@/g, '<br>')}</div>
+                <div class="slay-choose-btns">
+                    ${options.map(o => `<button class="slay-choose-b${o.danger ? ' danger' : ''}${o.primary ? ' primary' : ''}" data-k="${sanitizeForHtml(o.key)}">${sanitizeForHtml(o.label)}</button>`).join('')}
+                    <button class="slay-choose-b ghost" data-k="">Отмена</button>
+                </div>
+            </div>`;
+        document.body.appendChild(ov);
+        let done = false;
+        const finish = (k) => { if (done) return; done = true; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(k || null); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(null); } };
+        document.addEventListener('keydown', onKey, true);
+        // Same isolation the crop overlay needs: these clicks must not reach the
+        // document-level handlers that close the wardrobe and the ref popups.
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) {
+            ov.addEventListener(type, (e) => {
+                if (type === 'click') {
+                    const b = e.target.closest('.slay-choose-b');
+                    if (b) finish(b.dataset.k);
+                    else if (e.target === ov) finish(null);
+                }
+                e.stopPropagation();
+            });
+        }
+    });
+}
+
 function slayCropEnabled() {
     try { return getSettings().skipCrop !== true; } catch (_) { return true; }
 }
@@ -5914,7 +5967,7 @@ function createSettingsUI() {
     let npcSlotsHtml = '';
     for (let i = 0; i < 4; i++) {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
-            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div><div class="iig-ref-save-btn" title="Сохранить персонажа"><i class="fa-solid fa-floppy-disk"></i></div></div>
+            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
             <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
             <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div>
             <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
@@ -5978,8 +6031,8 @@ function createSettingsUI() {
                     <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div><div class="iig-ref-save-btn" title="Сохранить персонажа"><i class="fa-solid fa-floppy-disk"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div><div class="iig-ref-save-btn" title="Сохранить персонажа"><i class="fa-solid fa-floppy-disk"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>

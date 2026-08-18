@@ -1363,14 +1363,27 @@
     #sw-cat-tabs, #sw-tag-filter, #sw-forwho-filter {
         flex-wrap: nowrap;
         overflow-x: auto;
-        overflow-y: hidden;
+        /* No overflow-y here. Pairing it with overflow-x on a height-less flex
+           row makes iOS Safari clip the contents to nothing: the chips became
+           flat grey bars with no text and stopped taking taps. The row is one
+           line by construction, so there is nothing to clip vertically anyway. */
+        align-items: center;
+        min-height: 38px;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
     }
     #sw-cat-tabs::-webkit-scrollbar,
     #sw-tag-filter::-webkit-scrollbar,
     #sw-forwho-filter::-webkit-scrollbar { display: none; }
-    #sw-cat-tabs > *, #sw-tag-filter > *, #sw-forwho-filter > * { flex: 0 0 auto; }
+    /* Never shrink, never wrap the label: a squeezed chip is an unreadable and
+       unhittable chip. */
+    #sw-cat-tabs > *, #sw-tag-filter > *, #sw-forwho-filter > * {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        min-height: 30px;
+        display: inline-flex;
+        align-items: center;
+    }
     .sw-outfit-grid {
         grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
         gap: 8px;
@@ -3162,4 +3175,96 @@
 @media (max-width: 600px) {
     /* Two per row rather than four squeezed ones, and tall enough to hit. */
     .iig-look-tool { flex: 1 1 calc(50% - 3px); min-height: 40px; font-size: 12.5px; }
+}
+
+/* ============ Кроп и выбор: починка на телефонах ============ */
+/* Two things broke this on phones. The panel took its background from
+   --SmartThemeBlurTintColor, which custom themes are free to define as a
+   translucent colour — so the dialog turned into glass and the page showed
+   through it. And the picture area had no floor under it, so when it collapsed
+   the buttons scattered across whatever was behind. Both get fixed by not
+   depending on anything the theme can take away. */
+
+.slay-crop-ov {
+    /* vh first for older iOS Safari, dvh after for everyone else. */
+    height: 100vh;
+    height: 100dvh;
+    background: rgba(6, 6, 10, 0.92);
+}
+
+.slay-crop-box {
+    /* Opaque floor of our own; the theme tint sits on top of it, so a
+       translucent theme colour can tint the panel but never hollow it out. */
+    background-color: #16161c;
+    background-image: linear-gradient(var(--SmartThemeBlurTintColor, transparent), var(--SmartThemeBlurTintColor, transparent));
+}
+
+.slay-crop-stage {
+    /* A floor for the picture area. Without it a slow-decoding image left the
+       stage at zero height and the dialog folded in on itself. */
+    min-height: 180px;
+    max-height: 52vh;
+    max-height: 52dvh;
+}
+.slay-crop-img {
+    max-height: 52vh;
+    max-height: 52dvh;
+}
+
+/* ---- Chooser ---- */
+.slay-choose-ov {
+    position: fixed;
+    inset: 0;
+    z-index: 100001;
+    background: rgba(6, 6, 10, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+.slay-choose-box {
+    background-color: #16161c;
+    background-image: linear-gradient(var(--SmartThemeBlurTintColor, transparent), var(--SmartThemeBlurTintColor, transparent));
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 26%, transparent);
+    border-radius: 14px;
+    box-shadow: 0 18px 52px rgba(0, 0, 0, 0.6);
+    padding: 16px;
+    width: 100%;
+    max-width: 430px;
+}
+.slay-choose-t { font-size: 15px; font-weight: 600; color: var(--slay-pink); margin-bottom: 8px; }
+.slay-choose-x { font-size: 12.5px; line-height: 1.55; opacity: 0.8; margin-bottom: 14px; }
+.slay-choose-btns { display: flex; flex-direction: column; gap: 7px; }
+.slay-choose-b {
+    /* Stacked and full width: these answers are sentences, not words, and on a
+       phone a row of them would truncate into uselessness. */
+    min-height: 44px;
+    padding: 11px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 30%, transparent);
+    background: color-mix(in srgb, var(--slay-pink) 10%, transparent);
+    color: var(--slay-pink);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+.slay-choose-b.primary { background: var(--slay-pink); color: #17171d; font-weight: 600; }
+.slay-choose-b.danger { border-color: rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.12); color: #f87171; }
+.slay-choose-b.ghost { background: rgba(255, 255, 255, 0.06); border-color: var(--SmartThemeBorderColor); color: inherit; opacity: 0.75; }
+.slay-choose-b:active { transform: scale(0.98); }
+
+/* Крышка от «кроп улетел наверх»: когда панель выше экрана, центрирование
+   выталкивает её верх за границу окна и заголовок с пропорциями становится
+   недосягаем. Прижимаем к верху и позволяем оверлею прокручиваться. */
+.slay-crop-ov {
+    align-items: flex-start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.slay-crop-box {
+    /* auto-margins centre it while there is room, and stop fighting the moment
+       there isn't — unlike align-items:center, which centres past the edge. */
+    margin: auto;
+    max-height: none;
 }
