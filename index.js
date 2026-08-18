@@ -1082,12 +1082,13 @@ const SLAY_VERSION = '4.4.0-beta.1';
     // Chrome that is meaningless while a sub-form is open. On a phone these four
     // rows plus the worn-outfit strip ate well over 300px, which is why editing an
     // outfit showed a three-line description box under a screenful of filters.
-    // The header row (Бот/Юзер, Скрытые) deliberately stays OUT of this list.
-    // Hiding it did stop those taps stranding an open form, but it also took away
-    // the only way to leave the section while editing. They are safe to leave lit
-    // now: both call swRender(), and swRender cancels an open form properly before
-    // painting, so the tap does what the user meant — switch section, drop the edit.
-    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter'];
+    // The header row goes with the rest. While a form is up, Бот/Юзер answers a
+    // question the form is not asking — the upload form has its own «Для кого» field
+    // that does the same job — and «Скрытые» filters a grid nobody can see.
+    // The way out of a form is «Отмена», or Escape, both of which now leave the
+    // wardrobe standing; you are one tap from the tabs again, not trapped.
+    const SW_CHROME_IDS = ['sw-current-outfit', 'sw-mode-switch', 'sw-cat-tabs', 'sw-tag-filter', 'sw-forwho-filter',
+        'sw-type-tabs', 'sw-show-hidden-toggle'];
     let _savedScroll = 0;
     // How to settle the open form's promise, and what to say if it is torn down
     // from outside. A form resolves ONLY from its own Save/Cancel buttons, which
@@ -6386,8 +6387,7 @@ function createSettingsUI() {
                     gallery update by <a href="https://github.com/hydall" target="_blank" style="color:inherit;text-decoration:underline;">hydall</a>
                     · based on sillyimages by <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a>,
                     wardrobe system by <a href="https://github.com/delidgi/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">delidgi</a>,
-                    NPC system by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a><br>
-                    <a href="https://github.com/wewwaistyping/SLAYimages" target="_blank" style="color:inherit;text-decoration:underline;">AGPL-3.0 · исходники</a>
+                    NPC system by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a>
                 </p>
                 <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
