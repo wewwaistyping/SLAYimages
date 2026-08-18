@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '4.4.0-beta.1';
+const SLAY_VERSION = '5.0.0';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1280,8 +1280,9 @@ const SLAY_VERSION = '4.4.0-beta.1';
     async function swExportItem(id) {
         const o = swFindItem(id);
         if (!o) { toastr.error('Предмет не найден', 'Гардероб'); return; }
+        let _tExport = null;
         try {
-            const _tExport = toastr.info('Собираю карточку...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+            _tExport = toastr.info('Собираю карточку...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
             // Load the current image (path preferred, inline base64 fallback)
             const src = swGetOutfitSrc(o);
             if (!src) throw new Error('у предмета нет картинки');
@@ -1743,6 +1744,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                     swLog('INFO', `Description truncated to ${desc.length} chars`);
                 }
                 if (desc && desc.length > 10) {
+                    try { toastr.clear(_tDescribe); } catch (_) {}
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
                 swLog('WARN', `Direct API: unusable result (len=${desc?.length || 0})`);
@@ -1769,7 +1771,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
-                if (desc && desc.length > 10) { return desc; }
+                if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
@@ -1779,7 +1781,7 @@ const SLAY_VERSION = '4.4.0-beta.1';
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
-                if (desc && desc.length > 10) { return desc; }
+                if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
@@ -2551,16 +2553,48 @@ const SLAY_VERSION = '4.4.0-beta.1';
             if (!doomed.length) return;
 
             const t2 = toastr.info('Удаляю...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+            // One refusal used to abort the whole run and report nothing — you
+            // never learnt that forty files had already gone. Now each failure is
+            // noted with its reason and the sweep carries on.
             let killed = 0;
+            const failed = [];
             for (const x of doomed) {
-                const res = await fetch('/api/images/delete', {
-                    method: 'POST', headers: ctx.getRequestHeaders(),
-                    body: JSON.stringify({ path: x.path.replace(/^[/]/, '') })
-                });
-                if (res.ok) killed++;
+                const name = x.path.split('/').pop();
+                try {
+                    const res = await fetch('/api/images/delete', {
+                        method: 'POST', headers: ctx.getRequestHeaders(),
+                        body: JSON.stringify({ path: x.path.replace(/^[/]/, '') })
+                    });
+                    if (res.ok) { killed++; continue; }
+                    const why = res.status === 403 ? 'нет доступа'
+                        : res.status === 404 ? 'файла уже нет'
+                        : res.status === 423 || res.status === 409 ? 'файл занят'
+                        : res.status >= 500 ? 'ошибка сервера'
+                        : `сервер ответил ${res.status}`;
+                    failed.push({ name, why });
+                } catch (e) {
+                    failed.push({ name, why: e?.message ? `нет связи (${e.message})` : 'нет связи' });
+                }
             }
             try { toastr.clear(t2); } catch (_) {}
-            toastr.success(`Удалено ${killed} из ${doomed.length}`, 'Гардероб', { timeOut: 5000 });
+
+            if (!failed.length) {
+                toastr.success(`Удалено ${killed} из ${doomed.length}`, 'Гардероб', { timeOut: 5000 });
+            } else {
+                // Group by reason: ten files refused for one reason is one line,
+                // not ten. Names for the first few so the user can go look.
+                const byWhy = failed.reduce((acc, f) => { (acc[f.why] = acc[f.why] || []).push(f.name); return acc; }, {});
+                const lines = Object.entries(byWhy).map(([why, names]) => {
+                    const shown = names.slice(0, 3).join(', ');
+                    const more = names.length > 3 ? ` и ещё ${names.length - 3}` : '';
+                    return `· ${why}: ${shown}${more}`;
+                });
+                swLog('WARN', `orphan sweep: ${failed.length} failed`, byWhy);
+                toastr.warning(
+                    `Удалено ${killed} из ${doomed.length}. Не вышло ${failed.length}:<br>${lines.join('<br>')}`,
+                    'Гардероб',
+                    { timeOut: 12000, extendedTimeOut: 6000, escapeHtml: false });
+            }
         } catch (e) {
             try { toastr.clear(t); } catch (_) {}
             toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб');
@@ -3410,6 +3444,10 @@ function getSavedChars() {
 function migrateSavedPortraits(settings) {
     const old = settings.savedPortraits;
     if (!Array.isArray(old) || !old.length) return;
+    // Grouping is by ANY shared name, so «Саша Иванов» and «Саша Петров» become
+    // one person. That is usually right and occasionally wrong, there is no
+    // un-merge, and the source list is deleted at the end — so keep a copy.
+    try { settings.savedPortraitsBackup = JSON.parse(JSON.stringify(old)); } catch (_) {}
     for (const p of old) {
         if (!p || !p.path) continue;
         const mine = swNameList(p.name || '').map(x => x.toLowerCase());
@@ -3770,8 +3808,12 @@ async function lookupRefByHash(hash) { return lookupRefByHashes({ byteHash: hash
 // hash of the written bytes — every ref from before that (hundreds, in a
 // long-running install) still hashed differently from its own stored copy and
 // got duplicated on every re-pick. Matching the filename covers all of them.
-async function resolveExistingRefByFileName(file) {
+async function resolveExistingRefByFileName(file, { edited = false } = {}) {
     try {
+        // The shortcut identifies the file the user PICKED. If they cropped it
+        // since, the stored copy under that name is a different picture, and
+        // reusing it threw the crop away without a word.
+        if (edited) return null;
         const name = String(file && file.name || '');
         if (!/^iig_ref_.+\.(jpe?g|png|webp)$/i.test(name)) return null;
         const path = `/user/images/iig_refs/${encodeURIComponent(name)}`;
@@ -6453,7 +6495,11 @@ function createSettingsUI() {
         saveSettings();
         if (willShow) renderSavedPortraits();
     });
-    renderSavedPortraits();   // fills the counter even while collapsed
+    // Guarded like the other five call sites. This one runs mid-way through
+    // building the panel, so a throw here would silently skip everything after
+    // it — the lightbox, the regen buttons and the tab-close save net — leaving
+    // settings that look fine while half the extension is not wired up.
+    try { renderSavedPortraits(); } catch (e) { iigLog('WARN', 'renderSavedPortraits failed:', e?.message); }
 }
 
 // Write saved path to the correct ref slot (char / user / NPC N) AND update its thumbnail in UI.
@@ -6660,10 +6706,12 @@ function renderSavedPortraits() {
                     r.onerror = rej;
                     r.readAsDataURL(file);
                 });
+                const beforeCrop = rawBase64;
                 rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать образ', subtitle: 'Плитка образа — пропорции 3:4' });
                 if (rawBase64 === null) { try { toastr.clear(loadingToast); } catch (_) {} return; }
-                // Cheapest check first: the file's own name.
-                let savedPath = await resolveExistingRefByFileName(file);
+                // Cheapest check first: the file's own name — but only while the
+                // picture is still the one that file holds.
+                let savedPath = await resolveExistingRefByFileName(file, { edited: rawBase64 !== beforeCrop });
                 const hashes = await computeRefHashes(rawBase64);
                 if (!savedPath) savedPath = await lookupRefByHashes(hashes);
                 if (savedPath) {
@@ -6758,11 +6806,12 @@ function renderSavedPortraits() {
                         r.onerror = rej;
                         r.readAsDataURL(file);
                     });
+                    const rawBefore = raw;
                     raw = await slayMaybeCrop(raw, { title: 'Обрезать образ', subtitle: look.label || sel.names });
                     if (raw === null) { try { toastr.clear(t); } catch (_) {} return; }
                     // Same reuse-before-write path as every other upload, so
                     // picking a file already in iig_refs writes no second copy.
-                    let saved = await resolveExistingRefByFileName(file);
+                    let saved = await resolveExistingRefByFileName(file, { edited: raw !== rawBefore });
                     const hashes = await computeRefHashes(raw);
                     if (!saved) saved = await lookupRefByHashes(hashes);
                     if (!saved) {
@@ -7236,6 +7285,7 @@ function bindRefSlotEvents() {
                 let rawBase64 = await new Promise((res, rej) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
                 // Crop BEFORE hashing: the cropped bytes are what gets stored, so
                 // they must be what the dedup index remembers.
+                const beforeCrop = rawBase64;
                 rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать реф', subtitle: 'Слот показывает картинку в пропорциях 3:4' });
                 if (rawBase64 === null) { e.target.value = ''; return; }
                 // Compute BOTH hashes (byte for exact match, pixel for "same image re-encoded differently")
@@ -7243,7 +7293,7 @@ function bindRefSlotEvents() {
                 // A file picked straight out of iig_refs is already ours — match
                 // it by name before falling back to content hashing, which can
                 // only recognise refs saved after we began hashing stored bytes.
-                const cached = (await resolveExistingRefByFileName(file)) || await lookupRefByHashes(hashes);
+                const cached = (await resolveExistingRefByFileName(file, { edited: rawBase64 !== beforeCrop })) || await lookupRefByHashes(hashes);
                 if (cached) {
                     applyPathToSlot(slot, refType, npcIndex, cached);
                     pushRecentRef(cached);
