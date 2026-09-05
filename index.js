@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.0.1-beta.4';
+const SLAY_VERSION = '5.0.1-beta.5';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -6268,13 +6268,13 @@ async function processMessageTags(messageId) {
     };
 
     try {
-        // Two at a time. A message carrying five tags used to fire five paid
-        // requests simultaneously — rate limits, and a bill nobody expected.
-        const queue = tags.map((tag, index) => () => processTag(tag, index));
-        const runners = Array.from({ length: Math.min(2, queue.length) }, async () => {
-            while (queue.length) { const job = queue.shift(); if (job) await job(); }
-        });
-        await Promise.all(runners);
+        // All at once, on purpose. A queue was tried here and reverted: the tags
+        // come from the author's own prompt design, so five tags means five
+        // pictures were asked for deliberately. Worse, the loading placeholder is
+        // created inside processTag, so anything waiting its turn sat in the
+        // message as a broken-image icon with no spinner until the queue reached
+        // it — the generation looked dead while it had simply not started.
+        await Promise.all(tags.map((tag, index) => processTag(tag, index)));
     } finally {
         try {
             recentlyProcessed.set(messageId, Date.now());
