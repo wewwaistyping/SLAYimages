@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.0.1-beta.3';
+const SLAY_VERSION = '5.0.1-beta.4';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -5527,7 +5527,13 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // Priority order: char face → user face → wardrobe → NPC faces → context
     const naisteraRefLabels = [];
     const currentNaisteraModelForRefs = normalizeNaisteraModel(options.model || settings.naisteraModel);
-    const supportsNaisteraRefs = currentNaisteraModelForRefs === 'grok' || currentNaisteraModelForRefs === 'nano banana';
+    // Match the FAMILY, not two exact strings. This is the gate that decides
+    // whether references are sent at all, and it was still testing for the two
+    // model names that existed when it was written — so picking Nano Banana 2
+    // silently shipped no references while the settings panel still showed the
+    // reference slots. (The cosmetic twin of this line was updated and this one
+    // was not, which is exactly how it slipped out.)
+    const supportsNaisteraRefs = currentNaisteraModelForRefs.startsWith('grok') || currentNaisteraModelForRefs.startsWith('nano banana');
     if (settings.apiType === 'naistera' && supportsNaisteraRefs) {
         const getDataUrl = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return 'data:image/jpeg;base64,' + b64; }
