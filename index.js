@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.0.1-beta.2';
+const SLAY_VERSION = '5.0.1-beta.3';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -2896,7 +2896,14 @@ function isGeminiModel(modelId) {
 }
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
-const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
+const NAISTERA_MODELS = Object.freeze([
+    'grok', 'grok-pro',
+    'nano banana 2', 'nano banana 2 lite', 'nano banana pro',
+    'novelai v4.5', 'novelai v5',
+    // Legacy values people already have stored — dropping them would reset
+    // everyone to grok on update.
+    'nano banana', 'novelai',
+]);
 const NAISTERA_MANUAL = '__manual__';
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
 const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
@@ -2914,7 +2921,7 @@ function normalizeNaisteraModel(model) {
     // not reach it by any means, including typing it out.
     return raw;
 }
-function shouldUseNaisteraVideoTest(model) { const n = normalizeNaisteraModel(model); return n === 'grok' || n === 'nano banana'; }
+function shouldUseNaisteraVideoTest(model) { const n = normalizeNaisteraModel(model); return n.startsWith('grok') || n.startsWith('nano banana'); }
 function normalizeNaisteraVideoFrequency(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, 999); }
 function normalizeImageContextCount(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, MAX_CONTEXT_IMAGES); }
 
@@ -6517,7 +6524,7 @@ function createSettingsUI() {
                         <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="auto" ${(settings.aspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
                         <div class="flex-row"><label>Разрешение</label><select id="slay_image_size" class="flex1"><option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K</option><option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option><option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option></select></div>
                     </div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option><option value="${NAISTERA_MANUAL}" ${!NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? 'selected' : ''}>— вписать вручную —</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="nano banana 2" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2' ? 'selected' : ''}>Nano Banana 2</option><option value="nano banana 2 lite" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2 lite' ? 'selected' : ''}>Nano Banana 2 Lite</option><option value="nano banana pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana pro' ? 'selected' : ''}>Nano Banana Pro</option><option value="novelai v4.5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v4.5' ? 'selected' : ''}>NovelAI V4.5</option><option value="novelai v5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v5' ? 'selected' : ''}>NovelAI V5</option><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana (старая)</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI (старая)</option><option value="${NAISTERA_MANUAL}" ${!NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? 'selected' : ''}>— вписать вручную —</option></select></div>
                     <div class="flex-row ${settings.apiType === 'naistera' && !NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : 'iig-hidden'}" id="slay_naistera_manual_row"><label>Название модели</label><input type="text" id="slay_naistera_model_manual" class="text_pole flex1" placeholder="например nano-banana-2-lite" value="${sanitizeForHtml(NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : (settings.naisteraModel || ''))}" autocomplete="off" spellcheck="false"></div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
                     <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
@@ -7929,7 +7936,7 @@ function bindSettingsEvents() {
         // Custom + images/generations body: no slot for reference images —
         // hide the refs UI so users don't configure refs that silently vanish.
         const isCustomImages = isCustom && (settings.customBodyFormat || 'chat') === 'images';
-        const supportsRefs = (!isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana') && !isCustomImages;
+        const supportsRefs = (!isNaistera || currentNaisModel.startsWith('grok') || currentNaisModel.startsWith('nano banana')) && !isCustomImages;
 
         document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
         // size (WxH) is used by openai dall-e style AND custom images/generations
