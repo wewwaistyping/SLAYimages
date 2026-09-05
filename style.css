@@ -332,9 +332,27 @@
     opacity: 0.75;
     max-width: 100%;
     word-break: break-word;
-    max-height: 3.5em;
+    /* Four lines, not two. Two fitted "HTTP 404" and nothing else; the
+       explanations that make the error useful are all longer than that. */
+    max-height: 6.2em;
     overflow: hidden;
     text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+}
+/* The address we knocked on. Quiet, but present: an unfamiliar /v1beta/ here is
+   usually the moment someone realises their API type is wrong. */
+.iig-error-placeholder .iig-error-url {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.68em;
+    line-height: 1.35;
+    color: var(--SmartThemeBodyColor, rgba(255,255,255,0.7));
+    opacity: 0.42;
+    max-width: 100%;
+    word-break: break-all;
+    max-height: 2.7em;
+    overflow: hidden;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;

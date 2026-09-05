@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.0.0';
+const SLAY_VERSION = '5.0.1-beta.2';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -919,7 +919,7 @@ const SLAY_VERSION = '5.0.0';
             if (hid) classes.push('sw-outfit-hidden');
             const _src = swGetOutfitSrc(o);
             const _imgInner = _src
-                ? `<img src="${_src}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy">`
+                ? `<img src="${_src}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy" decoding="async">`
                 : `<div class="sw-img-missing"><i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span></div>`;
             h += `<div class="${classes.join(' ')}" data-id="${o.id}">
                 <div class="sw-outfit-img-wrap">
@@ -1020,7 +1020,7 @@ const SLAY_VERSION = '5.0.0';
             if (item) {
                 const src = swGetOutfitSrc(item);
                 slotsHtml += `<div class="sw-current-slot">
-                    <img src="${src}" class="sw-current-slot-img" alt="${esc(item.name)}" title="${esc(item.name)}">
+                    <img src="${src}" class="sw-current-slot-img" alt="${esc(item.name)}" title="${esc(item.name)}" decoding="async">
                     <span class="sw-current-slot-label">${esc(CATEGORIES[cat])}</span>
                 </div>`;
             } else {
@@ -1976,7 +1976,16 @@ const SLAY_VERSION = '5.0.0';
 
 
     function swInjectFloatingBtn() {
-        if (swGetSettings().wardrobeEnabled === false) { $('#sw-bar-btn').remove(); return; }
+        const swS = swGetSettings();
+        if (swS.wardrobeEnabled === false) { $('#sw-bar-btn').remove(); return; }
+        // The button used to be built regardless of this setting, so every existing
+        // user has the untouched default (false) stored while plainly SEEING the
+        // button. Start honouring the setting without this and it vanishes for all
+        // of them at once, with no idea which switch brought it back.
+        if (swS.floatBtnMigrated !== true) { swS.showFloatingBtn = true; swS.floatBtnMigrated = true; swSave(); }
+        // Honour the checkbox on every build, not just when it is clicked. It used
+        // to hide the button live and then forget: one reload and it was back.
+        if (swS.showFloatingBtn !== true) { $('#sw-bar-btn').remove(); return; }
         let $btn = $('#sw-bar-btn');
         if ($btn.length === 0) {
             $btn = $('<div id="sw-bar-btn" title="Гардероб"><i class="fa-solid fa-shirt"></i></div>');
@@ -2678,12 +2687,17 @@ const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platfo
 const FETCH_TIMEOUT = IS_IOS ? 180000 : 300000;
 
 function robustFetch(url, options = {}) {
+    // Stamp the address onto every failure. Without it the error that reaches the
+    // user says "network error" and nothing else — and the one fact that would
+    // have explained it (we were knocking on /v1beta/… while the host serves /v1)
+    // was known here and thrown away.
+    const stamp = (err) => { try { err.slayUrl = url; } catch (_) {} return err; };
     if (!IS_IOS) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
         return fetch(url, { ...options, signal: controller.signal })
             .then(r => { clearTimeout(timeoutId); return r; })
-            .catch(e => { clearTimeout(timeoutId); if (e.name === 'AbortError') throw new Error('Request timed out after 5 minutes'); throw e; });
+            .catch(e => { clearTimeout(timeoutId); if (e.name === 'AbortError') throw stamp(new Error('Request timed out after 5 minutes')); throw stamp(e); });
     }
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -2692,9 +2706,9 @@ function robustFetch(url, options = {}) {
         xhr.responseType = 'text';
         if (options.headers) { for (const [key, value] of Object.entries(options.headers)) { xhr.setRequestHeader(key, value); } }
         xhr.onload = () => { resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, statusText: xhr.statusText, text: () => Promise.resolve(xhr.responseText), json: () => Promise.resolve(JSON.parse(xhr.responseText)), headers: { get: (name) => xhr.getResponseHeader(name) } }); };
-        xhr.ontimeout = () => reject(new Error('Request timed out after 3 minutes (iOS)'));
-        xhr.onerror = () => reject(new Error('Network error (iOS)'));
-        xhr.onabort = () => reject(new Error('Request aborted (iOS)'));
+        xhr.ontimeout = () => reject(stamp(new Error('Request timed out after 3 minutes (iOS)')));
+        xhr.onerror = () => reject(stamp(new Error('Network error (iOS)')));
+        xhr.onabort = () => reject(stamp(new Error('Request aborted (iOS)')));
         xhr.send(options.body || null);
     });
 }
@@ -2846,6 +2860,29 @@ const VIDEO_MODEL_KEYWORDS = [
     'vidu', 'wan-ai', 'hunyuan', 'hailuo'
 ];
 
+// Where the model list lives depends on which dialect the endpoint speaks.
+// Gemini-style hosts answer /v1beta/models; OpenAI-style hosts answer /v1/models.
+// Probing the wrong one is worse than probing nothing: a proxy that serves
+// /v1 will happily list its models there while generation goes to
+// /v1beta/models/…:generateContent and 404s, so «Тест» said OK about a
+// connection that could not possibly work. That is a real support case.
+function slayModelsUrl(apiType, base) {
+    return apiType === 'gemini' ? `${base}/v1beta/models` : `${base}/v1/models`;
+}
+
+// Accept both shapes, whatever the host claims to be: OpenAI returns
+// { data: [{ id }] }, Google returns { models: [{ name: 'models/gemini-…' }] }.
+// Proxies mix them freely.
+function slayParseModelList(data) {
+    const out = [];
+    for (const m of (data?.data || [])) { const id = m?.id || m?.model; if (id) out.push(String(id)); }
+    for (const m of (data?.models || [])) {
+        const n = m?.name || m?.id;
+        if (n) out.push(String(n).replace(/^models\//, ''));
+    }
+    return out.filter(Boolean);
+}
+
 function isImageModel(modelId) {
     const mid = modelId.toLowerCase();
     for (const kw of VIDEO_MODEL_KEYWORDS) { if (mid.includes(kw)) return false; }
@@ -2860,15 +2897,22 @@ function isGeminiModel(modelId) {
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
 const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
+const NAISTERA_MANUAL = '__manual__';
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
 const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
 function normalizeNaisteraModel(model) {
-    const raw = String(model || '').trim().toLowerCase();
+    const raw = String(model || '').trim();
     if (!raw) return 'grok';
-    if (raw === 'nano-banana' || raw === 'nano-banana-pro' || raw === 'nano-banana-2' || raw === 'nano banana pro' || raw === 'nano banana 2') return 'nano banana';
-    if (NAISTERA_MODELS.includes(raw)) return raw;
-    return 'grok';
+    const low = raw.toLowerCase();
+    // Dash form of the base name is the same model, spelled differently.
+    if (low === 'nano-banana') return 'nano banana';
+    if (NAISTERA_MODELS.includes(low)) return low;
+    // Anything else passes through untouched. Naistera has no endpoint that
+    // lists its models, so our dropdown always lags behind — and rewriting every
+    // unknown name to 'grok' meant a user who had PAID for a newer model could
+    // not reach it by any means, including typing it out.
+    return raw;
 }
 function shouldUseNaisteraVideoTest(model) { const n = normalizeNaisteraModel(model); return n === 'grok' || n === 'nano banana'; }
 function normalizeNaisteraVideoFrequency(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, 999); }
@@ -3983,12 +4027,13 @@ async function fetchModels() {
         toastr.warning('Укажите endpoint и API key', 'SLAY Images');
         return [];
     }
-    const url = `${endpoint}/v1/models`;
+    const url = slayModelsUrl(settings.apiType, endpoint);
     try {
+        iigLog('INFO', `Fetching models: apiType=${settings.apiType} url=${url}`);
         const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        const all = (data.data || []).map(m => m.id).filter(Boolean);
+        const all = slayParseModelList(data);
         // DON'T hard-filter by isImageModel() — the keyword whitelist drops
         // legit models the user needs (recraft, custom proxy aliases, anything
         // new). Instead surface ALL models with the likely-image ones sorted
@@ -3998,7 +4043,11 @@ async function fetchModels() {
         for (const id of all) (isImageModel(id) ? imageLikely : rest).push(id);
         imageLikely.sort(); rest.sort();
         return [...imageLikely, ...rest];
-    } catch (error) { console.error('[IIG] fetchModels failed:', error); toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'SLAY Images'); return []; }
+    } catch (error) {
+        console.error('[IIG] fetchModels failed:', error);
+        toastr.error(`Не удалось получить список моделей: ${error.message}`, 'SLAY Images', { timeOut: 6000 });
+        return [];
+    }
 }
 
 // ── Save image/video to file ──
@@ -4166,7 +4215,15 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const isCustom = settings.apiType === 'custom';
     let url, body;
     if (isCustom && (settings.customBodyFormat || 'chat') === 'images') {
-        if (imgCount > 0) iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
+        if (imgCount > 0) {
+            // This was a log line nobody reads. The person picked this format for
+            // their provider and had no way to know it silently drops every
+            // reference — they just wondered why the character came out wrong.
+            iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
+            toastr.warning(
+                `Формат «images/generations» не умеет принимать картинки — референсов не отправлено: ${imgCount}. Чтобы рефы уходили, переключите «Формат запроса» на chat/completions.`,
+                'SLAY Images', { timeOut: 10000 });
+        }
         url = String(settings.endpoint || '').trim().replace(/\/+$/, '');
         body = {
             ...(model ? { model } : {}),
@@ -4193,7 +4250,20 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
     const found = extractImageFromChatResponse(result);
-    if (!found) throw new Error('No image data in response (tried chat.completions message.images, content parts, content string, data[])');
+    if (!found) {
+        // Almost always a refusal: the model answered with words instead of a
+        // picture, and that answer is right here in the response. Showing the
+        // user a list of the four places we looked helped nobody.
+        const said = String(
+            result?.choices?.[0]?.message?.content
+            || result?.choices?.[0]?.text
+            || result?.error?.message
+            || ''
+        ).replace(/\s+/g, ' ').trim().slice(0, 300);
+        throw new Error(said
+            ? `Модель отказалась рисовать. Ответ модели: «${said}»`
+            : 'Модель не вернула картинку и не объяснила почему. Попробуйте другую модель или смягчите промпт.');
+    }
     // If we got a bare https URL (some proxies hand back CDN links, e.g. linkapi→Alibaba OSS) — download and re-encode as data URL
     if (typeof found === 'string' && /^https?:\/\//i.test(found)) {
         iigLog('INFO', `Response was URL, fetching and encoding: ${found.slice(0, 80)}`);
@@ -5260,11 +5330,15 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
     // button can't refire, but the user still gets a readable error card instead
     // of a dead square. 'error.svg' and the legacy markers are matched too, so
     // chats already damaged by older builds heal on their next render.
+    // Videos too: a failed <video> carries the same marker and deserves the same
+    // retry card. Matching only img left them as invisible dead bytes.
     const errorSelectors = [
         'img.iig-error-image',
         'img[data-iig-error]',
         'img[src*="error.svg"]',
         'img[src*="[IMG:ERROR"]',
+        'video[data-iig-error]',
+        'video[src*="error.svg"]',
     ].join(', ');
     for (const stale of root.querySelectorAll(errorSelectors)) {
         const instr = stale.getAttribute('data-iig-instruction') || '';
@@ -5630,13 +5704,29 @@ async function parseImageTags(text, options = {}) {
         const srcValue = srcMatch ? srcMatch[1] : '';
 
         let needsGeneration = false;
-        const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
-        const hasErrorImage = srcValue.includes('error.svg');
+        // A src that is not a real stored file is an UNFILLED tag: the marker the
+        // model writes, an empty src, or a data: URI. The last one was the hole —
+        // when a generation fails we rewrite src to a 1x1 transparent GIF, the
+        // model then copies that tag into its next message, and this parser used
+        // to see "a src that isn't [IMG: and isn't error.svg" and quietly decide
+        // nothing needed generating. No attempt, no error, no card: an invisible
+        // picture and a caption, which is exactly what users reported.
+        // Exactly one data: URI is ever written into a message — our own failure
+        // marker. Treating every data: src as "unfilled" was too wide: a real
+        // inline picture, an SVG or anything the model pasted would have been
+        // overwritten by a fresh paid generation.
+        const isErrorMarkerSrc = srcValue === IIG_ERROR_SRC || srcValue.includes('error.svg');
+        const isPlaceholderSrc = !srcValue || srcValue.includes('[IMG:') || isErrorMarkerSrc;
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
+        // Skip only a tag that is BOTH marked as failed AND still carrying the
+        // marker src. Checking the stamp alone meant a model that copied
+        // data-iig-error forward while writing a fresh [IMG:GEN] request had its
+        // request silently ignored.
+        const hasErrorImage = isErrorMarkerSrc && /\bdata-iig-error\s*=/i.test(fullImgTag);
 
         if (hasErrorImage && !forceAll) { searchPos = mediaEnd; continue; }
         if (forceAll) needsGeneration = true;
-        else if (hasMarker || !srcValue) needsGeneration = true;
+        else if (isPlaceholderSrc) needsGeneration = true;
         else if (hasPath && checkExistence) {
             const exists = await checkFileExists(srcValue);
             if (!exists) { iigLog('WARN', `File not found (hallucination?): ${srcValue}`); needsGeneration = true; }
@@ -5796,6 +5886,87 @@ function createLoadingPlaceholder(tagId) {
     return placeholder;
 }
 
+// Turn whatever the network threw into something a person can act on. Every
+// branch below is a real support case, and the raw text of each one is quoted
+// in the comment because that is what the user sees today.
+//
+// Rules I am deliberately keeping: advise a fix ONLY where the diagnosis is
+// certain (silence and 404 — both mean the address is wrong or the API type is);
+// never advise on 401/429/5xx, where sending someone into the settings makes
+// them break something that works. The address goes in the card, not the toast:
+// the toast lives five seconds and ends up on screenshots.
+function slayExplainError(err) {
+    try { return slayExplainErrorInner(err); }
+    catch (_) { return { title: 'Генерация не удалась', short: 'Генерация не удалась', detail: '', url: '', tone: 'error', raw: '' }; }
+}
+
+function slayExplainErrorInner(err) {
+    const raw = String(err?.message || err || '');
+    const low = raw.toLowerCase();
+    const url = String(err?.slayUrl || '');
+    // Only read a status where the text actually reports one. A bare three-digit
+    // number is not a status: "модель gpt-4o-500 не найдена" was being announced
+    // as a provider outage.
+    const status = Number(
+        (raw.match(/\b(?:HTTP|status|code)\D{0,3}([45]\d\d)\b/i) || [])[1]
+        || (raw.match(/\(\s*([45]\d\d)\s*\)/) || [])[1]
+        || (raw.match(/^\s*([45]\d\d)\b/) || [])[1]
+        || 0);
+    const mk = (title, short, detail, tone = 'error') => ({ title, short, detail, url, tone, raw });
+
+    // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON"
+    if (low.includes('is not valid json') || low.includes('<!doctype') || /unexpected token\s*'?</.test(low)) {
+        return mk('Пришла веб-страница вместо ответа',
+            'Адрес ответил веб-страницей, а не данными',
+            'Обычно это страница ошибки, капча или заглушка провайдера. Откройте адрес в браузере — увидите, что там на самом деле.');
+    }
+    // Status first: a 4xx whose body merely contains the word "timeout" or
+    // "aborted" is not a network event, and telling the user "с вас могли
+    // списать" about a refused request is its own small lie.
+    if (status === 401 || status === 403) {
+        return mk('Ключ не подошёл', `Ключ не подошёл (${status})`,
+            'Сервер отклонил ключ. Проверьте, что он скопирован целиком и выдан именно к этому адресу.');
+    }
+    if (status === 429) {
+        return mk('Слишком часто', 'Слишком часто — провайдер просит подождать',
+            'Провайдер ограничил частоту запросов. Подождите немного и нажмите «Попробовать снова».', 'warning');
+    }
+    if (status === 404 || status === 405) {
+        return mk('Такого пути на сервере нет', `По этому адресу такого пути нет (${status}). Проверьте «Тип API»`,
+            'Адрес живой, но отвечает не по этому маршруту. Обычно это значит, что «Тип API» выбран не тот.');
+    }
+    if (status >= 500) {
+        return mk('Сбой у провайдера', `Сбой на стороне провайдера (${status})`,
+            'Это не ваши настройки — сервер сам не справился. Попробуйте ещё раз.');
+    }
+    if (status >= 400) {
+        return mk('Запрос отклонён', `Запрос отклонён (${status})`,
+            'Сервер не принял запрос. Что именно не так — написано ниже, в его собственном ответе.');
+    }
+    // "Request timed out after 3 minutes (iOS)"
+    if (low.includes('timed out') || low.includes('timeout')) {
+        return mk('Ответа нет три минуты',
+            'Ответа нет. Проверьте галерею перед повтором',
+            'Картинка могла всё-таки сгенерироваться и списаться со счёта. Загляните в галерею персонажа, прежде чем повторять.',
+            'warning');
+    }
+    if (low.includes('aborted')) {
+        return mk('Запрос прерван',
+            'Запрос прерван',
+            'Соединение оборвалось на полпути — обычно это переключение сети или уход вкладки в фон.',
+            'warning');
+    }
+    // Android Chrome "Failed to fetch", iOS Safari "Load failed", our own
+    // "Network error (iOS)" — all mean the same thing: nothing came back and the
+    // browser will not say why.
+    if (low.includes('network error') || low.includes('failed to fetch') || low.includes('load failed') || low.includes('networkerror')) {
+        return mk('Браузер не достучался до адреса',
+            'Не достучались до адреса. Похоже, «Тип API» не тот',
+            'Адрес не ответил. Проверьте, открывается ли он в браузере, и совпадает ли «Тип API» с тем, что даёт провайдер.');
+    }
+    return mk('Генерация не удалась', `Ошибка: ${raw}`, raw);
+}
+
 function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     // v4.1.5: div-based error placeholder with inline SVG (no dependency on error.svg file which
     // was unreliable when extension path != standard) + built-in "Попробовать снова" button.
@@ -5813,8 +5984,19 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
         if (m) instructionValue = m[2] || m[1];
     }
     if (instructionValue) el.setAttribute('data-iig-instruction', instructionValue);
-    const shortMsg = String(errorMessage || '').slice(0, 140);
-    const fullMsg = String(errorMessage || '');
+    // Accepts either a bare string (older call sites) or the object from
+    // slayExplainError, which carries a heading, an explanation and the address.
+    const info = (errorMessage && typeof errorMessage === 'object') ? errorMessage : null;
+    const cardTitle = info?.title || 'Генерация не удалась';
+    const cardUrl = info?.url || '';
+    // Show the explanation AND what the server actually said. Replacing the
+    // provider's own sentence with a guess turned "на счету кончились деньги"
+    // into "проверьте ключ" — confidently wrong, and on a phone there is no
+    // hover tooltip to recover the truth from.
+    const rawSaid = info && info.raw && info.raw !== info.detail ? String(info.raw).slice(0, 200) : '';
+    const shortMsg = String((info ? info.detail : errorMessage) || '').slice(0, 300)
+        + (rawSaid ? `\n\nСервер ответил: ${rawSaid}` : '');
+    const fullMsg = String((info ? (info.raw || info.detail) : errorMessage) || '');
     el.innerHTML = `
         <div class="iig-error-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -5823,8 +6005,9 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
                 <path d="M12 17h.01"/>
             </svg>
         </div>
-        <div class="iig-error-title">Генерация не удалась</div>
+        <div class="iig-error-title">${sanitizeForHtml(cardTitle)}</div>
         <div class="iig-error-msg" title="${sanitizeForHtml(fullMsg)}">${sanitizeForHtml(shortMsg)}</div>
+        ${cardUrl ? `<div class="iig-error-url" title="${sanitizeForHtml(cardUrl)}">${sanitizeForHtml(cardUrl.replace(/^https?:\/\//, ''))}</div>` : ''}
         <button class="iig-error-retry menu_button" type="button"><i class="fa-solid fa-rotate"></i><span>Попробовать снова</span></button>
     `;
     // Retry button — reuse the same flow as the regen overlay on success images
@@ -5932,9 +6115,10 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         iigLog('ERROR', `Retry failed: ${errorMsg}`);
         if (loading._timerInterval) clearInterval(loading._timerInterval);
         // Fall back to a new error placeholder with the same instruction
-        const newError = createErrorPlaceholder(tagId, errorMsg, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
+        const explainedRetry = slayExplainError(err);
+        const newError = createErrorPlaceholder(tagId, explainedRetry, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
         if (loading.isConnected) loading.replaceWith(newError);
-        toastr.error(`Ошибка: ${errorMsg}`, 'SLAY Images');
+        toastr[explainedRetry.tone === 'warning' ? 'warning' : 'error'](explainedRetry.short, 'SLAY Images', { timeOut: 7000 });
     } finally {
         // Retry is the third path that fills the context-ref memo; only the
         // automatic one ever emptied it.
@@ -6043,7 +6227,8 @@ async function processMessageTags(messageId) {
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
         } catch (error) {
             iigLog('ERROR', `Tag ${index} failed:`, error.message);
-            const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tag);
+            const explained = slayExplainError(error);
+            const errorPlaceholder = createErrorPlaceholder(tagId, explained, tag);
             if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
             loadingPlaceholder.replaceWith(errorPlaceholder);
             if (tag.isNewFormat) {
@@ -6058,19 +6243,25 @@ async function processMessageTags(messageId) {
                 } else {
                     const errorTag = tag.fullMatch
                         .replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${IIG_ERROR_SRC}"`)
-                        .replace(/^<img\b/i, '<img data-iig-error="1"');
+                        .replace(/^<(img|video)\b/i, (m, t) => `<${t} data-iig-error="1"`);
                     replaceTagInMessageSource(message, tag, errorTag);
                 }
             } else {
                 replaceTagInMessageSource(message, tag, `[IMG:ERROR:${error.message.substring(0, 50)}]`);
             }
             sessionErrorCount++; updateSessionStats();
-            toastr.error(`Ошибка: ${error.message}`, 'SLAY Images');
+            toastr[explained.tone === 'warning' ? 'warning' : 'error'](explained.short, 'SLAY Images', { timeOut: 7000 });
         }
     };
 
     try {
-        await Promise.all(tags.map((tag, index) => processTag(tag, index)));
+        // Two at a time. A message carrying five tags used to fire five paid
+        // requests simultaneously — rate limits, and a bill nobody expected.
+        const queue = tags.map((tag, index) => () => processTag(tag, index));
+        const runners = Array.from({ length: Math.min(2, queue.length) }, async () => {
+            while (queue.length) { const job = queue.shift(); if (job) await job(); }
+        });
+        await Promise.all(runners);
     } finally {
         try {
             recentlyProcessed.set(messageId, Date.now());
@@ -6160,13 +6351,14 @@ async function regenerateMessageImages(messageId) {
             // Clean up after ourselves. Without this the spinner stayed in the
             // message forever — the image gone from view, no error card, no retry
             // button — which is what users described as "it ate my picture".
+            const explainedRegen = slayExplainError(error);
             if (loadingPlaceholder) {
                 if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                const errorEl = createErrorPlaceholder(tagId, error.message, tag);
+                const errorEl = createErrorPlaceholder(tagId, explainedRegen, tag);
                 loadingPlaceholder.replaceWith(errorEl);
                 targetEls[index] = errorEl;
             }
-            toastr.error(`Ошибка: ${error.message}`, 'SLAY Images');
+            toastr[explainedRegen.tone === 'warning' ? 'warning' : 'error'](explainedRegen.short, 'SLAY Images', { timeOut: 7000 });
         }
     }
 
@@ -6277,7 +6469,7 @@ function createSettingsUI() {
     let npcSlotsHtml = '';
     for (let i = 0; i < 4; i++) {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
-            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
+            <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
             <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
             <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div>
             <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
@@ -6325,7 +6517,8 @@ function createSettingsUI() {
                         <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="auto" ${(settings.aspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
                         <div class="flex-row"><label>Разрешение</label><select id="slay_image_size" class="flex1"><option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K</option><option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option><option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option></select></div>
                     </div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option><option value="${NAISTERA_MANUAL}" ${!NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? 'selected' : ''}>— вписать вручную —</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'naistera' && !NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : 'iig-hidden'}" id="slay_naistera_manual_row"><label>Название модели</label><input type="text" id="slay_naistera_model_manual" class="text_pole flex1" placeholder="например nano-banana-2-lite" value="${sanitizeForHtml(NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : (settings.naisteraModel || ''))}" autocomplete="off" spellcheck="false"></div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
                     <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
                 </div>
@@ -6341,8 +6534,8 @@ function createSettingsUI() {
                     <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                     <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
@@ -6624,7 +6817,7 @@ function renderSavedPortraits() {
     for (const c of chars) {
         const cover = c.looks[0];
         html += `<div class="iig-person${c.id === sel.id ? ' on' : ''}" data-char="${esc(c.id)}" title="${esc(c.names)}" tabindex="0">
-            <div class="iig-person-thumb"><img src="${esc(cover.path)}" alt="" loading="lazy"></div>
+            <div class="iig-person-thumb"><img src="${esc(cover.path)}" alt="" loading="lazy" decoding="async"></div>
             ${c.looks.length > 1 ? `<span class="iig-person-badge">${c.looks.length}</span>` : ''}
             <div class="iig-person-name">${esc(firstName(c.names))}</div>
         </div>`;
@@ -6642,7 +6835,7 @@ function renderSavedPortraits() {
         <div class="iig-look-strip">`;
     for (const l of sel.looks) {
         html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
-            <div class="iig-look-thumb"><img src="${esc(l.path)}" alt="" loading="lazy"></div>
+            <div class="iig-look-thumb"><img src="${esc(l.path)}" alt="" loading="lazy" decoding="async"></div>
             <div class="iig-look-label${l.label ? '' : ' iig-look-nolabel'}">${esc(l.label || '—')}</div>
         </div>`;
     }
@@ -7743,6 +7936,10 @@ function bindSettingsEvents() {
         document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !(isOpenAI || isCustomImages));
         document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
         document.getElementById('slay_naistera_model_row')?.classList.toggle('iig-hidden', !isNaistera);
+        {
+            const manualPicked = !NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase());
+            document.getElementById('slay_naistera_manual_row')?.classList.toggle('iig-hidden', !(isNaistera && manualPicked));
+        }
         document.getElementById('slay_naistera_aspect_row')?.classList.toggle('iig-hidden', !isNaistera);
         // slay_naistera_preset_row removed — replaced by slay_style_row (always visible)
         document.getElementById('slay_naistera_hint')?.classList.toggle('iig-hidden', !isNaistera);
@@ -7971,7 +8168,12 @@ function bindSettingsEvents() {
     // (custom, naistera) or a failed fetch force manual entry on.
     function iigSyncModelInputMode({ forceManual = false } = {}) {
         const st = getSettings();
-        if (forceManual && !st.manualModel) { st.manualModel = true; saveSettings(); }
+        // Only flip the switch for API types that genuinely have no listing.
+        // An empty list because the endpoint was briefly unreachable used to
+        // write manualModel:true into the user's settings behind their back.
+        if (forceManual && !st.manualModel && (st.apiType === 'custom' || st.apiType === 'naistera')) {
+            st.manualModel = true; saveSettings();
+        }
         const manual = !!st.manualModel;
         const cb = document.getElementById('slay_manual_model');
         if (cb) cb.checked = manual;
@@ -8004,7 +8206,21 @@ function bindSettingsEvents() {
     document.getElementById('slay_quality')?.addEventListener('change', (e) => { settings.quality = e.target.value; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
-    document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => { settings.naisteraModel = normalizeNaisteraModel(e.target.value); saveSettings(); updateVisibility(); });
+    document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => {
+        const manualRow = document.getElementById('slay_naistera_manual_row');
+        if (e.target.value === NAISTERA_MANUAL) {
+            manualRow?.classList.remove('iig-hidden');
+            document.getElementById('slay_naistera_model_manual')?.focus();
+            return;   // wait for the typed name before saving anything
+        }
+        manualRow?.classList.add('iig-hidden');
+        settings.naisteraModel = normalizeNaisteraModel(e.target.value);
+        saveSettings(); updateVisibility();
+    });
+    document.getElementById('slay_naistera_model_manual')?.addEventListener('input', (e) => {
+        const v = String(e.target.value || '').trim();
+        if (v) { settings.naisteraModel = v; saveSettings(); }
+    });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
     document.getElementById('slay_image_context_enabled')?.addEventListener('change', (e) => { settings.imageContextEnabled = e.target.checked; saveSettings(); updateVisibility(); });
@@ -8039,27 +8255,53 @@ function bindSettingsEvents() {
             if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera') throw new Error('Укажите endpoint');
             if (!currentSettings.apiKey) throw new Error('Укажите API key');
             if (currentSettings.apiType === 'naistera') {
-                const testUrl = (currentSettings.endpoint || 'https://naistera.org').replace(/\/$/, '');
-                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
-                if (r?.ok) toastr.success('Connection OK', 'SLAY Images');
-                else toastr.warning('Endpoint ответил не-OK', 'SLAY Images');
+                // Probing the site ROOT reported OK while generation was dead: the
+                // address generation uses is /api/generate. Only a POST there truly
+                // proves anything, and that would cost a picture — so check the path
+                // exists and say plainly what that does and does not prove.
+                const base = (currentSettings.endpoint || 'https://naistera.org').replace(/\/+$/, '');
+                const genUrl = base.endsWith('/api/generate') ? base : `${base}/api/generate`;
+                const r = await fetch(genUrl, { method: 'HEAD' }).catch(() => null);
+                if (!r) toastr.error(`Адрес недоступен из браузера: ${genUrl}`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status === 404) toastr.error(`По адресу ${genUrl} ничего нет (404). Проверьте Endpoint.`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status === 401 || r.status === 403) toastr.warning('Адрес есть, но ключ не подошёл', 'SLAY Images', { timeOut: 7000 });
+                else toastr.success('Адрес отвечает. Полностью это проверяется только настоящей генерацией.', 'SLAY Images', { timeOut: 5000 });
             } else if (currentSettings.apiType === 'custom') {
                 // Custom = full URL to a generation endpoint; there is no
                 // /v1/models to probe and a real POST would cost the user a
                 // generation. HEAD tells us at least that the host answers.
                 const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
                 const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
-                if (r) toastr.success(`Endpoint отвечает (HTTP ${r.status}). Полная проверка — только реальной генерацией.`, 'SLAY Images', { timeOut: 4000 });
-                else toastr.warning('Endpoint недоступен (сеть/CORS). Проверь URL.', 'SLAY Images');
+                // Any answer at all used to count as success — a 404 was reported
+                // as «адрес отвечает» with a green tick.
+                if (!r) toastr.error(`Адрес недоступен из браузера: ${testUrl}`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status === 404) toastr.error(`По этому адресу ничего нет (404). Проверьте URL: ${testUrl}`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status === 401 || r.status === 403) toastr.warning('Адрес есть, но ключ не подошёл', 'SLAY Images', { timeOut: 7000 });
+                else if (r.status === 405) toastr.success('Адрес есть. Проверочный запрос он не принимает — это нормально.', 'SLAY Images', { timeOut: 7000 });
+                else if (r.ok) toastr.success('Адрес отвечает. Полностью это проверяется только настоящей генерацией.', 'SLAY Images', { timeOut: 5000 });
+                else toastr.warning(`Адрес ответил ${r.status}. Проверить можно только генерацией.`, 'SLAY Images', { timeOut: 7000 });
             } else {
+                // Probe the dialect the user actually selected, and say which
+                // address was tried — an unfamiliar /v1beta/… in the message is
+                // usually the moment someone realises the API type is wrong.
+                const base = normalizeApiEndpoint(currentSettings.endpoint);
+                const probe = slayModelsUrl(currentSettings.apiType, base);
                 const models = await fetchModels();
-                if (models.length > 0) toastr.success(`Connection OK — ${models.length} моделей`, 'SLAY Images');
-                else toastr.warning('Подключение есть, но моделей для генерации картинок не найдено', 'SLAY Images');
+                if (models.length > 0) {
+                    toastr.success(`Подключение работает — моделей: ${models.length}`, 'SLAY Images', { timeOut: 4000 });
+                } else {
+                    toastr.warning(
+                        `Адрес ответил, но моделей не вернул.<br>Проверяли: ${probe}<br>Если путь выглядит незнакомо — проверьте «Тип API».`,
+                        'SLAY Images', { timeOut: 10000, escapeHtml: false });
+                }
             }
             btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700);
         } catch (error) {
+            const ex = slayExplainError(error);
             iigLog('ERROR', 'Test connection failed:', error.message);
-            toastr.error(`Ошибка: ${error.message}`, 'SLAY Images');
+            // The one place where a 404 explanation pays for itself: the user is
+            // standing in the settings, one dropdown away from the fix.
+            toastr[ex.tone === 'warning' ? 'warning' : 'error'](ex.short, 'SLAY Images', { timeOut: 9000 });
             btn.classList.add('test-fail'); setTimeout(() => btn.classList.remove('test-fail'), 700);
         } finally { btn.classList.remove('testing'); icon.className = orig; }
     });
@@ -8128,11 +8370,16 @@ function bindSettingsEvents() {
             const key = swS.describeEndpoint ? (swS.describeKey || '') : (iigS.apiKey || '');
             if (swS.describeEndpoint && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
-            const url = `${ep}/v1/models`;
+            // Same dialect question as the main endpoint: 'auto' guesses from the
+            // model name, which is what swAnalyzeOutfit does when it generates.
+            const dfmt = swS.describeApiFormat || 'auto';
+            const dgem = dfmt === 'gemini'
+                || (dfmt === 'auto' && String(swS.describeModel || '').toLowerCase().includes('gemini'));
+            const url = slayModelsUrl(dgem ? 'gemini' : 'openai', ep);
             const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status} — проверяли ${url}`);
             const data = await resp.json();
-            const models = (data.data || []).map(m => m.id).sort();
+            const models = slayParseModelList(data).sort();
             // Same story as the main model field: a <select>, not a datalist.
             const sel = document.getElementById('slay_sw_describe_model_select');
             if (sel) {
@@ -8205,7 +8452,8 @@ function bindSettingsEvents() {
     document.getElementById('slay_sw_show_float')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.showFloatingBtn = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
-        $('#sw-bar-btn').toggle(e.target.checked);
+        if (e.target.checked) swInjectFloatingBtn();
+        else $('#sw-bar-btn').remove();
     });
     document.getElementById('slay_sw_max_dim')?.addEventListener('change', (e) => {
         const ctx = SillyTavern.getContext();

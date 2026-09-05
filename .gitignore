@@ -1,0 +1,30 @@
+# Мусор операционных систем
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Сборочный мусор, которого в расширении быть не должно
+node_modules/
+package-lock.json
+yarn.lock
+__pycache__/
+*.pyc
+
+# Выгруженные логи — их присылают в поддержку, в репозиторий они не нужны
+slay-iig-logs-*.txt
+
+# Локальные копии и черновики
+*_backup_*/
+*_backup_*.js
+*.bak
+*.orig
+*.rej
+*_DRAFT_*.md
