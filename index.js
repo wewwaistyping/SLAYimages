@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.0.1-beta.5';
+const SLAY_VERSION = '5.1.0-exp.2';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -98,6 +98,10 @@ const SLAY_VERSION = '5.0.1-beta.5';
         describeKey: '',
         describePromptStyle: 'detailed',
         describeManualModel: false,   // see manualModel in the main settings
+        // «Своё подключение для описаний» — off: the describe call uses the
+        // main endpoint/key and the fields above are hidden. Missing in older
+        // settings → guessed in swGetSettings from whether any field was filled.
+        swOwnConnection: false,
         sendOutfitDescription: true,
         sendOutfitImageBot: true,
         sendOutfitImageUser: true,
@@ -127,6 +131,9 @@ const SLAY_VERSION = '5.0.1-beta.5';
         const ctx = SillyTavern.getContext();
         if (!ctx.extensionSettings[SW]) ctx.extensionSettings[SW] = structuredClone(swDefaults);
         const s = ctx.extensionSettings[SW];
+        // Before the defaults loop, or the flag would silently land on false
+        // for someone who had been describing through their own endpoint.
+        if (!Object.hasOwn(s, 'swOwnConnection')) s.swOwnConnection = swOwnConnectionGuess(s);
         for (const k of Object.keys(swDefaults)) if (!Object.hasOwn(s, k)) s[k] = swDefaults[k];
         if (!Array.isArray(s.items)) s.items = [];
         if (!s.activeOutfits || typeof s.activeOutfits !== 'object') s.activeOutfits = {};
@@ -134,6 +141,20 @@ const SLAY_VERSION = '5.0.1-beta.5';
         return s;
     }
     function swSave() { SillyTavern.getContext().saveSettingsDebounced(); }
+
+    // «Своё подключение для описаний». Older settings have no flag: anyone who
+    // had filled in any of the describe fields was using their own connection,
+    // everyone else was on the main one.
+    function swOwnConnectionGuess(s) {
+        if (!s) return false;
+        return !!(s.describeEndpoint || s.describeKey || s.describeModel
+            || (s.describeMode && s.describeMode !== 'direct')
+            || (s.describeApiFormat && s.describeApiFormat !== 'auto'));
+    }
+    function swOwnConnectionOn(s) {
+        if (!s) return false;
+        return Object.hasOwn(s, 'swOwnConnection') ? !!s.swOwnConnection : swOwnConnectionGuess(s);
+    }
 
     // ── Migration from v3 (per-character wardrobes) to v4 (global items) ──
     function swMigrate(s) {
@@ -399,11 +420,21 @@ const SLAY_VERSION = '5.0.1-beta.5';
     // data URL captured at file-pick time: on Android a File is a content://
     // handle that can expire while a form modal is open — reading it later
     // fails with a bare FileReader error (the "Ошибка: read" reports).
+    // Decoding a huge photo can take the main thread away for good on a phone
+    // (compressBase64Image has the same guard): the promise then simply never
+    // settles and the upload form stays frozen on «Сохранить» with no way out.
+    const SW_RESIZE_TIMEOUT_MS = 20000;
     function swResize(src, maxDim) {
-        return new Promise((res, rej) => {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const done = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg); };
+            const res = (v) => done(resolve, v);
+            const rej = (e) => done(reject, e);
+            const timer = setTimeout(() => rej(new Error('картинка слишком большая — устройство не смогло её открыть за 20 секунд, попробуйте файл поменьше')), SW_RESIZE_TIMEOUT_MS);
             const go = (dataUrl) => {
                 const img = new Image();
                 img.onload = () => {
+                    if (settled) return;   // the timeout already answered; do not touch the canvas for nothing
                     let { width: w, height: h } = img;
                     if (w > maxDim || h > maxDim) { const s = Math.min(maxDim / w, maxDim / h); w = Math.round(w * s); h = Math.round(h * s); }
                     const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -431,6 +462,31 @@ const SLAY_VERSION = '5.0.1-beta.5';
             r.onerror = () => rej(new Error('не удалось прочитать файл — выберите его заново'));
             r.readAsDataURL(src);
         });
+    }
+
+    // 25 MB is far above any phone photo; it only exists to stop a mis-tap on a
+    // video or an archive from being read into memory whole.
+    const SW_MAX_UPLOAD_BYTES = 25 * 1048576;
+    // Magic-byte sniff for the formats a browser <img> can decode. Pickers on
+    // Android often hand over an empty f.type, so the bytes are the only truth.
+    function swLooksLikeImage(bytes) {
+        if (!bytes || bytes.length < 12) return false;
+        if (swIsPng(bytes)) return true;
+        if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return true;                       // JPEG
+        if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return true;  // GIF8
+        if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+            bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return true; // RIFF....WEBP
+        if (bytes[0] === 0x42 && bytes[1] === 0x4D) return true;                                             // BMP
+        // HEIC/AVIF: 'ftyp' box at offset 4 — Safari decodes these, others fail later with a clear message.
+        if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return true;
+        return false;
+    }
+    // An item with the same name and description (trimmed, name case-insensitive).
+    function swFindDuplicateItem(name, description) {
+        const n = String(name || '').trim().toLowerCase();
+        const d = String(description || '').trim();
+        if (!n) return null;
+        return swGetSettings().items.find(o => String(o.name || '').trim().toLowerCase() === n && String(o.description || '').trim() === d) || null;
     }
 
     function swBytesToBase64(bytes) {
@@ -701,7 +757,8 @@ const SLAY_VERSION = '5.0.1-beta.5';
     // second press then closes the wardrobe.
     function swEsc(e) {
         if (e.key !== 'Escape') return;
-        if (swAbortInline()) { e.stopPropagation(); return; }
+        // notify: a running describe cancelled by Escape must say so, like ✕ does.
+        if (swAbortInline({ notify: true })) { e.stopPropagation(); return; }
         swCloseModal();
     }
     function swCloseModal() {
@@ -1059,7 +1116,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
     // Description choice — inline in #sw-tab-content
     function swShowDescriptionModal(outfitName) {
         return new Promise((resolve) => {
-            const el = swShowInline(`
+            const tok = swShowInline(`
                 <div style="padding:10px;">
                     <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:6px;">💅 Описание отсутствует</div>
                     <div style="font-size:12px;color:#999;margin-bottom:14px;">«${esc(outfitName)}» — для наилучшего результата добавьте описание</div>
@@ -1069,9 +1126,10 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         <button class="sw-inline-btn" data-choice="ai" style="padding:12px;border-radius:8px;border:1px solid rgba(244,114,182,0.25);background:rgba(244,114,182,0.08);color:#ddd;cursor:pointer;text-align:left;font-size:13px;"><b style="color:#f472b6;">🤖 Сгенерировать ИИ</b><br><span style="font-size:11px;opacity:0.6;">Отправить картинку на анализ</span></button>
                     </div>
                 </div>`, () => resolve(null), 'Выбор описания отменён');
-            if (!el) { resolve(null); return; }
+            if (!tok) { resolve(null); return; }
+            const el = tok.el;
             for (const btn of el.querySelectorAll('.sw-inline-btn')) {
-                btn.addEventListener('click', () => { swRestoreInline(); resolve(btn.dataset.choice); });
+                btn.addEventListener('click', () => { swRestoreInline(tok); resolve(btn.dataset.choice); });
             }
         });
     }
@@ -1097,7 +1155,16 @@ const SLAY_VERSION = '5.0.1-beta.5';
     // which makes swShowInline refuse every later form until the page reloads.
     let _inlineCancel = null;
     let _inlineCancelMsg = '';
+    // Who owns the slot right now. swShowInline hands the caller a token and
+    // swRestoreInline only acts for the token that is still current. Without
+    // this, a form torn down by Escape and replaced by another one was wiped
+    // again by the FIRST form's late cleanup (the describe spinner's finally
+    // firing a minute later over the edit form the user had opened meanwhile).
+    let _inlineToken = null;
+    let _inlineSeq = 0;
 
+    // Returns a token { el, id } — el is #sw-tab-content with the form in it.
+    // null when there is no panel or another form already holds the slot.
     function swShowInline(html, onCancel = null, cancelMsg = '') {
         const el = document.getElementById('sw-tab-content');
         if (!el) return null;
@@ -1110,12 +1177,19 @@ const SLAY_VERSION = '5.0.1-beta.5';
         _savedScroll = el.scrollTop;   // put the grid back where the user left it
         _inlineCancel = onCancel;
         _inlineCancelMsg = cancelMsg;
+        const token = { el, id: ++_inlineSeq };
+        _inlineToken = token;
         el.innerHTML = html;
         el.scrollTop = 0;
         for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = 'none'; }
-        return el;
+        return token;
     }
-    function swRestoreInline() {
+    // token: the one swShowInline returned to this caller. A stale token (the
+    // slot was torn down from outside, or re-opened by someone else since) makes
+    // this a no-op and returns false. No token = the owner-agnostic teardown
+    // used by swAbortInline.
+    function swRestoreInline(token = null) {
+        if (token && token !== _inlineToken) return false;
         const el = document.getElementById('sw-tab-content');
         // Release the slot even when the panel has already gone. The old `el &&`
         // guard meant a restore arriving after the wardrobe closed left the slot
@@ -1125,13 +1199,15 @@ const SLAY_VERSION = '5.0.1-beta.5';
             if (el) el.innerHTML = _savedContent;
             _savedContent = null;
         }
+        _inlineToken = null;
         _inlineCancel = null;
         _inlineCancelMsg = '';
         for (const id of SW_CHROME_IDS) { const n = document.getElementById(id); if (n) n.style.display = ''; }
-        if (!el) { _savedScroll = 0; return; }
+        if (!el) { _savedScroll = 0; return true; }
         swRender(); // re-render to rebind events
         const el2 = document.getElementById('sw-tab-content');
         if (el2 && _savedScroll) { el2.scrollTop = _savedScroll; _savedScroll = 0; }
+        return true;
     }
 
     // Tear an open form down from outside and ANSWER it, so whoever is awaiting it
@@ -1362,7 +1438,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
             let catOptions = '';
             for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${cat === selCat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
 
-            const el = swShowInline(`
+            const tok = swShowInline(`
                 <div style="padding:10px;">
                     <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">${defaults ? '🧥 Импорт костюма' : '👗 Новый предмет'}</h3>
                     ${defaults ? '<div style="font-size:11px;color:#9c8;margin:0 0 8px;">В картинке найдены данные костюма — поля заполнены автоматически.</div>' : ''}
@@ -1381,9 +1457,10 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         <button id="sw-upl-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
                 </div>`, () => resolve(null), defaults ? 'Импорт отменён' : 'Загрузка отменена');
-            if (!el) { resolve(null); return; }
+            if (!tok) { resolve(null); return; }
+            const el = tok.el;
 
-            const close = (val) => { swRestoreInline(); resolve(val); };
+            const close = (val) => { swRestoreInline(tok); resolve(val); };
             el.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
             el.querySelector('#sw-upl-save').addEventListener('click', () => {
                 const name = el.querySelector('#sw-upl-name').value.trim();
@@ -1401,7 +1478,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
     // ── Description input modal (replaces browser prompt()) ──
     function swShowDescInput(title, value) {
         return new Promise((resolve) => {
-            const el = swShowInline(`
+            const tok = swShowInline(`
                 <div style="padding:10px;">
                     <div style="font-size:14px;font-weight:600;color:#f472b6;margin-bottom:12px;">${esc(title)}</div>
                     <textarea id="sw-descinput-text" style="width:100%;min-height:100px;max-height:200px;padding:10px;border-radius:8px;border:1px solid rgba(244,114,182,0.2);background:rgba(0,0,0,0.3);color:#eee;font-size:13px;line-height:1.5;resize:vertical;box-sizing:border-box;font-family:inherit;">${esc(value || '')}</textarea>
@@ -1411,13 +1488,14 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         <button id="sw-descinput-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(244,114,182,0.25);color:#f472b6;font-weight:500;">Сохранить</button>
                     </div>
                 </div>`, () => resolve(null), 'Ввод описания отменён');
-            if (!el) { resolve(null); return; }
+            if (!tok) { resolve(null); return; }
+            const el = tok.el;
             const textarea = el.querySelector('#sw-descinput-text');
             const counter = el.querySelector('#sw-descinput-count');
             textarea.focus();
             textarea.setSelectionRange(textarea.value.length, textarea.value.length);
             textarea.addEventListener('input', () => { counter.textContent = `${textarea.value.length} символов`; });
-            const close = (val) => { swRestoreInline(); resolve(val); };
+            const close = (val) => { swRestoreInline(tok); resolve(val); };
             el.querySelector('#sw-descinput-cancel').addEventListener('click', () => close(null));
             el.querySelector('#sw-descinput-save').addEventListener('click', () => close(textarea.value.trim()));
         });
@@ -1434,7 +1512,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
             let catOptions = '';
             for (const cat of CAT_KEYS) { catOptions += `<option value="${cat}" ${item.category === cat ? 'selected' : ''}>${esc(CATEGORIES[cat])}</option>`; }
 
-            const el = swShowInline(`
+            const tok = swShowInline(`
                 <div style="padding:10px;">
                     <h3 style="margin:0 0 12px;font-size:15px;color:#f472b6;">✏️ Редактировать</h3>
                     <div style="display:flex;gap:12px;margin:0 0 6px;align-items:center;">
@@ -1463,14 +1541,20 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
                     </div>
-                </div>`, () => { settleImage(false); resolve(null); }, 'Редактирование отменено');
-            if (!el) { resolve(null); return; }
+                </div>`, () => { closed = true; settleImage(false); resolve(null); }, 'Редактирование отменено');
+            if (!tok) { resolve(null); return; }
+            const el = tok.el;
 
             // Replacing the picture used to write straight into the item and delete
             // the old file on the spot, so «Отмена» could not undo it — there was
             // nothing left to undo. The new file is now held aside and only becomes
             // the item's picture if the user saves.
             let pendingImagePath = null;
+            // The replacement upload still running, if any. «Сохранить» waits for
+            // it instead of saving the OLD picture, and a form that was closed
+            // meanwhile deletes the file when it finally lands — nothing points at it.
+            let replaceInFlight = null;
+            let closed = false;
             const settleImage = (commit) => {
                 if (!pendingImagePath) return;
                 if (commit) {
@@ -1485,7 +1569,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
                 pendingImagePath = null;
             };
 
-            const close = (val) => { settleImage(!!val); swRestoreInline(); resolve(val); };
+            const close = (val) => { if (closed) return; closed = true; settleImage(!!val); swRestoreInline(tok); resolve(val); };
             el.querySelector('#sw-edit-cancel').addEventListener('click', () => close(null));
             // ── Replace image: keep ALL metadata (name/desc/category/forWho/gender/tags),
             // swap only the picture. Mutates the live item + saves immediately (independent
@@ -1495,9 +1579,10 @@ const SLAY_VERSION = '5.0.1-beta.5';
             const replaceFile = el.querySelector('#sw-edit-file');
             el.querySelector('#sw-edit-replace')?.addEventListener('click', () => replaceFile?.click());
             el.querySelector('#sw-edit-export')?.addEventListener('click', () => swExportItem(item.id));
-            replaceFile?.addEventListener('change', async () => {
+            replaceFile?.addEventListener('change', () => {
                 const f = replaceFile.files?.[0];
                 if (!f) return;
+                replaceInFlight = (async () => {
                 let _tReplace = null;
                 try {
                     // Read the file NOW, while the picker handle is fresh — on Android a
@@ -1520,6 +1605,9 @@ const SLAY_VERSION = '5.0.1-beta.5';
                     _tReplace = toastr.info('Загрузка картинки...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
                     const { base64, format } = await swResize(dataUrl, swGetSettings().maxDimension);
                     const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
+                    // The form was cancelled (or torn down) while this uploaded:
+                    // the file has no owner, take it straight back off disk.
+                    if (closed) { swDeleteImageFile(path, { ignoreItemId: item.id }); return; }
                     // Picking a second picture before saving must not leave the first
                     // one stranded on disk with nothing pointing at it.
                     if (pendingImagePath && pendingImagePath !== path) swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
@@ -1528,10 +1616,22 @@ const SLAY_VERSION = '5.0.1-beta.5';
                     if (thumb) thumb.src = path + '?t=' + Date.now();
                     try { toastr.clear(_tReplace); } catch (_) {}
                     toastr.info('Новая картинка выбрана — нажмите «Сохранить»', 'Гардероб', { timeOut: 3000 });
-                } catch (e) { toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
+                } catch (e) { if (!closed) toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
                 finally { replaceFile.value = ''; try { toastr.clear(_tReplace); } catch (_) {} }
+                })().finally(() => { replaceInFlight = null; });
             });
-            el.querySelector('#sw-edit-save').addEventListener('click', () => {
+            el.querySelector('#sw-edit-save').addEventListener('click', async () => {
+                const saveBtn = el.querySelector('#sw-edit-save');
+                if (replaceInFlight) {
+                    // Save pressed while the new picture is still uploading: wait for
+                    // it. Saving right away kept the OLD picture and left the new file
+                    // stranded, and the toast "картинка выбрана" arrived after the form
+                    // had already gone.
+                    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Загружаю…'; }
+                    try { await replaceInFlight; } catch (_) {}
+                    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Сохранить'; }
+                    if (closed) return;   // Escape / ✕ answered the form while we waited
+                }
                 const name = el.querySelector('#sw-edit-name').value.trim();
                 if (!name) { toastr.warning('Введите название', 'Гардероб'); return; }
                 const description = el.querySelector('#sw-edit-desc').value.trim();
@@ -1580,7 +1680,12 @@ const SLAY_VERSION = '5.0.1-beta.5';
             } else if (choice === 'ai') {
                 const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
                 if (imgBase64) {
-                    const autoDesc = await swAnalyzeOutfit(imgBase64, cat);
+                    const { desc: autoDesc, reason } = await swDescribeWithSpinner(imgBase64, cat);
+                    if (reason === 'cancel' || reason === 'timeout' || reason === 'busy') {
+                        // Nothing was saved; say that the tap did not dress anyone.
+                        toastr.info(`«${nm}» не надет`, 'Гардероб', { timeOut: 3000 });
+                        return;
+                    }
                     if (autoDesc) {
                         const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
                         if (edited) { o.description = edited; swSave(); swRender(); }
@@ -1620,9 +1725,26 @@ const SLAY_VERSION = '5.0.1-beta.5';
         hair: 'Reply IMMEDIATELY with a short hairstyle description. Skip any thinking or preamble. Max 15 words. Format: "[style], [length], [texture]". Avoid mentioning hair color. Avoid mentioning what is absent or missing. Keep to one sentence only.',
     };
 
-    async function swAnalyzeOutfit(base64, category) {
+    // Rejects as soon as the signal aborts; wraps a request whose transport
+    // (robustFetch, generateRaw) cannot be handed the signal itself. The HTTP
+    // request may still finish in the background — its result is ignored.
+    function swAbortable(promise, signal) {
+        if (!signal) return promise;
+        return new Promise((resolve, reject) => {
+            const bail = () => reject(Object.assign(new Error('describe aborted'), { name: 'AbortError' }));
+            if (signal.aborted) { bail(); return; }
+            signal.addEventListener('abort', bail, { once: true });
+            promise.then(v => { signal.removeEventListener('abort', bail); resolve(v); },
+                e => { signal.removeEventListener('abort', bail); reject(e); });
+        });
+    }
+
+    async function swAnalyzeOutfit(base64, category, { signal = null } = {}) {
         const swS = swGetSettings();
-        const mode = swS.describeMode || 'direct';
+        // Own connection off → everything comes from the main settings; the
+        // describe fields may still hold old values but are hidden and ignored.
+        const own = swOwnConnectionOn(swS);
+        const mode = own ? (swS.describeMode || 'direct') : 'direct';
         const promptStyle = (category === 'hair') ? 'hair' : (swS.describePromptStyle || 'detailed');
         const describePrompt = DESCRIBE_PROMPTS[promptStyle] || DESCRIBE_PROMPTS.detailed;
         const maxDescLen = (category === 'hair') ? 250 : (promptStyle === 'simple' ? 400 : 600);
@@ -1637,8 +1759,8 @@ const SLAY_VERSION = '5.0.1-beta.5';
             // meant that typing a custom describe endpoint while leaving its key
             // blank (the field's placeholder invites exactly that) sent the main
             // image-generation key to that other host — on the very first "Тест".
-            const useOwnEndpoint = !!swS.describeEndpoint;
-            const endpoint = normalizeApiEndpoint(swS.describeEndpoint || iigSettings.endpoint || '');
+            const useOwnEndpoint = own && !!swS.describeEndpoint;
+            const endpoint = normalizeApiEndpoint((useOwnEndpoint ? swS.describeEndpoint : iigSettings.endpoint) || '');
             const apiKey = useOwnEndpoint ? (swS.describeKey || '') : (iigSettings.apiKey || '');
             if (useOwnEndpoint && !apiKey) {
                 toastr.error('Вы указали свой Endpoint для описаний, но не указали к нему ключ. Основной ключ туда не отправляется — впишите ключ или очистите Endpoint.', 'Гардероб', { timeOut: 10000 });
@@ -1653,7 +1775,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
                 return null;
             }
             // Determine API format: user choice > auto-detect by model name
-            const apiFormat = swS.describeApiFormat || 'auto';
+            const apiFormat = own ? (swS.describeApiFormat || 'auto') : 'auto';
             let useGeminiFormat;
             if (apiFormat === 'gemini') useGeminiFormat = true;
             else if (apiFormat === 'openai') useGeminiFormat = false;
@@ -1681,7 +1803,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         };
                         // robustFetch, not bare fetch: this was the only request in the file with
                         // no timeout at all, so a stalled describe hung the upload with no way out.
-                        const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        const response = await swAbortable(robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }, { gemini: true }), body: JSON.stringify(body), signal }), signal);
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
                         try { toastr.clear(_tDescribe); } catch (_) {}
@@ -1702,7 +1824,7 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         };
                         // robustFetch, not bare fetch: this was the only request in the file with
                         // no timeout at all, so a stalled describe hung the upload with no way out.
-                        const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+                        const response = await swAbortable(robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal }), signal);
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
                         try { toastr.clear(_tDescribe); } catch (_) {}
@@ -1714,12 +1836,13 @@ const SLAY_VERSION = '5.0.1-beta.5';
                 for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
                     try { desc = await callApi(); break; }
                     catch (err) {
+                        if (signal?.aborted) throw err;   // cancelled by the user or the 120 s guard — no retries
                         const status = err.status || 0;
                         const retryable = status === 429 || (status >= 500 && status < 600);
                         if (!retryable || attempt === MAX_RETRIES) throw err;
                         const delay = 800 * Math.pow(2, attempt); // 800ms, 1600ms
                         swLog('WARN', `Describe API ${status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
-                        await new Promise(r => setTimeout(r, delay));
+                        await swAbortable(new Promise(r => setTimeout(r, delay)), signal);
                     }
                 }
 
@@ -1748,7 +1871,11 @@ const SLAY_VERSION = '5.0.1-beta.5';
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
                 }
                 swLog('WARN', `Direct API: unusable result (len=${desc?.length || 0})`);
-            } catch (e) { swLog('WARN', `Direct API failed (${model}):`, e.message); toastr.warning(`Ошибка: ${e.message}`, 'Гардероб', { timeOut: 5000 }); }
+            } catch (e) {
+                try { toastr.clear(_tDescribe); } catch (_) {}
+                if (signal?.aborted) throw e;   // the caller says what happened; no «Ошибка» toast on top
+                swLog('WARN', `Direct API failed (${model}):`, e.message); toastr.warning(`Ошибка: ${e.message}`, 'Гардероб', { timeOut: 5000 });
+            }
             try { toastr.clear(_tDescribe); } catch (_) {}
             return null;
         }
@@ -1767,27 +1894,64 @@ const SLAY_VERSION = '5.0.1-beta.5';
                         ]
                     },
                 ];
-                const rawResult = await ctx.generateRaw({ prompt: messages, maxTokens: maxTokens });
+                const rawResult = await swAbortable(ctx.generateRaw({ prompt: messages, maxTokens: maxTokens }), signal);
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
                 if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
-            } catch (e) { swLog('WARN', 'generateRaw failed:', e.message); }
+            } catch (e) { if (signal?.aborted) { try { toastr.clear(_tDescribe); } catch (_) {} throw e; } swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
         if (typeof ctx.generateQuietPrompt === 'function') {
             try {
-                const rawResult = await ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: maxTokens });
+                const rawResult = await swAbortable(ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: maxTokens }), signal);
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
                 if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
-            } catch (e) { swLog('WARN', 'generateQuietPrompt failed:', e.message); }
+            } catch (e) { if (signal?.aborted) { try { toastr.clear(_tDescribe); } catch (_) {} throw e; } swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
 
         toastr.warning('Не удалось описать. Введите вручную.', 'Гардероб', { timeOut: 5000 });
         try { toastr.clear(_tDescribe); } catch (_) {}
         return null;
+    }
+
+    // ── Describe behind the panel spinner ──
+    // Every AI-describe call (upload, equip → «Сгенерировать ИИ», 🤖 on a card)
+    // goes through here: the spinner occupies #sw-tab-content for the whole wait,
+    // Escape / ✕ really abort the call, a second tap is refused, and a model that
+    // never answers is cut off after SW_DESCRIBE_TIMEOUT_MS. The caller gets
+    // { desc, reason } with reason one of ok | fail | cancel | timeout | busy and
+    // decides what to do with its item; this function itself never saves anything.
+    let _describeBusy = false;
+    const SW_DESCRIBE_TIMEOUT_MS = 120000;
+    async function swDescribeWithSpinner(base64, category) {
+        if (_describeBusy) { toastr.info('Уже описываю…', 'Гардероб', { timeOut: 2000 }); return { desc: null, reason: 'busy' }; }
+        const ac = new AbortController();
+        const tok = swShowInline(`<div style="padding:28px 12px;text-align:center;color:#f0a0c0;">
+            <i class="fa-solid fa-spinner iig-spin-anim" style="font-size:26px;"></i>
+            <div style="margin-top:12px;font-size:14px;">🤖 ИИ описывает образ...</div>
+            <div style="margin-top:4px;font-size:11px;color:#888;">это занимает до минуты · Esc или ✕ — отменить</div>
+        </div>`, () => ac.abort(), 'Описание отменено');
+        if (!tok) { toastr.info('Сначала закройте открытую форму', 'Гардероб', { timeOut: 2500 }); return { desc: null, reason: 'busy' }; }
+        _describeBusy = true;
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; ac.abort(); }, SW_DESCRIBE_TIMEOUT_MS);
+        try {
+            const desc = await swAbortable(swAnalyzeOutfit(base64, category, { signal: ac.signal }), ac.signal);
+            if (ac.signal.aborted) return { desc: null, reason: timedOut ? 'timeout' : 'cancel' };
+            return { desc: desc || null, reason: desc ? 'ok' : 'fail' };
+        } catch (e) {
+            if (ac.signal.aborted) return { desc: null, reason: timedOut ? 'timeout' : 'cancel' };
+            swLog('WARN', 'describe failed:', e?.message);
+            return { desc: null, reason: 'fail' };
+        } finally {
+            clearTimeout(timer);
+            _describeBusy = false;
+            swRestoreInline(tok);   // no-op when Escape / ✕ already took the spinner down
+            if (timedOut) toastr.warning('Не дождались ответа от модели', 'Гардероб', { timeOut: 5000 });
+        }
     }
 
     async function swUpload(importMode = false) {
@@ -1805,9 +1969,44 @@ const SLAY_VERSION = '5.0.1-beta.5';
             // expires while the user fills the form modal (browser suspended
             // behind the picker, cloud-backed gallery item) — reading it after
             // the modal is what produced the "Ошибка: read" reports.
+            // Cheap guards before the file is read at all. The import picker has no
+            // accept filter (see above), so anything can arrive here — a PDF, a 60 MB
+            // video — and a wrong file used to fail late, after the crop, with a
+            // decoder error that said nothing about why.
+            if (f.size > SW_MAX_UPLOAD_BYTES) {
+                toastr.error(`Файл слишком большой (${Math.round(f.size / 1048576)} МБ) — максимум ${SW_MAX_UPLOAD_BYTES / 1048576} МБ`, 'Гардероб', { timeOut: 6000 });
+                return;
+            }
+            if (f.type && !f.type.startsWith('image/')) {
+                toastr.error(importMode ? 'Карточка костюма — это PNG-картинка, а это другой тип файла' : 'Это не картинка', 'Гардероб', { timeOut: 5000 });
+                return;
+            }
             let bytes;
             try { bytes = new Uint8Array(await f.arrayBuffer()); }
             catch (e) { toastr.error('Не удалось прочитать файл — выберите его заново', 'Гардероб'); return; }
+            if (!swLooksLikeImage(bytes)) {
+                toastr.error('Файл не похож на картинку (PNG, JPEG, WebP или GIF)', 'Гардероб', { timeOut: 5000 });
+                return;
+            }
+
+            // Outfit-card import: if the picked PNG carries our tEXt chunk,
+            // pre-fill the form and reuse the embedded description (skipping
+            // the AI auto-describe — the card already knows what it is).
+            // Checked BEFORE the crop: cropping a file that is then rejected as
+            // "not a card" was wasted work and a confusing order of events.
+            const card = swParseOutfitCard(bytes, f.name);
+            if (importMode && !card) {
+                toastr.error('В этом файле нет данных костюма. Если карточка приехала через галерею или мессенджер как «фото» — метаданные вырезаны. Передавайте PNG как файл/документ и выбирайте через «Файлы», а не из галереи.', '\u{1F9E5} Импорт костюма', { timeOut: 12000 });
+                return;
+            }
+            // The same card imported twice (a friend sent it again, the download
+            // folder had two copies) silently made a twin. Ask once, by what the
+            // user can see: name + description.
+            if (card && swFindDuplicateItem(card.name, card.description)) {
+                const again = await slayConfirm('Такая вещь уже есть. Добавить ещё раз?');
+                if (!again) { toastr.info('Импорт отменён', '\u{1F9E5} Импорт костюма', { timeOut: 2500 }); return; }
+            }
+
             let dataUrl = `data:${f.type || 'image/png'};base64,${swBytesToBase64(bytes)}`;
             // Wardrobe items are photographed garments, not portraits, so the
             // crop opens free-form rather than forcing them into a 3:4 frame.
@@ -1815,15 +2014,6 @@ const SLAY_VERSION = '5.0.1-beta.5';
                 const cropped = await slayCropImage(dataUrl, { aspect: 0, title: 'Обрезать вещь', subtitle: 'Можно оставить как есть' });
                 if (cropped === null) return;
                 dataUrl = cropped;
-            }
-
-            // Outfit-card import: if the picked PNG carries our tEXt chunk,
-            // pre-fill the form and reuse the embedded description (skipping
-            // the AI auto-describe — the card already knows what it is).
-            const card = swParseOutfitCard(bytes, f.name);
-            if (importMode && !card) {
-                toastr.error('В этом файле нет данных костюма. Если карточка приехала через галерею или мессенджер как «фото» — метаданные вырезаны. Передавайте PNG как файл/документ и выбирайте через «Файлы», а не из галереи.', '\u{1F9E5} Импорт костюма', { timeOut: 12000 });
-                return;
             }
 
             // Show upload modal (pre-filled when importing a card)
@@ -1840,29 +2030,22 @@ const SLAY_VERSION = '5.0.1-beta.5';
                     const edited = await swShowDescInput('🧥 Описание из карточки (можете отредактировать)', autoDesc);
                     if (edited !== null) autoDesc = edited;
                 } else if (swGetSettings().autoDescribe !== false) {
-                    // Occupy the panel for the whole wait. Previously the form
-                    // closed, the ordinary grid came back, and the only sign of
-                    // life was a toast that expires after 15s — while the describe
-                    // request can run a full minute. People assumed nothing had
-                    // happened and started tapping things.
-                    swShowInline(`<div style="padding:28px 12px;text-align:center;color:#f0a0c0;">
-                        <i class="fa-solid fa-spinner iig-spin-anim" style="font-size:26px;"></i>
-                        <div style="margin-top:12px;font-size:14px;">🤖 ИИ описывает образ...</div>
-                        <div style="margin-top:4px;font-size:11px;color:#888;">это занимает до минуты, не закрывайте гардероб</div>
-                    </div>`);
-                    // No timeout here meant a model that never answered left the
-                    // spinner up forever with the form slot held — a hang nobody
-                    // had to do anything wrong to reach.
-                    try {
-                        autoDesc = await Promise.race([
-                            swAnalyzeOutfit(base64, result.category),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 120000)),
-                        ]);
-                    } catch (e) {
-                        swLog('WARN', `describe failed or timed out: ${e?.message}`);
+                    // The spinner occupies the panel for the whole wait (see
+                    // swDescribeWithSpinner). Escape / ✕ cancel the describe AND the
+                    // upload: the user bailed out, and the file is not on disk yet.
+                    // A model that never answers is cut off after two minutes; the
+                    // user did nothing wrong, so the item is added without text
+                    // rather than throwing away the crop and the form she filled in.
+                    const { desc, reason } = await swDescribeWithSpinner(base64, result.category);
+                    autoDesc = desc;
+                    if (reason === 'cancel' || reason === 'busy') {
+                        toastr.info(`«${result.name}» не добавлен`, 'Гардероб', { timeOut: 3000 });
+                        return;
+                    }
+                    if (reason === 'timeout' || reason === 'fail') {
                         toastr.warning('ИИ не ответил — добавляю без описания', 'Гардероб', { timeOut: 4000 });
                         autoDesc = null;
-                    } finally { swRestoreInline(); }
+                    }
                     if (autoDesc) {
                         const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
                         if (edited !== null) autoDesc = edited;
@@ -1898,23 +2081,48 @@ const SLAY_VERSION = '5.0.1-beta.5';
         const o = swFindItem(id); if (!o) return;
         const result = await swShowEditModal(o);
         if (!result) return;
+        const prevCat = o.category;
         o.name = result.name || o.name;
         o.description = result.description ?? o.description;
         o.category = result.category || o.category;
         o.forWho = result.forWho || 'all';
         o.gender = result.gender || 'unisex';
         o.tags = result.tags || o.tags;
+        // A worn item that changes category stays in its OLD slot otherwise: the
+        // coat moved from «Полный» to «Верх» kept being injected as FULL for every
+        // character wearing it, invisible in the grid and impossible to take off.
+        const unequipped = o.category !== prevCat ? swUnequipFromOtherSlots(id, o.category) : 0;
         swSave();
         swRender();
         swUpdatePromptInjection();
-        toastr.info('Обновлён', 'Гардероб');
+        swInjectFloatingBtn();
+        if (unequipped) toastr.info(`«${o.name}» снят — категория изменилась`, 'Гардероб', { timeOut: 3500 });
+        else toastr.info('Обновлён', 'Гардероб');
+    }
+    // Clear `id` from every character's bot/user slots whose key is not `keepCat`.
+    // Returns how many slots were cleared.
+    function swUnequipFromOtherSlots(id, keepCat) {
+        const s = swGetSettings();
+        let n = 0;
+        for (const cn of Object.keys(s.activeOutfits || {})) {
+            const co = s.activeOutfits[cn];
+            for (const type of ['bot', 'user']) {
+                const slots = co?.[type];
+                if (!slots) continue;
+                for (const cat of CAT_KEYS) if (cat !== keepCat && slots[cat] === id) { slots[cat] = null; n++; }
+            }
+        }
+        return n;
     }
 
     async function swRegenDescription(id) {
         const o = swFindItem(id); if (!o) return;
+        if (_describeBusy) { toastr.info('Уже описываю…', 'Гардероб', { timeOut: 2000 }); return; }
         const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
         if (!imgBase64) { toastr.error('Картинка не найдена', 'Гардероб'); return; }
-        const autoDesc = await swAnalyzeOutfit(imgBase64, o.category);
+        // cancel / timeout / fail: the toasts are already up and the item is
+        // untouched — the old text stays until a new one is accepted below.
+        const { desc: autoDesc } = await swDescribeWithSpinner(imgBase64, o.category);
         if (autoDesc) {
             const edited = await swShowDescInput('🤖 Описание (можете отредактировать)', autoDesc);
             if (edited) {
@@ -1926,12 +2134,24 @@ const SLAY_VERSION = '5.0.1-beta.5';
 
     // ── Prompt injection ──
     const SW_PROMPT_KEY = 'slaywardrobe_outfit';
+    // true while the open chat is a group (characterId undefined at CHAT_CHANGED).
+    let _swChatIsGroup = false;
 
     function swUpdatePromptInjection() {
+        // Every equip/unequip and chat switch passes through here — the
+        // «надето N» status under the Гардероб header follows it.
+        try { updateSectionStatusesSoon(); } catch (_) { /* settings panel not built yet */ }
         try {
             const ctx = SillyTavern.getContext();
             if (typeof ctx.setExtensionPrompt !== 'function') { swLog('WARN', 'setExtensionPrompt not available'); return; }
             if (swGetSettings().wardrobeEnabled === false) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
+            // Group chats get no OUTFIT LOCK. CHAT_CHANGED sees characterId
+            // undefined and clears it, but ST's group wrapper sets characterId to
+            // the member about to speak before GENERATION_STARTED fires — so the
+            // refresh below re-injected that member's single-chat outfit into the
+            // group. Both signals are checked: the live groupId and what the last
+            // CHAT_CHANGED saw (the harness/ST versions without groupId).
+            if (ctx.groupId || _swChatIsGroup) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const cn = swCharName();
             if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const co = swGetCharOutfit();
@@ -2653,6 +2873,8 @@ const SLAY_VERSION = '5.0.1-beta.5';
         openModal: () => swOpenModal(),
         isReady: () => true,
         applyModalWidth: () => swApplyModalWidth(),
+        // Settings panel: is the describe call on its own endpoint/key?
+        ownConnectionOn: (s) => swOwnConnectionOn(s),
     };
 
     // ── Init hooks ──
@@ -2662,6 +2884,9 @@ const SLAY_VERSION = '5.0.1-beta.5';
         setTimeout(() => { swUpdatePromptInjection(); swInjectFloatingBtn(); }, 500);
     });
     ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
+        // Read synchronously: by the time the 300 ms refresh runs, a group's
+        // first generation may already have swapped characterId to a member.
+        try { const c = SillyTavern.getContext(); _swChatIsGroup = !!c.groupId || c.characterId === undefined; } catch (_) { _swChatIsGroup = false; }
         setTimeout(() => { swUpdatePromptInjection(); swInjectFloatingBtn(); }, 300);
     });
     // Refresh outfit prompt injection RIGHT BEFORE every LLM request. Fixes
@@ -2695,9 +2920,12 @@ function robustFetch(url, options = {}) {
     if (!IS_IOS) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+        // A caller's own signal (wardrobe describe cancel) must reach the network too,
+        // otherwise "cancel" only hides the spinner while the request keeps running.
+        if (options.signal) { if (options.signal.aborted) controller.abort(); else options.signal.addEventListener('abort', () => controller.abort(), { once: true }); }
         return fetch(url, { ...options, signal: controller.signal })
             .then(r => { clearTimeout(timeoutId); return r; })
-            .catch(e => { clearTimeout(timeoutId); if (e.name === 'AbortError') throw stamp(new Error('Request timed out after 5 minutes')); throw stamp(e); });
+            .catch(e => { clearTimeout(timeoutId); if (e.name === 'AbortError' && !options.signal?.aborted) throw stamp(new Error('Request timed out after 5 minutes')); throw stamp(e); });
     }
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -2709,12 +2937,20 @@ function robustFetch(url, options = {}) {
         xhr.ontimeout = () => reject(stamp(new Error('Request timed out after 3 minutes (iOS)')));
         xhr.onerror = () => reject(stamp(new Error('Network error (iOS)')));
         xhr.onabort = () => reject(stamp(new Error('Request aborted (iOS)')));
+        if (options.signal) { if (options.signal.aborted) { xhr.abort(); return; } options.signal.addEventListener('abort', () => xhr.abort(), { once: true }); }
         xhr.send(options.body || null);
     });
 }
 
 const processingMessages = new Set();
 const recentlyProcessed = new Map();
+// In-flight by message OBJECT: a swipe or a regenerated reply lands at the same
+// index with new text, and the index-keyed guard treated it as "already done".
+// processingMessages keeps the index view for the rehydration pass and buttons.
+const processingMessageObjects = new WeakSet();
+// chatId -> results that finished after the user had switched chats. They are
+// written into the right chat on CHAT_CHANGED back to it (iigApplyPendingResults).
+const pendingResults = new Map();
 const REPROCESS_COOLDOWN_MS = 5000;
 let _eventHandlerDepth = 0;
 const MAX_EVENT_HANDLER_DEPTH = 2;
@@ -2790,6 +3026,10 @@ const defaultSettings = Object.freeze({
     // 'chat' = OpenAI chat/completions multimodal; 'images' = OpenAI
     // images/generations ({prompt, size, n, response_format}).
     customBodyFormat: 'chat',
+    // images/edits (GPT): quality goes out as-is unless 'auto'; input_fidelity
+    // 'high' when the faces must survive the edit.
+    editsQuality: 'auto',
+    editsHighFidelity: false,
     size: '1024x1024',
     quality: 'standard',
     maxRetries: 0,
@@ -2800,6 +3040,9 @@ const defaultSettings = Object.freeze({
     userAvatarFile: '',
     // refMigratedV41 — sentinel for one-time migration to reset sticky false values
     refMigratedV41: false,
+    // Timestamp of the last localStorage refs backup written from THESE settings
+    // (P11): a backup is restored only when it is newer than this.
+    refsSavedAt: 0,
     aspectRatio: '1:1',
     imageSize: '1K',
     // Naistera
@@ -2809,6 +3052,9 @@ const defaultSettings = Object.freeze({
     // Style picker
     slayStyle: '',
     slayStyleName: '',
+    // Picker switch «В тогл пресета»: the picked style's full block is written
+    // into a prompt-manager toggle of the active Chat Completion preset (S4).
+    slayStyleToPreset: false,
     naisteraSendCharAvatar: false,
     naisteraSendUserAvatar: false,
     naisteraVideoTest: false,
@@ -2897,7 +3143,7 @@ function isGeminiModel(modelId) {
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
 const NAISTERA_MODELS = Object.freeze([
-    'grok', 'grok-pro',
+    'grok',
     'nano banana 2', 'nano banana 2 lite', 'nano banana pro',
     'novelai v4.5', 'novelai v5',
     // Legacy values people already have stored — dropping them would reset
@@ -2908,20 +3154,30 @@ const NAISTERA_MANUAL = '__manual__';
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
 const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
-function normalizeNaisteraModel(model) {
-    const raw = String(model || '').trim();
-    if (!raw) return 'grok';
-    const low = raw.toLowerCase();
-    // Dash form of the base name is the same model, spelled differently.
-    if (low === 'nano-banana') return 'nano banana';
-    if (NAISTERA_MODELS.includes(low)) return low;
-    // Anything else passes through untouched. Naistera has no endpoint that
-    // lists its models, so our dropdown always lags behind — and rewriting every
-    // unknown name to 'grok' meant a user who had PAID for a newer model could
-    // not reach it by any means, including typing it out.
-    return raw;
+// One spelling for every way people type a Naistera model name: trimmed,
+// lowercase, dashes/underscores as spaces, one space between words. So
+// 'Nano-Banana-2-Lite', 'nano_banana_2_lite' and 'nano banana 2 lite' are the
+// same model — the dropdown, the manual field and the refs gate all agree.
+function canonNaisteraModelName(model) {
+    return String(model || '').trim().toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
-function shouldUseNaisteraVideoTest(model) { const n = normalizeNaisteraModel(model); return n.startsWith('grok') || n.startsWith('nano banana'); }
+function normalizeNaisteraModel(model) {
+    const canon = canonNaisteraModelName(model);
+    if (!canon) return 'grok';
+    // Anything unknown passes through (canonicalised, never rewritten).
+    // Naistera has no endpoint that lists its models, so our dropdown always
+    // lags behind — and rewriting every unknown name to 'grok' meant a user who
+    // had PAID for a newer model could not reach it by any means, including
+    // typing it out.
+    return canon;
+}
+// Is the stored value one of the dropdown entries (after canonicalisation)?
+// Everything else lives in the «вписать вручную» field.
+function naisteraModelIsListed(model) { return NAISTERA_MODELS.includes(normalizeNaisteraModel(model)); }
+// Refs and the video test exist only for grok and the nano banana family.
+// Exact 'grok', not startsWith: there is no grok-pro on Naistera.
+function naisteraModelSupportsRefs(model) { const n = normalizeNaisteraModel(model); return n === 'grok' || n.startsWith('nano banana'); }
+function shouldUseNaisteraVideoTest(model) { return naisteraModelSupportsRefs(model); }
 function normalizeNaisteraVideoFrequency(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, 999); }
 function normalizeImageContextCount(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, MAX_CONTEXT_IMAGES); }
 
@@ -2946,7 +3202,12 @@ function getEndpointPlaceholder(apiType) { return ENDPOINT_PLACEHOLDERS[apiType]
 function normalizeConfiguredEndpoint(apiType, endpoint) {
     const trimmed = String(endpoint || '').trim().replace(/\/+$/, '');
     if (!trimmed) return apiType === 'naistera' ? DEFAULT_ENDPOINTS.naistera : '';
-    if (apiType === 'naistera') return trimmed.replace(/\/api\/generate$/i, '');
+    if (apiType === 'naistera') {
+        // Naistera lives on its own host. A proxy address left over from
+        // another API type must not become the place the token is POSTed to.
+        if (!/naistera/i.test(trimmed)) return DEFAULT_ENDPOINTS.naistera;
+        return trimmed.replace(/\/api\/generate$/i, '');
+    }
     return trimmed;
 }
 function shouldReplaceEndpointForApiType(apiType, endpoint) {
@@ -2986,6 +3247,7 @@ function saveSettings() {
         context.saveSettingsDebounced();
     }
     persistRefsToLocalStorage();
+    updateSectionStatusesSoon();
 }
 function saveSettingsNow() { saveSettings(); }
 
@@ -3003,8 +3265,9 @@ const LS_BACKUP_KEYS = ['npcReferences', 'perCharacterRefs', 'savedChars', 'refH
 function persistRefsToLocalStorage() {
     let settings;
     try { settings = getSettings(); } catch (e) { return; }
+    const savedAt = Date.now();
     const build = (keys) => {
-        const payload = { savedAt: Date.now() };
+        const payload = { savedAt };
         for (const k of keys) if (settings[k] !== undefined) payload[k] = settings[k];
         return JSON.stringify(payload);
     };
@@ -3016,8 +3279,18 @@ function persistRefsToLocalStorage() {
         try {
             localStorage.setItem(LS_KEY, build(['npcReferences', 'perCharacterRefs', 'savedChars']));
             iigLog('WARN', 'localStorage backup trimmed: ' + e.message);
-        } catch (e2) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e2.message); }
+        } catch (e2) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e2.message); return; }
     }
+    // Stamp what the backup represents. restoreRefsFromLocalStorage applies a
+    // backup only when it is NEWER than this, so a copy taken before the user
+    // deleted a ref can no longer bring that ref back on the next chat switch.
+    settings.refsSavedAt = savedAt;
+}
+
+// "Empty" for a ref slot list: no slot carries a name or a picture. The list
+// itself is pre-filled with four blank slots, so .length says nothing.
+function iigRefListEmpty(list) {
+    return !Array.isArray(list) || !list.some(r => r && (r.name || r.imagePath || r.imageBase64 || r.imageData));
 }
 
 function restoreRefsFromLocalStorage() {
@@ -3027,18 +3300,19 @@ function restoreRefsFromLocalStorage() {
         const backup = JSON.parse(raw);
         if (!backup || typeof backup !== 'object') return;
         const settings = getSettings();
-        // New shape carries both maps under named keys; anything older is the bare
-        // npcReferences object this function used to write.
-        if (backup.npcReferences || backup.perCharacterRefs) {
-            if (backup.npcReferences) settings.npcReferences = backup.npcReferences;
-            if (backup.perCharacterRefs && !Object.keys(settings.perCharacterRefs || {}).length) {
-                settings.perCharacterRefs = backup.perCharacterRefs;
-            }
-        } else {
-            settings.npcReferences = backup;
+        // Only a backup newer than the last one written from these settings can
+        // hold anything the server copy lacks (a tab killed before the debounced
+        // save). Anything older — or the pre-5.0 bare-object shape with no
+        // timestamp — is stale and used to resurrect deleted refs.
+        if (!(Number(backup.savedAt) > (Number(settings.refsSavedAt) || 0))) return;
+        // Gap-fill only. A populated live value is always newer than the copy,
+        // so overwriting it would undo real work — npcReferences included.
+        if (backup.npcReferences && iigRefListEmpty(settings.npcReferences)) {
+            settings.npcReferences = backup.npcReferences;
         }
-        // The rest of the backup only fills gaps. A populated live value is always
-        // newer than the copy, so overwriting it would undo real work.
+        if (backup.perCharacterRefs && !Object.keys(settings.perCharacterRefs || {}).length) {
+            settings.perCharacterRefs = backup.perCharacterRefs;
+        }
         if (Array.isArray(backup.savedChars) && !(settings.savedChars || []).length) {
             settings.savedChars = backup.savedChars;
             iigLog('INFO', `Restored ${backup.savedChars.length} saved characters from localStorage`);
@@ -3049,6 +3323,7 @@ function restoreRefsFromLocalStorage() {
         if (Array.isArray(backup.recentRefs) && !(settings.recentRefs || []).length) {
             settings.recentRefs = backup.recentRefs;
         }
+        settings.refsSavedAt = Number(backup.savedAt);
         iigLog('INFO', 'Refs restored from localStorage');
     } catch (e) { iigLog('WARN', 'restoreRefsFromLocalStorage failed:', e.message); }
 }
@@ -3228,26 +3503,28 @@ async function parseMessageImageTags(message, options = {}) {
 
 function replaceTagInMessageSource(message, tag, replacement) {
     if (!message || !tag) return;
+    // Function replacer everywhere: a plain replacement string interprets $&,
+    // $1 and friends — and this text comes from the model / a folder name.
     if (tag.sourceKey === 'extblocks') {
         if (!message.extra) message.extra = {};
-        message.extra.extblocks = (message.extra.extblocks || '').replace(tag.fullMatch, replacement);
+        message.extra.extblocks = (message.extra.extblocks || '').replace(tag.fullMatch, () => replacement);
         const swipeId = message.swipe_id;
         if (swipeId !== undefined && message.swipe_info?.[swipeId]?.extra?.extblocks) {
-            message.swipe_info[swipeId].extra.extblocks = message.swipe_info[swipeId].extra.extblocks.replace(tag.fullMatch, replacement);
+            message.swipe_info[swipeId].extra.extblocks = message.swipe_info[swipeId].extra.extblocks.replace(tag.fullMatch, () => replacement);
         }
-        if (message.extra.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
+        if (message.extra.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, () => replacement);
         return;
     }
     // Main message path: update mes, display_text AND all swipes/swipe_info.
     // ST re-renders from swipes on chat reload AND on swipe-revert (after
     // an aborted swipe). Updating only the current swipe leaves stale src
     // in other swipe entries — abort/revert can resurrect them.
-    message.mes = (message.mes || '').replace(tag.fullMatch, replacement);
-    if (message.extra?.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, replacement);
+    message.mes = (message.mes || '').replace(tag.fullMatch, () => replacement);
+    if (message.extra?.display_text) message.extra.display_text = message.extra.display_text.replace(tag.fullMatch, () => replacement);
     if (Array.isArray(message.swipes)) {
         for (let i = 0; i < message.swipes.length; i++) {
             if (typeof message.swipes[i] === 'string') {
-                message.swipes[i] = message.swipes[i].replace(tag.fullMatch, replacement);
+                message.swipes[i] = message.swipes[i].replace(tag.fullMatch, () => replacement);
             }
         }
     }
@@ -3255,8 +3532,8 @@ function replaceTagInMessageSource(message, tag, replacement) {
         for (let i = 0; i < message.swipe_info.length; i++) {
             const si = message.swipe_info[i]?.extra;
             if (!si) continue;
-            if (typeof si.display_text === 'string') si.display_text = si.display_text.replace(tag.fullMatch, replacement);
-            if (typeof si.extblocks === 'string') si.extblocks = si.extblocks.replace(tag.fullMatch, replacement);
+            if (typeof si.display_text === 'string') si.display_text = si.display_text.replace(tag.fullMatch, () => replacement);
+            if (typeof si.extblocks === 'string') si.extblocks = si.extblocks.replace(tag.fullMatch, () => replacement);
         }
     }
 }
@@ -3333,11 +3610,17 @@ async function collectPreviousContextReferences(messageId, format, requestedCoun
         try {
             if (format === 'dataUrl') {
                 const b64 = String(v).split(',')[1];
-                if (!b64) return v;
+                if (!b64) return null;
                 return 'data:image/jpeg;base64,' + await compressBase64Image(b64, 768, 0.8);
             }
             return await compressBase64Image(v, 768, 0.8);
-        } catch (e) { iigLog('WARN', 'context ref compression failed, sending as-is:', e?.message); return v; }
+        } catch (e) {
+            // Drop it rather than send the raw file: an uncompressed generated
+            // image is ~10x the size and rides along on every request. The nulls
+            // are filtered below, so nothing uncompressed is ever cached either.
+            iigLog('WARN', 'context ref compression failed, dropping the reference:', e?.message);
+            return null;
+        }
     };
     const out = (await Promise.all(converted.filter(Boolean).map(shrink))).filter(Boolean);
 
@@ -3536,6 +3819,9 @@ function mergeSavedChars(fromId, intoId) {
     const have = new Set(swNameList(into.names).map(x => x.toLowerCase()));
     const extra = swNameList(from.names).filter(n => !have.has(n.toLowerCase()));
     if (extra.length) into.names = [...swNameList(into.names), ...extra].join(', ');
+    // Folders are a union too: nobody falls out of a folder because of a merge.
+    const folders = [...new Set([...(into.folders || []), ...(from.folders || [])])];
+    if (folders.length) into.folders = folders;
     settings.savedChars = list.filter(c => c.id !== fromId);
     saveSettings();
     try { renderSavedPortraits(); } catch (_) {}
@@ -3562,7 +3848,7 @@ function findSavedCharByPath(path) {
 
 // Add a look to an existing character, or create the character and start it off
 // with this one. Re-saving a picture that is already there just relabels it.
-function saveLook({ charId = null, names = '', label = '', path }) {
+function saveLook({ charId = null, names = '', label = '', path, folders = null }) {
     if (!path) return null;
     const settings = getSettings();
     if (!Array.isArray(settings.savedChars)) settings.savedChars = [];
@@ -3570,6 +3856,9 @@ function saveLook({ charId = null, names = '', label = '', path }) {
     let ch = charId ? settings.savedChars.find(c => c.id === charId) : null;
     if (!ch) {
         ch = { id: swUid('sc'), names: names || '', looks: [] };
+        // The save dialog's «Папка» row — only a new character takes it; an
+        // existing one keeps whatever folders it already has.
+        if (Array.isArray(folders) && folders.length) ch.folders = [...new Set(folders)];
         settings.savedChars.unshift(ch);
     } else if (names) {
         ch.names = names;
@@ -3679,6 +3968,135 @@ function relabelSavedLook(charId, lookId, label) {
     lk.label = label;
     saveSettings();
     try { renderSavedPortraits(); } catch (_) {}
+}
+
+// ── Папки для сохранённых персонажей ──
+// Only for order in the library: a folder is a tag on a character, and nothing
+// in generation reads it. Files stay where they are. A character can sit in
+// several folders; none means «Без папки». Unknown ids in a character's list
+// are ignored on read, so a deleted folder never has to chase stale pointers.
+//   savedFolders: [{ id, name }]        savedChars[i].folders?: string[] (ids)
+// getSavedFolders is read-only on purpose: a missing list is [] and is NOT
+// created here, so a build that never makes a folder leaves settings untouched.
+const SW_FOLDER_NAME_MAX = 30;
+
+function getSavedFolders() {
+    const list = getSettings().savedFolders;
+    if (!Array.isArray(list)) return [];
+    return list.filter(f => f && typeof f.id === 'string' && typeof f.name === 'string');
+}
+
+function findSavedFolder(id) {
+    return id ? (getSavedFolders().find(f => f.id === id) || null) : null;
+}
+
+// Trimmed, 1–30 chars, unique ignoring case. Returns the clean name, or null
+// after telling the user why.
+function swCleanFolderName(raw, exceptId = null) {
+    const name = String(raw == null ? '' : raw).trim();
+    if (!name) { toastr.warning('Название папки пустое', 'SLAY Images'); return null; }
+    if (name.length > SW_FOLDER_NAME_MAX) { toastr.warning(`Название папки — не длиннее ${SW_FOLDER_NAME_MAX} символов`, 'SLAY Images'); return null; }
+    const key = name.toLowerCase();
+    if (getSavedFolders().some(f => f.id !== exceptId && f.name.trim().toLowerCase() === key)) {
+        toastr.warning('Такая папка уже есть', 'SLAY Images');
+        return null;
+    }
+    return name;
+}
+
+// The only place that creates the list — see getSavedFolders.
+function createSavedFolder(rawName) {
+    const name = swCleanFolderName(rawName);
+    if (!name) return null;
+    const settings = getSettings();
+    if (!Array.isArray(settings.savedFolders)) settings.savedFolders = [];
+    const folder = { id: swUid('sf'), name };
+    settings.savedFolders.push(folder);
+    saveSettings();
+    return folder;
+}
+
+function renameSavedFolder(id, rawName) {
+    const folder = findSavedFolder(id);
+    if (!folder) return false;
+    const name = swCleanFolderName(rawName, id);
+    if (!name) return false;
+    folder.name = name;
+    saveSettings();
+    return true;
+}
+
+// Characters and pictures stay; they only lose the tag.
+function deleteSavedFolder(id) {
+    const settings = getSettings();
+    if (!Array.isArray(settings.savedFolders) || !settings.savedFolders.some(f => f && f.id === id)) return false;
+    settings.savedFolders = settings.savedFolders.filter(f => !f || f.id !== id);
+    for (const c of (settings.savedChars || [])) {
+        if (c && Array.isArray(c.folders) && c.folders.includes(id)) swSetCharFoldersRaw(c, c.folders.filter(x => x !== id));
+    }
+    saveSettings();
+    return true;
+}
+
+// Folder ids a character really is in: unknown and duplicate ids dropped.
+function swCharFolderIds(c) {
+    if (!c || !Array.isArray(c.folders) || !c.folders.length) return [];
+    const known = new Set(getSavedFolders().map(f => f.id));
+    return [...new Set(c.folders.filter(id => known.has(id)))];
+}
+
+function swCharInFolder(c, folderId) {
+    return swCharFolderIds(c).includes(folderId);
+}
+
+function swFolderMemberCount(folderId) {
+    return getSavedChars().filter(c => swCharInFolder(c, folderId)).length;
+}
+
+// [] and a missing key both mean «Без папки»; keep the entry clean so a 5.0
+// build that knows nothing about folders sees exactly the shape it wrote.
+function swSetCharFoldersRaw(ch, ids) {
+    const known = new Set(getSavedFolders().map(f => f.id));
+    const next = [...new Set((ids || []).filter(id => known.has(id)))];
+    if (next.length) ch.folders = next;
+    else delete ch.folders;
+}
+
+function setSavedCharFolders(charId, ids) {
+    const ch = (getSettings().savedChars || []).find(c => c && c.id === charId);
+    if (!ch) return false;
+    swSetCharFoldersRaw(ch, ids);
+    saveSettings();
+    return true;
+}
+
+// Who the open chip shows: 'all', 'none' (in no folder) or one folder id.
+function swCharsInFilter(chars, filter) {
+    if (filter === 'all') return chars;
+    if (filter === 'none') return chars.filter(c => !swCharFolderIds(c).length);
+    return chars.filter(c => swCharInFolder(c, filter));
+}
+
+// Inside a folder named like one of the looks («Imperial» → the look labelled
+// «imperial») that look is the face in the row and the one opened first.
+// Anywhere else it is simply the first look.
+function pickLookForFolder(c, folderId) {
+    if (!c || !Array.isArray(c.looks) || !c.looks.length) return null;
+    const folder = findSavedFolder(folderId);
+    if (!folder) return c.looks[0];
+    const key = folder.name.trim().toLowerCase();
+    return c.looks.find(l => String(l.label || '').trim().toLowerCase() === key) || c.looks[0];
+}
+
+// Point the panel at this character. If the open chip would hide them (saved
+// into another folder, merged into someone unfiled) fall back to «Все»: a
+// character that was just saved and then vanished reads as a lost save.
+function revealSavedChar(charId) {
+    const ch = getSavedChars().find(c => c.id === charId);
+    if (!ch) return;
+    if (!swCharsInFilter([ch], _swFolderFilter).length) _swFolderFilter = 'all';
+    _swSelChar = ch.id;
+    _swSelLook = null;
 }
 
 // Detect image MIME type from base64 prefix (first few characters after base64-encoding the magic bytes)
@@ -4011,34 +4429,73 @@ function sanitizeApiKey(raw) {
 
 // Build Authorization headers, failing EARLY with a human-readable error if
 // the key still contains non-ASCII garbage after sanitization.
-function buildAuthHeaders(apiKey, extra = {}) {
+// `gemini: true` adds the header Google's own host reads (x-goog-api-key);
+// proxies that speak the Gemini dialect usually take the Bearer form, so both
+// go out. Harmless where unused.
+function buildAuthHeaders(apiKey, extra = {}, { gemini = false } = {}) {
     const key = sanitizeApiKey(apiKey);
     if (!key) throw new Error('API Key не задан');
     if (!/^[\x20-\x7E]+$/.test(key)) {
         throw new Error('API Key содержит недопустимые символы (кириллица или невидимый юникод из буфера обмена). Очистите поле и вставьте ключ заново.');
     }
-    return { 'Authorization': `Bearer ${key}`, ...extra };
+    return { 'Authorization': `Bearer ${key}`, ...(gemini ? { 'x-goog-api-key': key } : {}), ...extra };
 }
 
-async function fetchModels() {
+// HTTP failure with the facts the error card needs: the status (so the
+// explainer does not have to parse it back out of the text) and the address.
+function slayHttpError(status, text, url) {
+    const e = new Error(`API Error (${status}): ${text}`);
+    try { e.status = status; e.slayUrl = url; } catch (_) { }
+    return e;
+}
+
+// Text out of a chat-completions `content`: a string, an array of parts
+// ({type:'text', text}), or nothing. Never "[object Object]".
+function slayResponseText(v) {
+    const tidy = (s) => String(s).replace(/\s+/g, ' ').trim();
+    if (typeof v === 'string') return tidy(v);
+    if (Array.isArray(v)) return tidy(v.map(p => typeof p === 'string' ? p : (typeof p?.text === 'string' ? p.text : (typeof p?.content === 'string' ? p.content : ''))).filter(Boolean).join(' '));
+    if (v && typeof v === 'object' && typeof v.text === 'string') return tidy(v.text);
+    return '';
+}
+
+// Why Gemini sent words (or nothing) instead of a picture: finishReason /
+// blockReason, the safety categories that fired, and any text part — in Russian.
+function slayGeminiNoImageMessage(result) {
+    const cand = result?.candidates?.[0];
+    const reason = String(cand?.finishReason || result?.promptFeedback?.blockReason || '').trim();
+    const text = slayResponseText((cand?.content?.parts || []).filter(p => typeof p?.text === 'string').map(p => p.text)).slice(0, 300);
+    const ratings = [...(cand?.safetyRatings || []), ...(result?.promptFeedback?.safetyRatings || [])]
+        .filter(r => r?.blocked || /HIGH|MEDIUM/i.test(String(r?.probability || '')))
+        .map(r => String(r?.category || '').replace(/^HARM_CATEGORY_/, '')).filter(Boolean);
+    const why = reason && reason !== 'STOP' ? reason : (ratings.length ? 'SAFETY' : '');
+    let msg = why ? `Gemini отказался рисовать (${why})` : 'Gemini не вернул картинку';
+    if (ratings.length) msg += ` — ${[...new Set(ratings)].join(', ')}`;
+    if (text) msg += `. Ответ модели: «${text}»`;
+    else if (!why) msg += ' и не объяснил почему. Попробуйте смягчить промпт или другую модель.';
+    return msg;
+}
+
+// throwOnError: the caller owns the toast — one message worded by
+// slayExplainError, with the address on the error, instead of «не удалось»
+// here and «Моделей: 0» a moment later.
+async function fetchModels({ throwOnError = false } = {}) {
     const settings = getSettings();
     // Custom = full URL straight to a generation endpoint; appending /v1/models
     // to it is meaningless. Model (if needed) is typed by hand.
-    if (settings.apiType === 'custom') {
-        toastr.info('Custom URL: списка моделей нет, введи имя модели вручную (или оставь пустым)', 'SLAY Images', { timeOut: 3500 });
-        return [];
-    }
+    if (settings.apiType === 'custom') return [];
     const endpoint = settings.endpoint ? normalizeApiEndpoint(settings.endpoint) : getEffectiveEndpoint(settings);
     if (!endpoint || !settings.apiKey) {
         console.warn('[IIG] Cannot fetch models: endpoint=' + endpoint + ' apiKey=' + (settings.apiKey ? 'set' : 'empty'));
+        if (throwOnError) throw new Error('Укажите endpoint и API key');
         toastr.warning('Укажите endpoint и API key', 'SLAY Images');
         return [];
     }
     const url = slayModelsUrl(settings.apiType, endpoint);
     try {
         iigLog('INFO', `Fetching models: apiType=${settings.apiType} url=${url}`);
-        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey) });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey, {}, { gemini: settings.apiType === 'gemini' }) });
+        if (!response.ok) throw slayHttpError(response.status, await response.text().catch(() => ''), url);
         const data = await response.json();
         const all = slayParseModelList(data);
         // DON'T hard-filter by isImageModel() — the keyword whitelist drops
@@ -4051,7 +4508,9 @@ async function fetchModels() {
         imageLikely.sort(); rest.sort();
         return [...imageLikely, ...rest];
     } catch (error) {
+        try { if (!error.slayUrl) error.slayUrl = url; } catch (_) { }
         console.error('[IIG] fetchModels failed:', error);
+        if (throwOnError) throw error;
         toastr.error(`Не удалось получить список моделей: ${error.message}`, 'SLAY Images', { timeOut: 6000 });
         return [];
     }
@@ -4182,6 +4641,29 @@ async function fetchUrlAsDataUrl(url) {
     }
 }
 
+// A Blob for the multipart upload out of the base64 we already hold. The real
+// format comes from the magic bytes: the chat path labels everything
+// image/jpeg, while wardrobe outfits are actually PNG.
+function slayBase64ToBlob(b64) {
+    const clean = String(b64 || '').replace(/^data:[^,]*,/, '').replace(/\s+/g, '');
+    if (!clean) throw new Error('empty reference');
+    const bin = atob(clean);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const type = detectImageMimeFromBase64(clean);
+    const ext = type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : type === 'image/gif' ? 'gif' : 'jpg';
+    return { blob: new Blob([bytes], { type }), ext };
+}
+
+// images/edits takes a fixed size, not a ratio: square, landscape or portrait.
+function slayEditsSizeForRatio(ratio) {
+    const m = String(ratio || '').match(/^\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*$/);
+    if (!m) return '1024x1024';
+    const r = Number(m[1]) / Number(m[2]);
+    if (!Number.isFinite(r) || r === 1) return '1024x1024';
+    return r > 1 ? '1536x1024' : '1024x1536';
+}
+
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const endpoint = normalizeApiEndpoint(settings.endpoint);
@@ -4189,84 +4671,129 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     const imageSize = options.imageSize || settings.imageSize || '1K';
 
-    let fullPrompt = injectStyleBlock(prompt, style);
-    fullPrompt = `${fullPrompt}\n\n[aspect_ratio: ${aspectRatio}] [image_size: ${imageSize}]`;
-
-    // Build multimodal content with text + all reference images
-    const refLabels = options.refLabels || [];
-    const refNames = options.refNames || [];
-    const imgCount = Math.min(referenceImages.length, MAX_GENERATION_REFERENCE_IMAGES);
-
-    const instructions = [];
-    const imageParts = [];
-    for (let i = 0; i < imgCount; i++) {
-        const label = refLabels[i] || 'reference';
-        const name = refNames[i] || '';
-        let instruction = '';
-        if (label === 'char_face' || label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
-        else if (label === 'char_outfit' || label === 'user_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
-        else if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
-        else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
-        if (instruction) instructions.push(instruction);
-        imageParts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${referenceImages[i]}` } });
-    }
-    if (instructions.length > 0) {
-        fullPrompt = `${instructions.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n${fullPrompt}`;
-    }
-
     // ── Custom apiType: user supplies the FULL endpoint URL, we append
     // nothing. Body shape follows settings.customBodyFormat:
     //   'chat'   — same multimodal chat/completions body as openai mode
     //   'images' — DALL-E style images/generations body; this format has
     //              no slot for reference images, they're skipped with a log
+    //   'edits'  — GPT images/edits: multipart form, references go as files
     const isCustom = settings.apiType === 'custom';
-    let url, body;
-    if (isCustom && (settings.customBodyFormat || 'chat') === 'images') {
-        if (imgCount > 0) {
-            // This was a log line nobody reads. The person picked this format for
-            // their provider and had no way to know it silently drops every
-            // reference — they just wondered why the character came out wrong.
-            iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
-            toastr.warning(
-                `Формат «images/generations» не умеет принимать картинки — референсов не отправлено: ${imgCount}. Чтобы рефы уходили, переключите «Формат запроса» на chat/completions.`,
-                'SLAY Images', { timeOut: 10000 });
-        }
+    const customFormat = isCustom ? (settings.customBodyFormat || 'chat') : 'chat';
+    const isEdits = isCustom && customFormat === 'edits';
+    const isImages = isCustom && customFormat === 'images';
+
+    let fullPrompt = injectStyleBlock(prompt, style);
+    // Ratio and resolution ride inside the prompt for chat-style bodies;
+    // images/edits has a real `size` field instead, so there they are noise.
+    if (!isEdits) fullPrompt = `${fullPrompt}\n\n[aspect_ratio: ${aspectRatio}] [image_size: ${imageSize}]`;
+
+    // Build multimodal content with text + all reference images
+    const refLabels = options.refLabels || [];
+    const refNames = options.refNames || [];
+    const imgCount = Math.min(referenceImages.length, MAX_GENERATION_REFERENCE_IMAGES);
+    const instructionFor = (n, label, name) => {
+        if (label === 'char_face' || label === 'user_face') return `Image ${n} is ${name}'s FACE — preserve this face exactly.`;
+        if (label === 'char_outfit' || label === 'user_outfit') return `Image ${n} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
+        if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') return `Image ${n} is ${name} — preserve this appearance exactly.`;
+        if (label === 'context') return `Image ${n} is style/mood context.`;
+        return '';
+    };
+    const withRefPreamble = (p, instructions) => instructions.length > 0
+        ? `${instructions.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n${p}`
+        : p;
+
+    let url, body, headers;
+    if (isEdits) {
         url = String(settings.endpoint || '').trim().replace(/\/+$/, '');
-        body = {
-            ...(model ? { model } : {}),
-            prompt: fullPrompt,
-            n: 1,
-            size: settings.size || '1024x1024',
-            response_format: 'b64_json',
-        };
-        iigLog('INFO', `Custom images/generations: model=${model || '(default)'}, size=${body.size}, url=${url.slice(0, 60)}`);
+        // The endpoint refuses a request with no image at all, and the author
+        // asked for no silent fallback to another format — say it before paying.
+        const noRefs = () => new Error('В images/edits нужна хотя бы одна картинка-реф: добавьте реф персонажа или смените формат');
+        if (imgCount === 0) throw noRefs();
+        // Blobs first; a reference that fails to decode is dropped and the
+        // numbering follows the survivors, so «Image 2» is really the second file.
+        const settled = await Promise.allSettled(referenceImages.slice(0, imgCount).map(async (b64) => slayBase64ToBlob(b64)));
+        const fd = new FormData();
+        const instructions = [];
+        let n = 0;
+        settled.forEach((s, i) => {
+            if (s.status !== 'fulfilled') { iigLog('WARN', `images/edits: реф ${i + 1} (${refLabels[i] || 'reference'}) не декодировался — пропущен`); return; }
+            n += 1;
+            fd.append('image[]', s.value.blob, `ref${n}.${s.value.ext}`);
+            const line = instructionFor(n, refLabels[i] || 'reference', refNames[i] || '');
+            if (line) instructions.push(line);
+        });
+        if (n === 0) throw noRefs();
+        fullPrompt = withRefPreamble(fullPrompt, instructions);
+        const size = slayEditsSizeForRatio(aspectRatio);
+        const q = String(settings.editsQuality || 'auto');
+        fd.append('model', model);
+        fd.append('prompt', fullPrompt);
+        fd.append('size', size);
+        if (q && q !== 'auto') fd.append('quality', q);
+        if (settings.editsHighFidelity) fd.append('input_fidelity', 'high');
+        body = fd;
+        // No Content-Type here: the browser writes the multipart boundary itself.
+        headers = buildAuthHeaders(settings.apiKey);
+        iigLog('INFO', `Custom images/edits: model=${model}, size=${size}, quality=${q}, fidelity=${settings.editsHighFidelity ? 'high' : 'default'}, refs=${n}/${imgCount}, url=${url.slice(0, 60)}`);
     } else {
-        const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
-        body = {
-            ...(model ? { model } : {}),
-            messages: [{ role: 'user', content }],
-            modalities: ['image', 'text'],
-            stream: false,
-        };
-        url = isCustom
-            ? String(settings.endpoint || '').trim().replace(/\/+$/, '')
-            : `${endpoint}/v1/chat/completions`;
-        iigLog('INFO', `${isCustom ? 'Custom chat.completions' : 'OpenAI chat.completions'}: model=${model || '(default)'}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
+        const instructions = [];
+        const imageParts = [];
+        for (let i = 0; i < imgCount; i++) {
+            const line = instructionFor(i + 1, refLabels[i] || 'reference', refNames[i] || '');
+            if (line) instructions.push(line);
+            imageParts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${referenceImages[i]}` } });
+        }
+        fullPrompt = withRefPreamble(fullPrompt, instructions);
+        if (isImages) {
+            if (imgCount > 0) {
+                // This was a log line nobody reads. The person picked this format for
+                // their provider and had no way to know it silently drops every
+                // reference — they just wondered why the character came out wrong.
+                iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
+                toastr.warning(
+                    `Формат «images/generations» не умеет принимать картинки — референсов не отправлено: ${imgCount}. Чтобы рефы уходили, переключите «Формат запроса» на chat/completions.`,
+                    'SLAY Images', { timeOut: 10000 });
+            }
+            url = String(settings.endpoint || '').trim().replace(/\/+$/, '');
+            body = {
+                ...(model ? { model } : {}),
+                prompt: fullPrompt,
+                n: 1,
+                size: settings.size || '1024x1024',
+                response_format: 'b64_json',
+            };
+            iigLog('INFO', `Custom images/generations: model=${model || '(default)'}, size=${body.size}, url=${url.slice(0, 60)}`);
+        } else {
+            const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
+            body = {
+                ...(model ? { model } : {}),
+                messages: [{ role: 'user', content }],
+                modalities: ['image', 'text'],
+                stream: false,
+            };
+            url = isCustom
+                ? String(settings.endpoint || '').trim().replace(/\/+$/, '')
+                : `${endpoint}/v1/chat/completions`;
+            iigLog('INFO', `${isCustom ? 'Custom chat.completions' : 'OpenAI chat.completions'}: model=${model || '(default)'}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
+        }
+        headers = buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' });
+        body = JSON.stringify(body);
     }
-    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
+    const response = await robustFetch(url, { method: 'POST', headers, body });
+    if (!response.ok) { const text = await response.text(); throw slayHttpError(response.status, text, url); }
     const result = await response.json();
     const found = extractImageFromChatResponse(result);
     if (!found) {
         // Almost always a refusal: the model answered with words instead of a
         // picture, and that answer is right here in the response. Showing the
         // user a list of the four places we looked helped nobody.
-        const said = String(
-            result?.choices?.[0]?.message?.content
-            || result?.choices?.[0]?.text
-            || result?.error?.message
-            || ''
-        ).replace(/\s+/g, ' ').trim().slice(0, 300);
+        // content may be a string or an array of parts — join the text parts,
+        // never stringify an object into "[object Object]".
+        const said = (slayResponseText(result?.choices?.[0]?.message?.content)
+            || slayResponseText(result?.choices?.[0]?.message?.refusal)
+            || slayResponseText(result?.choices?.[0]?.text)
+            || slayResponseText(result?.error?.message)
+            || '').slice(0, 300);
         throw new Error(said
             ? `Модель отказалась рисовать. Ответ модели: «${said}»`
             : 'Модель не вернула картинку и не объяснила почему. Попробуйте другую модель или смягчите промпт.');
@@ -4367,17 +4894,18 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const body = { contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } } };
     iigLog('INFO', `Gemini: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${referenceImages.length}`);
 
-    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }, { gemini: true }), body: JSON.stringify(body) });
+    if (!response.ok) { const text = await response.text(); throw slayHttpError(response.status, text, url); }
     const result = await response.json();
     const candidates = result.candidates || [];
-    if (candidates.length === 0) throw new Error('No candidates in response');
-    const responseParts = candidates[0].content?.parts || [];
+    const responseParts = candidates[0]?.content?.parts || [];
     for (const part of responseParts) {
         if (part.inlineData) return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
         if (part.inline_data) return `data:${part.inline_data.mime_type};base64,${part.inline_data.data}`;
     }
-    throw new Error('No image found in Gemini response');
+    // No picture. Gemini says why in finishReason / blockReason and often in a
+    // text part — show that, in Russian, instead of «No image found».
+    throw new Error(slayGeminiNoImageMessage(result));
 }
 
 async function generateImageNaistera(prompt, style, options = {}) {
@@ -4410,9 +4938,11 @@ async function generateImageNaistera(prompt, style, options = {}) {
         const pageOrigin = window.location.origin;
         let endpointOrigin = endpoint;
         try { endpointOrigin = new URL(url, window.location.href).origin; } catch (pe) { }
-        throw new Error(`Network/CORS error requesting ${endpointOrigin} from ${pageOrigin}. Original: ${error?.message || 'Failed to fetch'}`);
+        const ne = new Error(`Network/CORS error requesting ${endpointOrigin} from ${pageOrigin}. Original: ${error?.message || 'Failed to fetch'}`);
+        try { ne.slayUrl = error?.slayUrl || url; } catch (_) { }
+        throw ne;
     }
-    if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
+    if (!response.ok) { const text = await response.text(); throw slayHttpError(response.status, text, url); }
     const result = await response.json();
     if (!result?.data_url) throw new Error('No data_url in response');
     if (result.media_kind === 'video') {
@@ -4429,10 +4959,11 @@ function validateSettings() {
     if (!settings.apiKey) errors.push('API ключ не настроен');
     // Custom endpoints often pin the model server-side — model is optional there.
     if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
-    if (settings.apiType === 'naistera') {
-        const m = normalizeNaisteraModel(settings.naisteraModel);
-        if (!NAISTERA_MODELS.includes(m)) errors.push('Для Naistera выберите модель: grok / nano banana');
-    }
+    // Naistera: any name goes (the list lags behind the site), it just must
+    // not be empty — an empty field would silently fall back to grok.
+    if (settings.apiType === 'naistera' && !canonNaisteraModelName(settings.naisteraModel)) errors.push('Для Naistera укажите модель');
+    // images/edits is the GPT image endpoint — it refuses a request with no model.
+    if (settings.apiType === 'custom' && (settings.customBodyFormat || 'chat') === 'edits' && !String(settings.model || '').trim()) errors.push('Для images/edits укажите модель, например gpt-image-1');
     if (errors.length > 0) throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
 }
 
@@ -4845,7 +5376,13 @@ function swBuildCharPicker(chars, opts) {
                 <span class="slk-row-c">${c.looks.length}</span>
             </button>`).join('');
         for (const row of list.querySelectorAll('.slk-row')) {
-            row.addEventListener('click', (e) => { e.preventDefault(); chosen = row.dataset.id; draw(); });
+            row.addEventListener('click', (e) => {
+                e.preventDefault();
+                // Flip the highlight in place: a redraw here reset the list's
+                // scroll, so picking someone near the bottom jumped back up.
+                chosen = row.dataset.id;
+                for (const r of list.querySelectorAll('.slk-row')) r.classList.toggle('on', r.dataset.id === chosen);
+            });
         }
     };
     search.addEventListener('input', draw);
@@ -4863,6 +5400,10 @@ async function slayPromptSaveLook(typedNames, path) {
     const match = byPath || findSavedCharByNames(typedNames);
     const esc2 = (v) => String(v == null ? '' : v)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // Folder for a NEW character: the one open in the panel, else none. Only
+    // offered once folders exist, so a library without them looks as before.
+    const folders = getSavedFolders();
+    let folderId = findSavedFolder(_swFolderFilter) ? _swFolderFilter : null;
 
     try {
         if (typeof ctx.callGenericPopup === 'function') {
@@ -4884,6 +5425,12 @@ async function slayPromptSaveLook(typedNames, path) {
                     <label style="font-size:12px;opacity:.8;">\u0418\u043c\u0435\u043d\u0430 \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e</label>
                     <input type="text" id="slk_names" class="text_pole" value="${esc2(typedNames)}" placeholder="\u0414\u0435\u043d, \u0414\u0435\u043d\u0438\u0441, \u0414\u0435\u043d\u0447\u0438\u043a">
                     <div style="font-size:11px;opacity:.55;margin-bottom:6px;">\u043f\u043e \u043d\u0438\u043c \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435 \u0443\u0437\u043d\u0430\u0451\u0442 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430 \u0432 \u043f\u0440\u043e\u043c\u043f\u0442\u0435</div>
+                    ${folders.length ? `<label style="font-size:12px;opacity:.8;">Папка</label>
+                    <div class="iig-folder-chips iig-folder-chips-sm" id="slk_folder_chips">
+                        <button type="button" class="iig-fchip${folderId ? '' : ' on'}" data-f=""><span class="iig-fchip-t">Без папки</span></button>
+                        ${folders.map(f => `<button type="button" class="iig-fchip${folderId === f.id ? ' on' : ''}" data-f="${esc2(f.id)}" title="${esc2(f.name)}"><span class="iig-fchip-t">${esc2(f.name)}</span></button>`).join('')}
+                    </div>
+                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">по умолчанию — папка, открытая сейчас; ещё папки — кнопкой 📁 у персонажа</div>` : ''}
                 </div>
                 <div id="slk_f_who" style="display:none;">
                     <label style="font-size:12px;opacity:.8;">\u041a\u043e\u043c\u0443</label>
@@ -4915,6 +5462,14 @@ async function slayPromptSaveLook(typedNames, path) {
             if (bNew) bNew.addEventListener('click', (e) => { e.preventDefault(); setMode('new'); });
             if (bAdd) bAdd.addEventListener('click', (e) => { e.preventDefault(); setMode('add'); });
             setMode(mode);
+            // Single choice: one chip on at a time, «Без папки» clears it.
+            wrap.querySelector('#slk_folder_chips')?.addEventListener('click', (e) => {
+                const b = e.target.closest('.iig-fchip');
+                if (!b) return;
+                e.preventDefault();
+                folderId = b.dataset.f || null;
+                for (const x of wrap.querySelectorAll('#slk_folder_chips .iig-fchip')) x.classList.toggle('on', x === b);
+            });
             // Seed the filter with the name already in the slot: saving
             // "Dana, Дана" opens the list showing only the Danas.
             const picker = swBuildCharPicker(chars, {
@@ -4934,7 +5489,7 @@ async function slayPromptSaveLook(typedNames, path) {
             if (!okd) return null;
             const label = (wrap.querySelector('#slk_label').value || '').trim();
             if (mode === 'add' && whoSel) return { charId: whoSel.value, names: '', label };
-            return { charId: null, names: (wrap.querySelector('#slk_names').value || '').trim(), label };
+            return { charId: null, names: (wrap.querySelector('#slk_names').value || '').trim(), label, folderId };
         }
     } catch (e) { iigLog('WARN', 'save-look popup failed, falling back:', e.message); }
 
@@ -4956,7 +5511,8 @@ async function slayConfirm(text) {
             return res === true || res === 1; // POPUP_RESULT.AFFIRMATIVE === 1
         }
     } catch (e) { iigLog('WARN', 'callGenericPopup(CONFIRM) failed, falling back to confirm:', e.message); }
-    return window.confirm(text);
+    // The popup takes HTML; the native box does not. Breaks become newlines.
+    return window.confirm(String(text).replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ''));
 }
 
 function isGeneratedVideoResult(value) {
@@ -4967,15 +5523,53 @@ function createGeneratedMediaElement(result, tag) {
     if (isGeneratedVideoResult(result)) {
         const video = document.createElement('video');
         video.className = 'iig-generated-video';
-        video.src = result.dataUrl; video.controls = true; video.autoplay = true; video.loop = true; video.muted = true; video.playsInline = true;
+        // No autoplay attribute and preload="none": with autoplay in the markup
+        // the browser fetches the whole file at once — every video in the chat
+        // the moment it opens. iigObserveLazyVideo starts playback (and so the
+        // download) when the video scrolls into view and pauses it when it
+        // leaves; a tap on the controls plays it as well.
+        video.preload = 'none';
+        video.src = result.dataUrl; video.controls = true; video.loop = true; video.muted = true; video.playsInline = true;
         video.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
         if (result.posterDataUrl) video.poster = result.posterDataUrl;
+        iigObserveLazyVideo(video);
         return video;
     }
     const img = document.createElement('img');
     img.className = 'iig-generated-image';
+    // Lazy + async: a long chat holds dozens of generated pictures and the
+    // browser used to decode all of them on open. Nothing draws these onto a
+    // canvas (context refs are fetched by URL), so lazy is safe here.
+    img.loading = 'lazy'; img.decoding = 'async';
     img.src = result; img.alt = tag.prompt; img.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
     return img;
+}
+
+// Plays a generated video only while it is on screen. Stands in for the
+// autoplay attribute, which made the browser download every video at once.
+let _iigVideoObserver = null;
+function iigObserveLazyVideo(video) {
+    if (!video || video.tagName !== 'VIDEO' || video.dataset.iigLazyBound === '1') return;
+    video.dataset.iigLazyBound = '1';
+    if (typeof IntersectionObserver === 'undefined') {
+        // Ancient WebView: fall back to the browser's own autoplay.
+        video.preload = 'metadata'; video.autoplay = true; return;
+    }
+    if (!_iigVideoObserver) {
+        _iigVideoObserver = new IntersectionObserver((entries) => {
+            for (const en of entries) {
+                const v = en.target;
+                if (en.isIntersecting) { try { const p = v.play(); if (p && p.catch) p.catch(() => { }); } catch (_) { } }
+                else if (!v.paused) { try { v.pause(); } catch (_) { } }
+            }
+        }, { rootMargin: '200px 0px' });
+    }
+    // Tags written by older builds carry autoplay — drop it so a re-render does
+    // not fetch everything again; playback comes from the observer instead.
+    video.autoplay = false; video.removeAttribute('autoplay');
+    if (!video.getAttribute('preload')) video.preload = 'none';
+    video.muted = true;
+    _iigVideoObserver.observe(video);
 }
 
 // Replace an image src everywhere it's stored in a message object.
@@ -5035,6 +5629,14 @@ const IIG_SRC_REMAP_MAX = 1000;
 const IIG_SRC_REMAP_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
 let _srcRemapCache = null;
 
+function iigCurrentChatId() {
+    try {
+        const c = SillyTavern.getContext();
+        const id = c.chatId ?? c.getCurrentChatId?.();
+        return id ? String(id) : '';
+    } catch (_) { return ''; }
+}
+
 function loadSrcRemap() {
     if (_srcRemapCache) return _srcRemapCache;
     try {
@@ -5043,9 +5645,10 @@ function loadSrcRemap() {
         const fresh = {};
         let dropped = 0;
         for (const [k, v] of Object.entries(raw)) {
-            // Legacy entries are bare strings with no timestamp — keep them once,
-            // stamped as of now, so nobody loses working self-heal on upgrade.
-            if (typeof v === 'string') { fresh[k] = { to: v, at: now }; continue; }
+            // Keys are `${chatId}|${oldSrc}` since 5.1. Unscoped keys from older
+            // builds applied one chat's rename to every chat with the same path;
+            // they stay only until their TTL runs out and are never looked up.
+            // Bare-string entries (pre-TTL builds) carry no timestamp: dropped.
             if (v && typeof v.to === 'string' && (now - (v.at || 0)) < IIG_SRC_REMAP_TTL_MS) fresh[k] = v;
             else dropped++;
         }
@@ -5060,12 +5663,17 @@ function recordSrcRemap(oldSrc, newSrc) {
     // placeholders — mapping those would redirect EVERY error to one image.
     if (!oldSrc || !newSrc || oldSrc === newSrc) return;
     if (!oldSrc.includes('/user/images/') || !newSrc.includes('/user/images/')) return;
+    // Scoped to the chat the regen happened in: the same file can legitimately
+    // sit in another chat (a copied message, a shared ref) and must stay there.
+    const chatId = iigCurrentChatId();
+    if (!chatId) return;
+    const prefix = `${chatId}|`;
     try {
         const map = loadSrcRemap();
         const now = Date.now();
         // Collapse chains: if something already maps to oldSrc, point it at newSrc
-        for (const k of Object.keys(map)) { if (map[k]?.to === oldSrc) map[k] = { to: newSrc, at: now }; }
-        map[oldSrc] = { to: newSrc, at: now };
+        for (const k of Object.keys(map)) { if (k.startsWith(prefix) && map[k]?.to === oldSrc) map[k] = { to: newSrc, at: now }; }
+        map[prefix + oldSrc] = { to: newSrc, at: now };
         const keys = Object.keys(map);
         if (keys.length > IIG_SRC_REMAP_MAX) {
             for (const k of keys.slice(0, keys.length - IIG_SRC_REMAP_MAX)) delete map[k];
@@ -5076,10 +5684,13 @@ function recordSrcRemap(oldSrc, newSrc) {
 
 function resolveSrcRemap(src) {
     if (!src || !src.includes('/user/images/')) return src;
+    const chatId = iigCurrentChatId();
+    if (!chatId) return src;
     const map = loadSrcRemap();
+    const prefix = `${chatId}|`;
     let current = src;
     for (let hops = 0; hops < 10; hops++) {
-        const next = map[current]?.to;
+        const next = map[prefix + current]?.to;
         if (!next || next === current) break;
         current = next;
     }
@@ -5181,6 +5792,13 @@ function attachRegenButton(imgEl) {
         const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : undefined;
         const ctx = SillyTavern.getContext();
         const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+        const chatIdAtStart = ctx?.chatId;
+        // One job per message at a time, whichever button started it.
+        if (Number.isInteger(messageId) && processingMessages.has(messageId)) {
+            toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images');
+            icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
+        }
+        if (Number.isInteger(messageId)) { processingMessages.add(messageId); if (message) processingMessageObjects.add(message); }
 
         // Capture original state. Use getAttribute('src') — the relative path as stored in
         // message.mes / display_text / extblocks. imgEl.src would give us an absolute URL
@@ -5222,6 +5840,8 @@ function attachRegenButton(imgEl) {
 
         let newImagePath = null;
         let errorMsg = null;
+        let unsaved = null;          // { dataUrl, saver } when ST refused the upload (P7)
+        let regenIsVideo = false;
         try {
             const result = await generateImageWithRetry(data.prompt, data.style, (s) => { if (overlayLabel?.isConnected) overlayLabel.textContent = s; }, {
                 aspectRatio: data.aspect_ratio, imageSize: data.image_size,
@@ -5229,9 +5849,15 @@ function attachRegenButton(imgEl) {
             });
             if (overlayLabel?.isConnected) overlayLabel.textContent = 'Сохранение...';
             if (overlayTimer?.isConnected) overlayTimer.textContent = '';
-            newImagePath = isGeneratedVideoResult(result)
-                ? await saveNaisteraMediaToFile(result.dataUrl, 'video')
-                : await saveImageToFile(result);
+            regenIsVideo = isGeneratedVideoResult(result);
+            const dataUrl = regenIsVideo ? result.dataUrl : result;
+            const saver = regenIsVideo ? (d) => saveNaisteraMediaToFile(d, 'video') : (d) => saveImageToFile(d);
+            try {
+                newImagePath = await iigSaveWithRetry(() => saver(dataUrl), (s) => { if (overlayLabel?.isConnected) overlayLabel.textContent = s; });
+            } catch (saveErr) {
+                unsaved = { dataUrl, saver };
+                iigLog('ERROR', `Regen: upload failed after retries: ${saveErr?.message || saveErr}`);
+            }
         } catch (err) {
             errorMsg = err?.message || String(err);
             iigLog('ERROR', `Regen failed: ${errorMsg}`);
@@ -5246,27 +5872,43 @@ function attachRegenButton(imgEl) {
         if (resolved) liveImg = resolved;
 
         try {
-            if (newImagePath) {
-                // Success path — apply new src and persist everywhere
-                liveImg.setAttribute('src', newImagePath);
-                liveImg.src = newImagePath;
+            // Persist = patch the old src in every store of THIS message. Shared
+            // with the «Сохранить ещё раз» button; refuses to write into another
+            // chat and parks the result instead (P6).
+            const persistSrc = async (path) => {
+                if (!message) return false;
+                if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                    iigDeferResult(chatIdAtStart, { messageId, instruction: imgEl.getAttribute('data-iig-instruction') || '', mediaPath: path, isVideo: regenIsVideo });
+                    return 'deferred';
+                }
                 // Remember the supersession PERSISTENTLY. Even if some store we
                 // can't reach (preset regex copies, display_text rebuilt by other
                 // extensions) resurrects the old src on a future re-render, the
                 // heal pass will swap it back to this new one on sight.
-                recordSrcRemap(origSrcAttr, newImagePath);
-                if (message && origSrcAttr) {
-                    const replaced = replaceImageSrcEverywhere(message, origSrcAttr, newImagePath);
-                    if (replaced) {
-                        // FORCE save (not debounced). If the user reloads the chat
-                        // before the debounce fires (~5s), message.mes still has
-                        // the OLD src and the previous image silently re-appears.
-                        // Same bug fixed in retryFailedGeneration in 4.1.6 — this
-                        // is the regular-regen-success twin we missed.
-                        try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
-                    } else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
+                recordSrcRemap(origSrcAttr, path);
+                if (!origSrcAttr) return false;
+                return replaceImageSrcEverywhere(message, origSrcAttr, path);
+            };
+            if (newImagePath) {
+                // Success path — apply new src and persist everywhere
+                liveImg.setAttribute('src', newImagePath);
+                liveImg.src = newImagePath;
+                const r = await persistSrc(newImagePath);
+                if (r === true) {
+                    // FORCE save (not debounced). If the user reloads the chat
+                    // before the debounce fires (~5s), message.mes still has
+                    // the OLD src and the previous image silently re-appears.
+                    try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+                } else if (r === false && message) {
+                    iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
                 }
                 toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
+            } else if (unsaved) {
+                // Generated and paid for, but ST would not store the file: show it
+                // from the data URL and let the user retry ONLY the upload.
+                liveImg.setAttribute('src', unsaved.dataUrl);
+                liveImg.src = unsaved.dataUrl;
+                iigMarkUnsaved(liveImg, unsaved.dataUrl, unsaved.saver, persistSrc);
             } else {
                 // Error path — restore original src so the user doesn't get stuck on a broken frame
                 if (origSrcAttr && liveImg.getAttribute('src') !== origSrcAttr) {
@@ -5293,9 +5935,11 @@ function attachRegenButton(imgEl) {
             } catch (e) { /* never block finalization */ }
             icon.className = origIconClass;
             btn.classList.remove('iig-regen-busy');
+            if (Number.isInteger(messageId)) iigReleaseInFlight(messageId, message);
         }
     });
     wrap.appendChild(btn);
+    attachDownloadButton(wrap, imgEl);
     imgEl.dataset.iigRegenBound = '1';
 }
 
@@ -5348,6 +5992,12 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
         'video[src*="error.svg"]',
     ].join(', ');
     for (const stale of root.querySelectorAll(errorSelectors)) {
+        // A stamp left on a tag that later succeeded (older builds never removed
+        // it): the picture is real, so drop the stamp and keep the picture.
+        if (stale.hasAttribute('data-iig-error') && iigIsLiveImagePath(stale.getAttribute('src') || '')) {
+            stale.removeAttribute('data-iig-error');
+            continue;
+        }
         const instr = stale.getAttribute('data-iig-instruction') || '';
         const errorEl = createErrorPlaceholder(stale.dataset.tagId || `iig-reload-${Date.now()}`, 'Картинка не была сгенерирована', { fullMatch: `data-iig-instruction='${instr}'` });
         // If the stale img is inside an iig-img-wrap (regen overlay from older build),
@@ -5382,15 +6032,27 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
         if (img.closest('.iig-error-placeholder')) continue;
         attachRegenButton(img);
     }
+    // Videos: play on sight instead of autoplay (see iigObserveLazyVideo).
+    for (const v of root.querySelectorAll('video[data-iig-instruction], video.iig-generated-video')) {
+        if (v.closest('.iig-error-placeholder')) continue;
+        iigObserveLazyVideo(v);
+        attachVideoDownloadButton(v);
+    }
 }
 
 function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
+    // preload="none" and NO autoplay attribute: with autoplay in the markup the
+    // browser fetches every video the moment the chat opens, preload or not.
+    // Playback starts from iigObserveLazyVideo when the video scrolls into view.
     let html = String(templateHtml || '').trim()
-        .replace(/^<(?:img|video)\b/i, '<video controls autoplay loop muted playsinline')
         .replace(/<\/video>\s*$/i, '').replace(/\/?>\s*$/i, '')
-        .replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${persistedSrc}"`);
-    html = html.replace(/\s+poster\s*=\s*(['"])[\s\S]*?\1/i, '');
-    if (posterSrc) html = html.replace(/^<video\b/i, `<video poster="${sanitizeForHtml(posterSrc)}"`);
+        .replace(/^<(?:img|video)\b/i, '<video');
+    // The template may already be a persisted <video> (regen): drop the media
+    // attributes it carries so nothing is doubled and no stray autoplay survives.
+    html = iigStripTagAttrs(html, ['controls', 'autoplay', 'loop', 'muted', 'playsinline', 'preload', 'poster', 'loading', 'decoding', 'data-iig-error']);
+    html = iigSetTagSrc(html, persistedSrc);
+    const poster = posterSrc ? ` poster="${sanitizeForHtml(posterSrc)}"` : '';
+    html = html.replace(/^<video\b/i, () => `<video controls loop muted playsinline preload="none"${poster}`);
     return `${html}></video>`;
 }
 
@@ -5425,8 +6087,13 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             iigLog('INFO', `decoded numeric HTML entities in prompt (sample: ${m}) — Cyrillic names should now match`);
         }
     }
-    // Override with user-selected SLAY style if configured
-    if (settings.slayStyle) {
+    // Override with user-selected SLAY style if configured — unless the style
+    // already sits in the preset toggle (S4): the model then writes the style
+    // into the prompt itself, so neither the tag's style field is replaced nor
+    // a [STYLE:] prefix added (injectStyleBlock is a no-op on '').
+    if (slayStyleInPreset()) {
+        style = '';
+    } else if (settings.slayStyle) {
         style = settings.slayStyle;
     }
     const maxRetries = settings.maxRetries;
@@ -5461,7 +6128,10 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // ── Multimodal refs (base64 + labels) for Gemini AND OpenAI-compatible chat.completions ──
     // Custom + images/generations body has no slot for refs — don't waste time
     // downloading/encoding avatars that generateImageOpenAI would then discard.
-    const _skipRefs = settings.apiType === 'custom' && (settings.customBodyFormat || 'chat') === 'images';
+    // 'edits' (GPT images/edits) takes references as files — treated like 'chat'.
+    const _customFormat = settings.apiType === 'custom' ? (settings.customBodyFormat || 'chat') : 'chat';
+    const _skipRefs = _customFormat === 'images';
+    const _isEdits = _customFormat === 'edits';
     if (settings.apiType !== 'naistera' && !_skipRefs) {
         const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
         const pushRef = (image, label, name = '') => {
@@ -5513,8 +6183,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             const b64 = npc.imagePath ? await loadRefImageAsBase64(npc.imagePath) : (npc.imageBase64 || npc.imageData);
             if (pushRef(b64, 'npc_matched', npc.name || 'NPC')) iigLog('INFO', `NPC matched: ${npc.name}`);
         }
-        // 5. Context images
-        if (settings.imageContextEnabled) {
+        // 5. Context images — not for images/edits: there every file is a
+        // subject to keep, and a previous scene would be «kept» too.
+        if (settings.imageContextEnabled && !_isEdits) {
             const contextCount = normalizeImageContextCount(settings.imageContextCount);
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'base64', contextCount);
             for (const cr of contextRefs) {
@@ -5533,7 +6204,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // silently shipped no references while the settings panel still showed the
     // reference slots. (The cosmetic twin of this line was updated and this one
     // was not, which is exactly how it slipped out.)
-    const supportsNaisteraRefs = currentNaisteraModelForRefs.startsWith('grok') || currentNaisteraModelForRefs.startsWith('nano banana');
+    const supportsNaisteraRefs = naisteraModelSupportsRefs(currentNaisteraModelForRefs);
     if (settings.apiType === 'naistera' && supportsNaisteraRefs) {
         const getDataUrl = async (ref) => {
             if (ref?.imagePath) { const b64 = await loadRefImageAsBase64(ref.imagePath); if (b64) return 'data:image/jpeg;base64,' + b64; }
@@ -5713,8 +6384,7 @@ async function parseImageTags(text, options = {}) {
 
         const fullImgTag = text.substring(mediaStart, mediaEnd);
         const instructionJson = text.substring(jsonStart, jsonEnd);
-        const srcMatch = fullImgTag.match(/src\s*=\s*["']?([^"'\s>]+)/i);
-        const srcValue = srcMatch ? srcMatch[1] : '';
+        const srcValue = iigGetTagSrc(fullImgTag);
 
         let needsGeneration = false;
         // A src that is not a real stored file is an UNFILLED tag: the marker the
@@ -5735,13 +6405,18 @@ async function parseImageTags(text, options = {}) {
         // marker src. Checking the stamp alone meant a model that copied
         // data-iig-error forward while writing a fresh [IMG:GEN] request had its
         // request silently ignored.
-        const hasErrorImage = isErrorMarkerSrc && /\bdata-iig-error\s*=/i.test(fullImgTag);
+        // Legacy error.svg (pre-5.0.1 builds) always means "already failed":
+        // those tags get a retry card from the rehydration pass, not a fresh paid
+        // request on every chat open. The inline GIF counts only with the stamp.
+        const hasErrorImage = srcValue.includes('error.svg') || (srcValue === IIG_ERROR_SRC && /\bdata-iig-error\s*=/i.test(fullImgTag));
 
         if (hasErrorImage && !forceAll) { searchPos = mediaEnd; continue; }
         if (forceAll) needsGeneration = true;
         else if (isPlaceholderSrc) needsGeneration = true;
         else if (hasPath && checkExistence) {
-            const exists = await checkFileExists(srcValue);
+            // Spaces and quotes in the folder name must reach the server encoded;
+            // a path that is already percent-encoded is passed as-is.
+            const exists = await checkFileExists(/%[0-9a-f]{2}/i.test(srcValue) ? srcValue : encodeURI(srcValue));
             if (!exists) { iigLog('WARN', `File not found (hallucination?): ${srcValue}`); needsGeneration = true; }
         } else if (hasPath) { searchPos = mediaEnd; continue; }
         if (!needsGeneration) { searchPos = mediaEnd; continue; }
@@ -5749,7 +6424,7 @@ async function parseImageTags(text, options = {}) {
         try {
             let normalizedJson = instructionJson.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
             const data = JSON.parse(normalizedJson);
-            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null });
+            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null, instruction: instructionJson, instructionKey: iigInstructionKey(instructionJson) });
             iigLog('INFO', `Found NEW tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) { iigLog('WARN', `Parse failed: ${instructionJson.substring(0, 100)}`); }
         searchPos = mediaEnd;
@@ -5821,6 +6496,285 @@ function iigIsLiveImagePath(src) {
     const s = String(src || '');
     if (!s || s.startsWith('data:') || s.includes('[IMG:') || s.includes('error.svg')) return false;
     return s.startsWith('/') && s.length > 5;
+}
+
+// ── Tag-string helpers: src, the error stamp, lazy attributes, instruction keys ──
+// Quote-aware src. The old readers (`[^'"]*`, `[^"'\s>]+`) stopped at the first
+// quote of either kind or at a space, so a path with an apostrophe
+// («Roman 'Ro' Thorne») or a double space in the folder name was cut in half —
+// and the half was then checked for existence, found missing and regenerated.
+const IIG_TAG_SRC_RE = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+function iigGetTagSrc(tagHtml) {
+    const m = String(tagHtml || '').match(IIG_TAG_SRC_RE);
+    if (!m) return '';
+    if (m[1] !== undefined) return m[1];
+    if (m[2] !== undefined) return m[2];
+    return m[3] || '';
+}
+function iigSetTagSrc(tagHtml, newSrc) {
+    const html = String(tagHtml || '');
+    const safe = String(newSrc || '').replace(/"/g, '&quot;');
+    if (IIG_TAG_SRC_RE.test(html)) return html.replace(IIG_TAG_SRC_RE, () => `src="${safe}"`);
+    return html.replace(/^<(img|video)\b/i, (m, t) => `<${t} src="${safe}"`);
+}
+// Attribute scanner that respects quotes, so stripping `autoplay` or
+// `data-iig-error` never touches the same word inside the instruction JSON.
+function iigScanTagAttrs(tagHtml) {
+    const s = String(tagHtml || '');
+    const attrs = [];
+    const open = /^<\/?[A-Za-z][\w:-]*/.exec(s);
+    if (!open) return attrs;
+    let i = open[0].length;
+    while (i < s.length) {
+        const attrStart = i;
+        while (i < s.length && /\s/.test(s[i])) i++;
+        if (i >= s.length || s[i] === '>' || (s[i] === '/' && s[i + 1] === '>')) break;
+        const nm = /^[^\s=>\/"']+/.exec(s.slice(i));
+        if (!nm) { i++; continue; }
+        const name = nm[0];
+        i += name.length;
+        const eq = /^\s*=\s*/.exec(s.slice(i));
+        let value = null;
+        if (eq) {
+            i += eq[0].length;
+            const q = s[i];
+            if (q === '"' || q === "'") {
+                const close = s.indexOf(q, i + 1);
+                value = s.slice(i + 1, close === -1 ? s.length : close);
+                i = close === -1 ? s.length : close + 1;
+            } else {
+                const uv = /^[^\s>]*/.exec(s.slice(i))[0];
+                value = uv; i += uv.length;
+            }
+        }
+        attrs.push({ name, lname: name.toLowerCase(), value, start: attrStart, end: i });
+    }
+    return attrs;
+}
+function iigStripTagAttrs(tagHtml, names) {
+    const s = String(tagHtml || '');
+    const want = new Set(names.map(n => String(n).toLowerCase()));
+    const drop = iigScanTagAttrs(s).filter(a => want.has(a.lname));
+    if (!drop.length) return s;
+    let out = '', pos = 0;
+    for (const a of drop) { out += s.slice(pos, a.start); pos = a.end; }
+    return out + s.slice(pos);
+}
+// Success writers must drop the failure stamp: a stamped tag whose src is a
+// real picture was turned back into an error card on the next reload.
+function iigStripErrorStamp(tagHtml) { return iigStripTagAttrs(tagHtml, ['data-iig-error']); }
+// loading="lazy" decoding="async" on persisted <img> tags (P8), never twice.
+function iigAddLazyAttrs(tagHtml) {
+    const html = String(tagHtml || '');
+    if (!/^<img\b/i.test(html)) return html;
+    const has = new Set(iigScanTagAttrs(html).map(a => a.lname));
+    const add = [];
+    if (!has.has('loading')) add.push('loading="lazy"');
+    if (!has.has('decoding')) add.push('decoding="async"');
+    if (!add.length) return html;
+    return html.replace(/^<img\b/i, () => `<img ${add.join(' ')}`);
+}
+// The one way a successful image generation is written back into a tag.
+function iigSuccessTag(fullMatch, imagePath) {
+    return iigAddLazyAttrs(iigStripErrorStamp(iigSetTagSrc(fullMatch, imagePath)));
+}
+
+function iigDecodeInstruction(str) {
+    return String(str || '').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
+}
+// Canonical form of an instruction so a tag in the message source and the
+// element on screen (whose attribute the HTML parser already entity-decoded)
+// compare equal. Falls back to the trimmed text when it is not JSON.
+function iigInstructionKey(str) {
+    const decoded = iigDecodeInstruction(str).trim();
+    if (!decoded) return '';
+    try { return JSON.stringify(JSON.parse(decoded)); }
+    catch (_) {
+        try { return JSON.stringify(JSON.parse(decoded.replace(/'/g, '"'))); }
+        catch (_2) { return decoded; }
+    }
+}
+// Pair a parsed tag with an on-screen element (img / video / error card) by
+// instruction; by position only when the instruction is missing on either side.
+function iigPickTargetElement(tag, index, targetEls, usedEls) {
+    const key = tag?.instructionKey || '';
+    if (key) {
+        for (const el of targetEls) {
+            if (usedEls.has(el)) continue;
+            if (iigInstructionKey(el.getAttribute('data-iig-instruction')) === key) { usedEls.add(el); return el; }
+        }
+    }
+    const byIndex = targetEls[index];
+    if (!byIndex || usedEls.has(byIndex)) return null;
+    // Positional fallback only when an instruction is absent (tag side) or
+    // unreadable (element side); otherwise we would hit the wrong picture.
+    if (key && iigInstructionKey(byIndex.getAttribute('data-iig-instruction'))) return null;
+    usedEls.add(byIndex);
+    return byIndex;
+}
+// Rewrite ONLY the tag(s) carrying this instruction, in every store ST may
+// re-render from. Each store is parsed on its own: a swipe can hold the same
+// tag with another src, and a plain string replace of one store's text would
+// never find it there.
+async function iigRewriteTagByInstruction(message, instrStr, mutate) {
+    const key = iigInstructionKey(instrStr);
+    if (!message || !key) return 0;
+    let n = 0;
+    const rewrite = async (str) => {
+        if (typeof str !== 'string' || !str.includes('data-iig-instruction')) return str;
+        const tags = await parseImageTags(str, { forceAll: true });
+        let out = str;
+        for (const t of tags) {
+            if (!t.isNewFormat || t.instructionKey !== key) continue;
+            const updated = mutate(t.fullMatch);
+            if (typeof updated !== 'string' || updated === t.fullMatch) continue;
+            const before = out;
+            out = out.replace(t.fullMatch, () => updated);
+            if (out !== before) n++;
+        }
+        return out;
+    };
+    message.mes = await rewrite(message.mes);
+    if (message.extra) {
+        if (typeof message.extra.display_text === 'string') message.extra.display_text = await rewrite(message.extra.display_text);
+        if (typeof message.extra.extblocks === 'string') message.extra.extblocks = await rewrite(message.extra.extblocks);
+    }
+    if (Array.isArray(message.swipes)) {
+        for (let i = 0; i < message.swipes.length; i++) message.swipes[i] = await rewrite(message.swipes[i]);
+    }
+    if (Array.isArray(message.swipe_info)) {
+        for (const si of message.swipe_info) {
+            const ex = si?.extra;
+            if (!ex) continue;
+            if (typeof ex.display_text === 'string') ex.display_text = await rewrite(ex.display_text);
+            if (typeof ex.extblocks === 'string') ex.extblocks = await rewrite(ex.extblocks);
+        }
+    }
+    return n;
+}
+
+// ── In-flight / chat-switch bookkeeping (P6) ──
+function iigCooldownKey(messageId, message) {
+    return `${messageId}:${message?.swipe_id ?? 0}:${(message?.mes || '').length}`;
+}
+function iigStillSameChat(chatIdAtStart, messageId, message) {
+    try {
+        const ctx = SillyTavern.getContext();
+        return ctx.chatId === chatIdAtStart && ctx.chat?.[messageId] === message;
+    } catch (_) { return false; }
+}
+function iigReleaseInFlight(messageId, messageObj) {
+    if (messageObj) processingMessageObjects.delete(messageObj);
+    let live = null;
+    try { live = SillyTavern.getContext().chat?.[messageId]; } catch (_) { }
+    // Another job for a newer object at this index may still be running.
+    if (!(live && processingMessageObjects.has(live))) processingMessages.delete(messageId);
+}
+// A result that finished after the user had left the chat. Never saved into the
+// chat that is open now; written when CHAT_CHANGED brings the right one back.
+function iigDeferResult(chatId, entry) {
+    if (!chatId) { iigLog('WARN', 'Result finished with no chat id — cannot defer, dropped'); return; }
+    const list = pendingResults.get(chatId) || [];
+    list.push(entry);
+    pendingResults.set(chatId, list);
+    iigLog('INFO', `Result deferred for chat ${String(chatId).slice(0, 40)} (message ${entry.messageId})`);
+    toastr.info('Картинка готова, запишу в чат, когда вы вернётесь в него', 'SLAY Images', { timeOut: 6000 });
+}
+async function iigApplyPendingResults() {
+    const ctx = SillyTavern.getContext();
+    const chatId = ctx?.chatId;
+    const list = chatId ? pendingResults.get(chatId) : null;
+    if (!list || !list.length) return;
+    pendingResults.delete(chatId);
+    let applied = 0;
+    for (const entry of list) {
+        const message = ctx.chat?.[entry.messageId];
+        if (!message) { iigLog('WARN', `Deferred result: message ${entry.messageId} is gone`); continue; }
+        let n = 0;
+        const mutate = (full) => entry.isVideo
+            ? buildPersistedVideoTag(full, entry.mediaPath, entry.posterPath || '')
+            : iigSuccessTag(full, entry.mediaPath);
+        if (entry.instruction) n = await iigRewriteTagByInstruction(message, entry.instruction, mutate);
+        else if (entry.legacyTag) {
+            const before = message.mes;
+            replaceTagInMessageSource(message, entry.legacyTag, `[IMG:✓:${entry.mediaPath}]`);
+            if (message.mes !== before) n = 1;
+        }
+        if (!n) { iigLog('WARN', `Deferred result: tag not found in message ${entry.messageId}`); continue; }
+        applied++;
+        try { ctx.updateMessageBlock?.(entry.messageId, message); } catch (e) { iigLog('WARN', 'updateMessageBlock failed:', e?.message); }
+    }
+    if (!applied) return;
+    try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+    toastr.success('Картинка, сгенерированная в этом чате, записана', 'SLAY Images', { timeOut: 4000 });
+}
+
+// ── Save-stage retry (P7) ──
+// A generation that came back is paid for. If ST will not store the file we
+// retry the upload alone, and if it still fails the picture is shown from its
+// data URL with a «Сохранить ещё раз» button — never a second paid request.
+const IIG_SAVE_RETRY_DELAYS = [500, 1500, 3000];
+async function iigSaveWithRetry(saver, onStatus) {
+    let lastErr;
+    for (let attempt = 0; attempt <= IIG_SAVE_RETRY_DELAYS.length; attempt++) {
+        try { return await saver(); }
+        catch (e) {
+            lastErr = e;
+            iigLog('WARN', `save attempt ${attempt + 1} failed: ${e?.message || e}`);
+            if (attempt < IIG_SAVE_RETRY_DELAYS.length) {
+                try { onStatus?.(`Сохранение, попытка ${attempt + 2}...`); } catch (_) { }
+                await new Promise(r => setTimeout(r, IIG_SAVE_RETRY_DELAYS[attempt]));
+            }
+        }
+    }
+    throw lastErr;
+}
+// `persist(path)` resolves to true (written; the caller still has to saveChat),
+// 'deferred' (another chat is open, parked in pendingResults) or false.
+function iigMarkUnsaved(el, dataUrl, saver, persist) {
+    if (!el) return;
+    el._iigPendingDataUrl = dataUrl;
+    let wrap = el.closest?.('.iig-img-wrap');
+    if (!wrap && el.parentNode) {
+        wrap = document.createElement('span');
+        wrap.className = 'iig-img-wrap';
+        el.parentNode.insertBefore(wrap, el);
+        wrap.appendChild(el);
+    }
+    if (!wrap) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'iig-resave-btn';
+    btn.title = 'Картинка не сохранилась в SillyTavern — записать её ещё раз, без новой генерации';
+    btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i><span>Сохранить ещё раз</span>';
+    const label = btn.querySelector('span');
+    btn.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true; label.textContent = 'Сохраняю…';
+        try {
+            const path = await iigSaveWithRetry(() => saver(el._iigPendingDataUrl));
+            el.setAttribute('src', path); el.src = path;
+            const r = await persist(path);
+            delete el._iigPendingDataUrl;
+            btn.remove();
+            if (r === true) {
+                const ctx = SillyTavern.getContext();
+                try { await ctx.saveChat?.(); } catch (_) { ctx.saveChatDebounced?.(); }
+                toastr.success('Картинка сохранена и записана в чат', 'SLAY Images', { timeOut: 2500 });
+            } else if (r === 'deferred') {
+                toastr.success('Картинка сохранена', 'SLAY Images', { timeOut: 2500 });
+            } else {
+                toastr.warning('Картинка сохранена, но записать её в чат не удалось', 'SLAY Images');
+            }
+        } catch (err) {
+            iigLog('ERROR', 'resave failed:', err?.message || err);
+            toastr.warning('Снова не сохранилось: ' + (err?.message || err), 'SLAY Images', { timeOut: 7000 });
+            btn.disabled = false; label.textContent = 'Сохранить ещё раз';
+        }
+    });
+    wrap.appendChild(btn);
+    toastr.warning('Картинка получена, но не сохранилась в SillyTavern — повторите позже, запрос второй раз не оплачивается', 'SLAY Images', { timeOut: 10000 });
 }
 
 // Every src a failed tag may carry, across builds: the current marker, whatever
@@ -5913,54 +6867,120 @@ function slayExplainError(err) {
     catch (_) { return { title: 'Генерация не удалась', short: 'Генерация не удалась', detail: '', url: '', tone: 'error', raw: '' }; }
 }
 
+// What the provider itself said, ≤140 chars, or ''. Bodies arrive as
+// `API Error (nnn): {json}`; we read error.message / error / message / detail
+// (plus a word-like error.code, which often says more than the sentence), and
+// for an HTML page the <title> or the <pre> line (express's «Cannot POST …»).
+function slayProviderSaid(raw) {
+    const body = String(raw || '').replace(/^\s*API Error \(\d{3}\):\s*/i, '').trim();
+    if (!body) return '';
+    const pick = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '';
+    let said = '';
+    try {
+        const j = JSON.parse(body);
+        const e = j?.error;
+        said = pick(e?.message) || pick(e) || pick(j?.message) || pick(j?.detail) || pick(j?.msg);
+        const code = pick(e?.code) || pick(e?.type) || pick(e?.status);
+        if (code && !/^\d+$/.test(code)) {
+            if (!said) said = code;
+            else if (!said.toLowerCase().includes(code.toLowerCase())) said = `${said} (${code})`;
+        }
+    } catch (_) {
+        if (/^\s*</.test(body) || /<!doctype/i.test(body)) {
+            // <pre> first: express pages title themselves «Error» and put the
+            // useful line («Cannot POST /v1beta/…») in the <pre>.
+            const t = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i) || body.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            said = t ? t[1].replace(/<[^>]+>/g, '') : '';
+        } else {
+            // Truncated or almost-JSON: the first "message": "…" in sight, else
+            // the text itself when it is short enough to be a sentence.
+            const m = body.match(/"(?:message|detail|error)"\s*:\s*"((?:[^"\\]|\\.)*)"/i);
+            said = m ? m[1].replace(/\\"/g, '"') : (body.length <= 140 ? body : '');
+        }
+    }
+    said = String(said || '').replace(/\s+/g, ' ').trim();
+    return said.length > 140 ? said.slice(0, 139) + '…' : said;
+}
+
 function slayExplainErrorInner(err) {
     const raw = String(err?.message || err || '');
     const low = raw.toLowerCase();
     const url = String(err?.slayUrl || '');
-    // Only read a status where the text actually reports one. A bare three-digit
-    // number is not a status: "модель gpt-4o-500 не найдена" was being announced
-    // as a provider outage.
-    const status = Number(
+    // The status the generator stamped on the error wins. Otherwise read one
+    // only where the text actually reports it: a bare three-digit number is
+    // not a status — "модель gpt-4o-500 не найдена" was being announced as a
+    // provider outage.
+    const status = Number(err?.status) || Number(
         (raw.match(/\b(?:HTTP|status|code)\D{0,3}([45]\d\d)\b/i) || [])[1]
         || (raw.match(/\(\s*([45]\d\d)\s*\)/) || [])[1]
         || (raw.match(/^\s*([45]\d\d)\b/) || [])[1]
         || 0);
+    let apiType = '';
+    try { apiType = String(getSettings().apiType || ''); } catch (_) { }
+    const said = status ? slayProviderSaid(raw) : '';
+    // The provider's own words ride along on every status branch: «Запрос
+    // отклонён (403): unsupported_country_region_territory» names the real
+    // reason where our guess cannot.
+    const add = (s) => said ? `${s}: ${said}` : s;
+    const addD = (s) => said ? `${s} Сервер сказал: «${said}».` : s;
     const mk = (title, short, detail, tone = 'error') => ({ title, short, detail, url, tone, raw });
 
-    // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON"
+    // OpenAI's image moderation. Not a broken setting and not a bad key — the
+    // prompt or the reference tripped the filter.
+    if (low.includes('moderation_blocked') || low.includes('safety_violations')) {
+        return mk('Фильтр OpenAI не пропустил запрос', add('Фильтр OpenAI не пропустил запрос'),
+            addD('Смягчите промпт или уберите реф и попробуйте снова.'), 'warning');
+    }
+    // Status first: a 403 that comes wrapped in a Cloudflare page is still a
+    // 403, and a 4xx whose body merely contains the word "timeout" or "aborted"
+    // is not a network event — telling the user "с вас могли списать" about a
+    // refused request is its own small lie.
+    if (status === 401) {
+        return mk('Ключ не подошёл', add('Ключ не подошёл (401)'),
+            addD('Сервер отклонил ключ. Проверьте, что он скопирован целиком и выдан именно к этому адресу.'));
+    }
+    if (status === 403) {
+        // Not «ключ»: a 403 is the provider refusing THIS request — region
+        // block, empty balance, model outside the plan. Sending someone to
+        // re-paste a working key is the wrong advice.
+        return mk('Доступ запрещён', add('Доступ запрещён (403)'),
+            addD('Часто это блок региона или пустой баланс у провайдера — проверьте в его кабинете.'));
+    }
+    if (status === 429) {
+        return mk('Лимит или баланс', add('Лимит или баланс (429)'),
+            addD('Провайдер ограничил запросы или на счету пусто. Подождите или проверьте баланс, потом нажмите «Попробовать снова».'), 'warning');
+    }
+    if (status === 404 || status === 405) {
+        // «Проверьте Тип API» only where there is a dialect to get wrong —
+        // custom is a full URL the user typed, naistera has one host.
+        const typeHint = apiType === 'openai' || apiType === 'gemini';
+        return mk('Такого пути на сервере нет',
+            add(`По этому адресу такого пути нет (${status})${typeHint ? '. Проверьте «Тип API»' : ''}`),
+            addD(typeHint
+                ? 'Адрес живой, но отвечает не по этому маршруту. Обычно это значит, что «Тип API» выбран не тот.'
+                : 'Адрес живой, но по этому пути ничего нет. Проверьте URL — он должен вести на саму конечную точку.'));
+    }
+    if (status >= 500) {
+        return mk('Сбой у провайдера', add(`Сбой на стороне провайдера (${status})`),
+            addD('Это не ваши настройки — сервер сам не справился. Попробуйте ещё раз.'));
+    }
+    if (status >= 400) {
+        return mk('Запрос отклонён', add(`Запрос отклонён (${status})`),
+            said ? addD('Сервер не принял запрос.') : 'Сервер не принял запрос. Что именно не так — написано ниже, в его собственном ответе.');
+    }
+    // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON" — a 200 that
+    // carried a page instead of JSON.
     if (low.includes('is not valid json') || low.includes('<!doctype') || /unexpected token\s*'?</.test(low)) {
         return mk('Пришла веб-страница вместо ответа',
             'Адрес ответил веб-страницей, а не данными',
             'Обычно это страница ошибки, капча или заглушка провайдера. Откройте адрес в браузере — увидите, что там на самом деле.');
     }
-    // Status first: a 4xx whose body merely contains the word "timeout" or
-    // "aborted" is not a network event, and telling the user "с вас могли
-    // списать" about a refused request is its own small lie.
-    if (status === 401 || status === 403) {
-        return mk('Ключ не подошёл', `Ключ не подошёл (${status})`,
-            'Сервер отклонил ключ. Проверьте, что он скопирован целиком и выдан именно к этому адресу.');
-    }
-    if (status === 429) {
-        return mk('Слишком часто', 'Слишком часто — провайдер просит подождать',
-            'Провайдер ограничил частоту запросов. Подождите немного и нажмите «Попробовать снова».', 'warning');
-    }
-    if (status === 404 || status === 405) {
-        return mk('Такого пути на сервере нет', `По этому адресу такого пути нет (${status}). Проверьте «Тип API»`,
-            'Адрес живой, но отвечает не по этому маршруту. Обычно это значит, что «Тип API» выбран не тот.');
-    }
-    if (status >= 500) {
-        return mk('Сбой у провайдера', `Сбой на стороне провайдера (${status})`,
-            'Это не ваши настройки — сервер сам не справился. Попробуйте ещё раз.');
-    }
-    if (status >= 400) {
-        return mk('Запрос отклонён', `Запрос отклонён (${status})`,
-            'Сервер не принял запрос. Что именно не так — написано ниже, в его собственном ответе.');
-    }
-    // "Request timed out after 3 minutes (iOS)"
+    // "Request timed out after 5 minutes" / "Request timed out after 3 minutes (iOS)"
     if (low.includes('timed out') || low.includes('timeout')) {
-        return mk('Ответа нет три минуты',
-            'Ответа нет. Проверьте галерею перед повтором',
-            'Картинка могла всё-таки сгенерироваться и списаться со счёта. Загляните в галерею персонажа, прежде чем повторять.',
+        const span = (low.includes('(ios)') || low.includes('3 minutes')) ? '3 минуты' : '5 минут';
+        return mk(`Ответа нет ${span}`,
+            `Ответа нет ${span}. Картинка могла списаться — проверьте перед повтором`,
+            `Сервер не ответил за ${span}. Картинка могла всё-таки сгенерироваться и списаться со счёта, а повтор — это новый платный запрос.`,
             'warning');
     }
     if (low.includes('aborted')) {
@@ -5974,8 +6994,8 @@ function slayExplainErrorInner(err) {
     // browser will not say why.
     if (low.includes('network error') || low.includes('failed to fetch') || low.includes('load failed') || low.includes('networkerror')) {
         return mk('Браузер не достучался до адреса',
-            'Не достучались до адреса. Похоже, «Тип API» не тот',
-            'Адрес не ответил. Проверьте, открывается ли он в браузере, и совпадает ли «Тип API» с тем, что даёт провайдер.');
+            'Нет связи с адресом: проверьте интернет/VPN и адрес',
+            'Адрес не ответил. Проверьте интернет и VPN, и что адрес открывается в браузере.');
     }
     return mk('Генерация не удалась', `Ошибка: ${raw}`, raw);
 }
@@ -6006,9 +7026,12 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     // provider's own sentence with a guess turned "на счету кончились деньги"
     // into "проверьте ключ" — confidently wrong, and on a phone there is no
     // hover tooltip to recover the truth from.
-    const rawSaid = info && info.raw && info.raw !== info.detail ? String(info.raw).slice(0, 200) : '';
-    const shortMsg = String((info ? info.detail : errorMessage) || '').slice(0, 300)
-        + (rawSaid ? `\n\nСервер ответил: ${rawSaid}` : '');
+    // The raw body gets its own block, without our `API Error (nnn): ` prefix
+    // (the status is already in the title line), and is skipped when the
+    // explanation already quotes the whole thing.
+    const rawBody = info && info.raw ? String(info.raw).replace(/^\s*API Error \(\d{3}\):\s*/i, '').trim() : '';
+    const rawSaid = rawBody && rawBody !== info.detail && !String(info.detail || '').includes(rawBody) ? rawBody.slice(0, 200) : '';
+    const shortMsg = String((info ? info.detail : errorMessage) || '').slice(0, 300);
     const fullMsg = String((info ? (info.raw || info.detail) : errorMessage) || '');
     el.innerHTML = `
         <div class="iig-error-icon" aria-hidden="true">
@@ -6020,6 +7043,7 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
         </div>
         <div class="iig-error-title">${sanitizeForHtml(cardTitle)}</div>
         <div class="iig-error-msg" title="${sanitizeForHtml(fullMsg)}">${sanitizeForHtml(shortMsg)}</div>
+        ${rawSaid ? `<div class="iig-error-raw" title="${sanitizeForHtml(rawBody.slice(0, 1000))}">Сервер ответил: ${sanitizeForHtml(rawSaid)}</div>` : ''}
         ${cardUrl ? `<div class="iig-error-url" title="${sanitizeForHtml(cardUrl)}">${sanitizeForHtml(cardUrl.replace(/^https?:\/\//, ''))}</div>` : ''}
         <button class="iig-error-retry menu_button" type="button"><i class="fa-solid fa-rotate"></i><span>Попробовать снова</span></button>
     `;
@@ -6042,9 +7066,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     // Parse instruction
     let data;
     try {
-        const decoded = String(instructionJsonStr || '')
-            .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-            .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
+        const decoded = iigDecodeInstruction(instructionJsonStr);
         try { data = JSON.parse(decoded); }
         catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
     } catch (err) {
@@ -6057,6 +7079,16 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : undefined;
     const ctx = SillyTavern.getContext();
     const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+    const chatIdAtStart = ctx?.chatId;
+    if (Number.isInteger(messageId)) {
+        if (processingMessages.has(messageId)) {
+            toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images');
+            errorEl.dataset.iigRetrying = '0';
+            return;
+        }
+        processingMessages.add(messageId);
+        if (message) processingMessageObjects.add(message);
+    }
 
     // Swap error placeholder for loading placeholder
     const tagId = errorEl.dataset.tagId || `iig-retry-${Date.now()}`;
@@ -6071,58 +7103,74 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
             { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, messageId });
         if (labelEl?.isConnected) labelEl.textContent = 'Сохранение...';
         if (timerEl?.isConnected) timerEl.textContent = '';
-        const imagePath = isGeneratedVideoResult(result)
-            ? await saveNaisteraMediaToFile(result.dataUrl, 'video')
-            : await saveImageToFile(result);
-        const newEl = createGeneratedMediaElement(imagePath, { style: data.style, prompt: data.prompt });
-        if (instructionJsonStr) newEl.setAttribute('data-iig-instruction', instructionJsonStr);
-        if (loading._timerInterval) clearInterval(loading._timerInterval);
-        if (loading.isConnected) loading.replaceWith(newEl);
-        if (newEl.getAttribute('data-iig-instruction')) attachRegenButton(newEl);
+        const isVideo = isGeneratedVideoResult(result);
+        const dataUrl = isVideo ? result.dataUrl : result;
+        const saver = isVideo ? (d) => saveNaisteraMediaToFile(d, 'video') : (d) => saveImageToFile(d);
 
-        // Persist new src in message source so it survives reload.
-        // CRITICAL: use replaceImageSrcEverywhere() — it patches mes,
-        // display_text, extblocks AND swipes[swipe_id] + swipe_info. The old
-        // hand-rolled replace only touched mes/display_text/extblocks and
-        // missed swipes — which is what ST actually re-renders from on chat
-        // reload, so the error.svg src in swipes[0] would silently win and
-        // bring the error placeholder back every time the user came back to
-        // the chat.
-        if (message) {
-            // Try every marker a failed tag may carry: the current inline one,
-            // whatever this install resolves error.svg to, and the legacy
-            // hardcoded paths — chats written by older builds still hold those.
-            let replaced = false;
-            for (const cand of iigErrorSrcCandidates()) {
-                if (cand && replaceImageSrcEverywhere(message, cand, imagePath)) replaced = true;
+        // Persist by INSTRUCTION, and only that tag. The old code replaced every
+        // known error marker everywhere, so two failed tags in one message were
+        // both pointed at the first retry's picture — and a card born from a
+        // regen failure (the source still holds the old live src) persisted
+        // nothing at all. Each store (mes, swipes, display_text…) is matched on
+        // its own, so a swipe that still carries the stale src is fixed too.
+        const persist = async (mediaPath) => {
+            if (!message) return false;
+            if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                iigDeferResult(chatIdAtStart, { messageId, instruction: instructionJsonStr, mediaPath, isVideo });
+                return 'deferred';
+            }
+            let replaced = 0;
+            if (instructionJsonStr) {
+                replaced += await iigRewriteTagByInstruction(message, instructionJsonStr,
+                    (full) => isVideo ? buildPersistedVideoTag(full, mediaPath) : iigSuccessTag(full, mediaPath));
             }
             // LEGACY format: failed old-style tags are stored as literal
-            // [IMG:ERROR:reason] in the message text — there is no error.svg src
-            // to replace, so the block above no-ops and the retry result never
-            // persisted (error came back on reload). Rewrite those markers to
-            // the legacy success form in every store.
-            // indexOf guard, NOT .test() — a /g regex's test() advances lastIndex
-            // and silently fails on the next call.
+            // [IMG:ERROR:reason] in the message text — no src to replace, so the
+            // block above no-ops. Rewrite those markers to the legacy success
+            // form in every store. indexOf guard, NOT .test() — a /g regex's
+            // test() advances lastIndex and silently fails on the next call.
             const legacyRewrite = (str) => (typeof str === 'string' && str.indexOf('[IMG:ERROR:') !== -1)
-                ? str.replace(/\[IMG:ERROR:[^\]]*\]/g, `[IMG:✓:${imagePath}]`)
+                ? str.replace(/\[IMG:ERROR:[^\]]*\]/g, () => `[IMG:✓:${mediaPath}]`)
                 : null;
             const tryField = (obj, key) => {
                 const out = legacyRewrite(obj?.[key]);
-                if (out !== null && out !== undefined) { obj[key] = out; replaced = true; }
+                if (out !== null && out !== undefined) { obj[key] = out; replaced++; }
             };
             tryField(message, 'mes');
             if (message.extra) { tryField(message.extra, 'display_text'); tryField(message.extra, 'extblocks'); }
             if (Array.isArray(message.swipes)) {
                 for (let i = 0; i < message.swipes.length; i++) {
                     const out = legacyRewrite(message.swipes[i]);
-                    if (out !== null && out !== undefined) { message.swipes[i] = out; replaced = true; }
+                    if (out !== null && out !== undefined) { message.swipes[i] = out; replaced++; }
                 }
             }
-            if (replaced) {
+            return replaced > 0;
+        };
+
+        let mediaPath = null;
+        try { mediaPath = await iigSaveWithRetry(() => saver(dataUrl), (s) => { if (labelEl?.isConnected) labelEl.textContent = s; }); }
+        catch (saveErr) { iigLog('ERROR', `Retry: upload failed after retries: ${saveErr?.message || saveErr}`); }
+
+        const newEl = createGeneratedMediaElement(isVideo ? { ...result, dataUrl: mediaPath || dataUrl } : (mediaPath || dataUrl), { style: data.style, prompt: data.prompt });
+        if (instructionJsonStr) newEl.setAttribute('data-iig-instruction', instructionJsonStr);
+        if (loading._timerInterval) clearInterval(loading._timerInterval);
+        if (loading.isConnected) loading.replaceWith(newEl);
+        if (newEl.tagName === 'IMG' && newEl.getAttribute('data-iig-instruction')) attachRegenButton(newEl);
+        else if (newEl.tagName === 'VIDEO') attachVideoDownloadButton(newEl);
+
+        if (mediaPath) {
+            const r = await persist(mediaPath);
+            if (r === true) {
+                // Save NOW, not debounced: a reload before the debounce fires
+                // brought the error card straight back.
                 try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+                toastr.success('Картинка сгенерирована', 'SLAY Images', { timeOut: 2000 });
+            } else if (r === false) {
+                toastr.warning('Не удалось записать картинку в чат', 'SLAY Images');
             }
+        } else {
+            iigMarkUnsaved(newEl, dataUrl, saver, persist);
         }
-        toastr.success('Картинка сгенерирована', 'SLAY Images', { timeOut: 2000 });
     } catch (err) {
         const errorMsg = err?.message || String(err);
         iigLog('ERROR', `Retry failed: ${errorMsg}`);
@@ -6135,7 +7183,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     } finally {
         // Retry is the third path that fills the context-ref memo; only the
         // automatic one ever emptied it.
-        if (Number.isInteger(messageId)) clearContextRefCache(messageId);
+        if (Number.isInteger(messageId)) { clearContextRefCache(messageId); iigReleaseInFlight(messageId, message); }
     }
 }
 
@@ -6144,24 +7192,30 @@ async function processMessageTags(messageId) {
     const context = SillyTavern.getContext();
     const settings = getSettings();
     if (!settings.enabled) return;
-    if (processingMessages.has(messageId)) return;
-    const lastProcessed = recentlyProcessed.get(messageId);
-    if (lastProcessed && (Date.now() - lastProcessed) < REPROCESS_COOLDOWN_MS) return;
 
     const message = context.chat[messageId];
     if (!message || message.is_user) return;
+    // Keyed by the message OBJECT and by (index, swipe, length), not the bare
+    // index: a swipe or a regenerated reply at the same index is new work.
+    if (processingMessageObjects.has(message)) return;
+    const cooldownKey = iigCooldownKey(messageId, message);
+    const lastProcessed = recentlyProcessed.get(cooldownKey);
+    if (lastProcessed && (Date.now() - lastProcessed) < REPROCESS_COOLDOWN_MS) return;
 
     const tags = await parseMessageImageTags(message, { checkExistence: true });
     if (tags.length === 0) return;
+    if (processingMessageObjects.has(message)) return;   // a second event slipped in during the await
 
+    processingMessageObjects.add(message);
     processingMessages.add(messageId);
+    const chatIdAtStart = context.chatId;
     iigLog('INFO', `Found ${tags.length} tag(s) in message ${messageId}`);
     toastr.info(`Найдено ${tags.length} тег(ов). Генерация...`, 'SLAY Images', { timeOut: 3000 });
 
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-    if (!messageElement) { processingMessages.delete(messageId); return; }
+    if (!messageElement) { iigReleaseInFlight(messageId, message); return; }
     const mesTextEl = messageElement.querySelector('.mes_text');
-    if (!mesTextEl) { processingMessages.delete(messageId); return; }
+    if (!mesTextEl) { iigReleaseInFlight(messageId, message); return; }
 
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
@@ -6174,8 +7228,8 @@ async function processMessageTags(messageId) {
             for (const img of allImgs) {
                 const instruction = img.getAttribute('data-iig-instruction');
                 if (instruction) {
-                    const decoded = instruction.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
-                    const normalizedSearch = searchPrompt.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
+                    const decoded = iigDecodeInstruction(instruction);
+                    const normalizedSearch = iigDecodeInstruction(searchPrompt);
                     if (decoded.includes(normalizedSearch)) { targetElement = img; break; }
                     try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (d.prompt?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
                     if (instruction.includes(searchPrompt)) { targetElement = img; break; }
@@ -6190,7 +7244,7 @@ async function processMessageTags(messageId) {
         } else {
             const tagEscaped = tag.fullMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/"/g, '(?:"|&quot;)');
             const before = mesTextEl.innerHTML;
-            mesTextEl.innerHTML = mesTextEl.innerHTML.replace(new RegExp(tagEscaped, 'g'), `<span data-iig-placeholder="${tagId}"></span>`);
+            mesTextEl.innerHTML = mesTextEl.innerHTML.replace(new RegExp(tagEscaped, 'g'), () => `<span data-iig-placeholder="${tagId}"></span>`);
             if (before !== mesTextEl.innerHTML) targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
             if (!targetElement) { for (const img of mesTextEl.querySelectorAll('img')) { if (img.src?.includes('[IMG:GEN:')) { targetElement = img; break; } } }
         }
@@ -6207,55 +7261,74 @@ async function processMessageTags(messageId) {
             labelEl.textContent = 'Сохранение...';
             if (timerEl) timerEl.textContent = '';
 
-            if (isGeneratedVideoResult(result)) {
-                const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
-                let posterPath = '';
-                if (result.posterDataUrl) { try { posterPath = await saveImageToFile(result.posterDataUrl); } catch (e) { } }
-                const videoEl = createGeneratedMediaElement({ ...result, dataUrl: videoPath }, tag);
-                if (posterPath) videoEl.poster = posterPath;
-                if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                loadingPlaceholder.replaceWith(videoEl);
-                const persisted = buildPersistedVideoTag(tag.fullMatch, videoPath, posterPath);
-                replaceTagInMessageSource(message, tag, persisted);
-            } else {
-                const imagePath = await saveImageToFile(result);
-                const img = createGeneratedMediaElement(imagePath, tag);
-                if (tag.isNewFormat) {
-                    const instrMatch = tag.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
-                    if (instrMatch) img.setAttribute('data-iig-instruction', instrMatch[2]);
+            const isVideo = isGeneratedVideoResult(result);
+            const dataUrl = isVideo ? result.dataUrl : result;
+            const saver = isVideo ? (d) => saveNaisteraMediaToFile(d, 'video') : (d) => saveImageToFile(d);
+            // Persist = rewrite THIS tag in the message stores (saveChat happens
+            // once for the whole message, below). Shared with the «Сохранить
+            // ещё раз» button (P7). Refuses to write into another chat: the
+            // result is parked in pendingResults and written on the way back (P6).
+            const persist = async (mediaPath, posterPath = '') => {
+                if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                    iigDeferResult(chatIdAtStart, { messageId, instruction: tag.isNewFormat ? tag.instruction : '', legacyTag: tag.isNewFormat ? null : tag, mediaPath, posterPath, isVideo });
+                    return 'deferred';
                 }
-                if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                loadingPlaceholder.replaceWith(img);
-                // Attach regen button (only meaningful when there's data-iig-instruction, i.e. new format)
-                if (img.getAttribute('data-iig-instruction')) attachRegenButton(img);
-                if (tag.isNewFormat) {
-                    const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                    replaceTagInMessageSource(message, tag, updatedTag);
-                } else {
-                    replaceTagInMessageSource(message, tag, `[IMG:✓:${imagePath}]`);
-                }
+                let updatedTag;
+                if (isVideo) updatedTag = buildPersistedVideoTag(tag.fullMatch, mediaPath, posterPath);
+                else if (tag.isNewFormat) updatedTag = iigSuccessTag(tag.fullMatch, mediaPath);
+                else updatedTag = `[IMG:✓:${mediaPath}]`;
+                replaceTagInMessageSource(message, tag, updatedTag);
+                return true;
+            };
+
+            let mediaPath = null, posterPath = '';
+            try { mediaPath = await iigSaveWithRetry(() => saver(dataUrl), (s) => { labelEl.textContent = s; }); }
+            catch (saveErr) { iigLog('ERROR', `Tag ${index}: upload failed after retries: ${saveErr?.message || saveErr}`); }
+            if (isVideo && mediaPath && result.posterDataUrl) { try { posterPath = await saveImageToFile(result.posterDataUrl); } catch (e) { } }
+
+            const el = createGeneratedMediaElement(isVideo ? { ...result, dataUrl: mediaPath || dataUrl } : (mediaPath || dataUrl), tag);
+            if (isVideo && posterPath) el.poster = posterPath;
+            if (tag.isNewFormat && !el.getAttribute('data-iig-instruction')) {
+                // The parser's brace-counted JSON, not a quote-delimited regex: an
+                // apostrophe in the prompt used to cut the attribute in half.
+                const instrMatch = tag.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
+                const instr = tag.instruction || (instrMatch ? instrMatch[2] : '');
+                if (instr) el.setAttribute('data-iig-instruction', instr);
             }
+            if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
+            loadingPlaceholder.replaceWith(el);
+            // Attach regen button (only meaningful when there's data-iig-instruction, i.e. new format)
+            if (el.tagName === 'IMG' && el.getAttribute('data-iig-instruction')) attachRegenButton(el);
+            else if (el.tagName === 'VIDEO') attachVideoDownloadButton(el);
 
             sessionGenCount++; updateSessionStats();
-            toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
+            if (mediaPath) {
+                await persist(mediaPath, posterPath);
+                toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
+            } else {
+                // Generated and paid for, but ST would not store the file: show it
+                // from the data URL and let the user retry ONLY the upload.
+                iigMarkUnsaved(el, dataUrl, saver, persist);
+            }
         } catch (error) {
             iigLog('ERROR', `Tag ${index} failed:`, error.message);
             const explained = slayExplainError(error);
             const errorPlaceholder = createErrorPlaceholder(tagId, explained, tag);
             if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
             loadingPlaceholder.replaceWith(errorPlaceholder);
-            if (tag.isNewFormat) {
+            if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                iigLog('WARN', `Tag ${index} failed after a chat switch — nothing written to the source`);
+            } else if (tag.isNewFormat) {
                 // NEVER trade a working image for an error marker. If this tag
                 // already points at a real generated file, the failure is ours
                 // to show on screen — the message keeps the picture it had.
                 // Without this guard a transient failure permanently erased the
                 // path while the file sat safely on disk.
-                const prevSrc = (tag.fullMatch.match(/src\s*=\s*(['"])([^'"]*)\1/i) || [])[2] || '';
+                const prevSrc = iigGetTagSrc(tag.fullMatch);
                 if (iigIsLiveImagePath(prevSrc)) {
                     iigLog('WARN', `Tag ${index} failed but already had an image — keeping it, error shown in DOM only`);
                 } else {
-                    const errorTag = tag.fullMatch
-                        .replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${IIG_ERROR_SRC}"`)
+                    const errorTag = iigStripErrorStamp(iigSetTagSrc(tag.fullMatch, IIG_ERROR_SRC))
                         .replace(/^<(img|video)\b/i, (m, t) => `<${t} data-iig-error="1"`);
                     replaceTagInMessageSource(message, tag, errorTag);
                 }
@@ -6277,44 +7350,55 @@ async function processMessageTags(messageId) {
         await Promise.all(tags.map((tag, index) => processTag(tag, index)));
     } finally {
         try {
-            recentlyProcessed.set(messageId, Date.now());
-            await context.saveChat();
-        } finally { processingMessages.delete(messageId); clearContextRefCache(messageId); }
+            recentlyProcessed.set(cooldownKey, Date.now());
+            // Never save INTO another chat. If the user switched, every result
+            // was parked in pendingResults and is written on the way back.
+            if (iigStillSameChat(chatIdAtStart, messageId, message)) await context.saveChat();
+            else iigLog('WARN', `Message ${messageId}: chat changed during generation — saveChat skipped`);
+        } finally { iigReleaseInFlight(messageId, message); clearContextRefCache(messageId); }
     }
 }
 
 async function regenerateMessageImages(messageId) {
     if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
+    if (processingMessages.has(messageId)) { toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images'); return; }
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
     if (!message) { toastr.error('Сообщение не найдено', 'SLAY Images'); return; }
-    const tags = await parseImageTags(message.mes, { forceAll: true });
-    if (tags.length === 0) { toastr.warning('Нет тегов для регенерации', 'SLAY Images'); return; }
-
-    iigLog('INFO', `Regenerating ${tags.length} images in message ${messageId}`);
+    // In flight BEFORE the first await, so a double tap cannot start two jobs.
     processingMessages.add(messageId);
+    processingMessageObjects.add(message);
+    const chatIdAtStart = context.chatId;
+    let touched = false;
 
-    const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-    if (!messageElement) { processingMessages.delete(messageId); return; }
-    const mesTextEl = messageElement.querySelector('.mes_text');
-    if (!mesTextEl) { processingMessages.delete(messageId); return; }
+    try {
+        const tags = await parseImageTags(message.mes, { forceAll: true });
+        if (tags.length === 0) { toastr.warning('Нет тегов для регенерации', 'SLAY Images'); return; }
 
-    // Snapshot the target elements ONCE, before anything is replaced. The old
-    // code re-queried inside the loop and indexed by the loop counter: as soon
-    // as one tag failed, its element had been swapped for a placeholder that
-    // carries no data-iig-instruction, the list got shorter, and every later
-    // tag addressed the wrong image — regenerating tag N onto image N+1, then
-    // silently skipping the last one with no message at all.
-    const targetEls = [...mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction]')];
+        iigLog('INFO', `Regenerating ${tags.length} images in message ${messageId}`);
 
-    for (let index = 0; index < tags.length; index++) {
-        const tag = tags[index];
-        const tagId = `iig-regen-${messageId}-${index}`;
-        let loadingPlaceholder = null;
-        try {
-            const existingEl = targetEls[index] || null;
-            if (existingEl) {
-                const instruction = existingEl.getAttribute('data-iig-instruction');
+        const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+        if (!messageElement) return;
+        const mesTextEl = messageElement.querySelector('.mes_text');
+        if (!mesTextEl) return;
+
+        // Snapshot the target elements ONCE, before anything is replaced, and
+        // pair them with the tags by INSTRUCTION, not by position: the old code
+        // re-queried inside the loop and indexed by the loop counter, so as soon
+        // as one tag failed every later tag addressed the wrong image. Error
+        // cards count as targets too — a failed picture is regenerated in place.
+        const targetEls = [...mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction], .iig-error-placeholder[data-iig-instruction]')];
+        const usedEls = new Set();
+        touched = true;
+
+        for (let index = 0; index < tags.length; index++) {
+            const tag = tags[index];
+            const tagId = `iig-regen-${messageId}-${index}`;
+            let loadingPlaceholder = null;
+            try {
+                const existingEl = iigPickTargetElement(tag, index, targetEls, usedEls);
+                if (!existingEl) { iigLog('WARN', `Regen: no on-screen element for tag ${index}, skipped`); continue; }
+                const instruction = existingEl.getAttribute('data-iig-instruction') || tag.instruction || '';
                 loadingPlaceholder = createLoadingPlaceholder(tagId);
                 // Replace the WRAPPER when there is one. Replacing only the <img>
                 // left the old span.iig-img-wrap and its regen button in place,
@@ -6329,58 +7413,75 @@ async function regenerateMessageImages(messageId) {
                 labelEl.textContent = 'Сохранение...';
                 if (timerEl) timerEl.textContent = '';
 
-                if (isGeneratedVideoResult(result)) {
-                    const videoPath = await saveNaisteraMediaToFile(result.dataUrl, 'video');
-                    const videoEl = createGeneratedMediaElement({ ...result, dataUrl: videoPath }, tag);
-                    // createGeneratedMediaElement doesn't carry the instruction over,
-                    // so without this the element vanishes from every later lookup.
-                    if (instruction && !videoEl.getAttribute('data-iig-instruction')) videoEl.setAttribute('data-iig-instruction', instruction);
-                    if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                    loadingPlaceholder.replaceWith(videoEl);
-                    targetEls[index] = videoEl;
-                    const persisted = buildPersistedVideoTag(tag.fullMatch, videoPath);
-                    replaceTagInMessageSource(message, tag, persisted);
-                } else {
-                    const imagePath = await saveImageToFile(result);
-                    const img = document.createElement('img');
-                    img.className = 'iig-generated-image'; img.src = imagePath; img.alt = tag.prompt;
-                    if (instruction) img.setAttribute('data-iig-instruction', instruction);
-                    if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                    loadingPlaceholder.replaceWith(img);
-                    targetEls[index] = img;
-                    // Give the fresh image its own regen button — the previous one
-                    // went out with the wrapper we just replaced.
-                    try { attachRegenButton(img); } catch (e) { iigLog('WARN', 'attachRegenButton after regen failed:', e.message); }
-                    const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                    // All stores, not just message.mes: ST re-renders from swipes
-                    // and display_text, so patching one field alone let the old
-                    // image resurrect on the next swipe or reload.
+                const isVideo = isGeneratedVideoResult(result);
+                const dataUrl = isVideo ? result.dataUrl : result;
+                const saver = isVideo ? (d) => saveNaisteraMediaToFile(d, 'video') : (d) => saveImageToFile(d);
+                // All stores, not just message.mes: ST re-renders from swipes and
+                // display_text, so patching one field alone let the old image
+                // resurrect on the next swipe or reload. Never into another chat.
+                const persist = async (mediaPath) => {
+                    if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                        iigDeferResult(chatIdAtStart, { messageId, instruction: tag.isNewFormat ? tag.instruction : '', legacyTag: tag.isNewFormat ? null : tag, mediaPath, isVideo });
+                        return 'deferred';
+                    }
+                    let updatedTag;
+                    if (isVideo) updatedTag = buildPersistedVideoTag(tag.fullMatch, mediaPath);
+                    else if (tag.isNewFormat) updatedTag = iigSuccessTag(tag.fullMatch, mediaPath);
+                    else updatedTag = `[IMG:✓:${mediaPath}]`;
                     replaceTagInMessageSource(message, tag, updatedTag);
-                }
-                toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
-            }
-        } catch (error) {
-            iigLog('ERROR', `Regen failed tag ${index}:`, error.message);
-            // Clean up after ourselves. Without this the spinner stayed in the
-            // message forever — the image gone from view, no error card, no retry
-            // button — which is what users described as "it ate my picture".
-            const explainedRegen = slayExplainError(error);
-            if (loadingPlaceholder) {
+                    return true;
+                };
+
+                let mediaPath = null;
+                try { mediaPath = await iigSaveWithRetry(() => saver(dataUrl), (s) => { labelEl.textContent = s; }); }
+                catch (saveErr) { iigLog('ERROR', `Regen tag ${index}: upload failed after retries: ${saveErr?.message || saveErr}`); }
+
+                const el = createGeneratedMediaElement(isVideo ? { ...result, dataUrl: mediaPath || dataUrl } : (mediaPath || dataUrl), tag);
+                // createGeneratedMediaElement doesn't carry the instruction over,
+                // so without this the element vanishes from every later lookup.
+                if (instruction && !el.getAttribute('data-iig-instruction')) el.setAttribute('data-iig-instruction', instruction);
                 if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
-                const errorEl = createErrorPlaceholder(tagId, explainedRegen, tag);
-                loadingPlaceholder.replaceWith(errorEl);
-                targetEls[index] = errorEl;
+                loadingPlaceholder.replaceWith(el);
+                // Give the fresh image its own regen button — the previous one
+                // went out with the wrapper we just replaced.
+                if (el.tagName === 'IMG') { try { attachRegenButton(el); } catch (e) { iigLog('WARN', 'attachRegenButton after regen failed:', e.message); } }
+                else if (el.tagName === 'VIDEO') { try { attachVideoDownloadButton(el); } catch (e) { iigLog('WARN', 'video download button after regen failed:', e.message); } }
+
+                if (mediaPath) {
+                    await persist(mediaPath);
+                    toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'SLAY Images', { timeOut: 2000 });
+                } else {
+                    // Paid for and received; only the upload failed. The message
+                    // keeps its old picture, the new one is on screen with a
+                    // «Сохранить ещё раз» button.
+                    iigMarkUnsaved(el, dataUrl, saver, persist);
+                }
+            } catch (error) {
+                iigLog('ERROR', `Regen failed tag ${index}:`, error.message);
+                // Clean up after ourselves. Without this the spinner stayed in the
+                // message forever — the image gone from view, no error card, no retry
+                // button — which is what users described as "it ate my picture".
+                const explainedRegen = slayExplainError(error);
+                if (loadingPlaceholder) {
+                    if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
+                    const errorEl = createErrorPlaceholder(tagId, explainedRegen, tag);
+                    loadingPlaceholder.replaceWith(errorEl);
+                }
+                toastr[explainedRegen.tone === 'warning' ? 'warning' : 'error'](explainedRegen.short, 'SLAY Images', { timeOut: 7000 });
             }
-            toastr[explainedRegen.tone === 'warning' ? 'warning' : 'error'](explainedRegen.short, 'SLAY Images', { timeOut: 7000 });
+        }
+    } finally {
+        iigReleaseInFlight(messageId, message);
+        // The automatic path clears this in its finally block; the regenerate button
+        // never did, so its entries sat in the map until the tab closed.
+        clearContextRefCache(messageId);
+        if (touched) {
+            recentlyProcessed.set(iigCooldownKey(messageId, message), Date.now());
+            if (iigStillSameChat(chatIdAtStart, messageId, message)) {
+                try { await context.saveChat(); } catch (e) { iigLog('WARN', 'saveChat after regen failed:', e?.message); }
+            } else iigLog('WARN', `Regen of message ${messageId}: chat changed — saveChat skipped`);
         }
     }
-
-    processingMessages.delete(messageId);
-    // The automatic path clears this in its finally block; the regenerate button
-    // never did, so its entries sat in the map until the tab closed.
-    clearContextRefCache(messageId);
-    recentlyProcessed.set(messageId, Date.now());
-    await context.saveChat();
 }
 
 function addRegenerateButton(messageElement, messageId) {
@@ -6390,7 +7491,13 @@ function addRegenerateButton(messageElement, messageId) {
     const btn = document.createElement('div');
     btn.className = 'mes_button iig-regenerate-btn fa-solid fa-images interactable';
     btn.title = 'Регенерировать картинки'; btn.tabIndex = 0;
-    btn.addEventListener('click', async (e) => { e.stopPropagation(); await regenerateMessageImages(messageId); });
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (btn.classList.contains('iig-regen-busy')) return;
+        btn.classList.add('iig-regen-busy'); btn.style.opacity = '0.5'; btn.style.cursor = 'wait';
+        try { await regenerateMessageImages(messageId); }
+        finally { btn.classList.remove('iig-regen-busy'); btn.style.opacity = ''; btn.style.cursor = ''; }
+    });
     extraMesButtons.appendChild(btn);
 }
 
@@ -6466,12 +7573,121 @@ function renderRefSlots() {
         setThumb(slot, npc);
         setNameInput(slot.querySelector('.iig-ref-name'), npc?.name);
     }
+    updateSectionStatusesSoon();
 }
 
 let _renderRefSlotsDebounce = null;
 function renderRefSlotsDebounced() {
     clearTimeout(_renderRefSlotsDebounce);
     _renderRefSlotsDebounce = setTimeout(renderRefSlots, 200);
+}
+
+// ── Collapsible settings sections (variant B) ──
+// Which sections are open, keyed by section id (api / img / refs / ward /
+// more). Lazy object. First run (nothing stored yet) opens «Подключение»
+// only when there is no API key — the one thing a new user has to fill in.
+function slayOpenSections(settings = getSettings()) {
+    if (!settings.uiOpenSections || typeof settings.uiOpenSections !== 'object' || Array.isArray(settings.uiOpenSections)) {
+        settings.uiOpenSections = settings.apiKey ? {} : { api: true };
+    }
+    return settings.uiOpenSections;
+}
+
+// «Тест» succeeded in this session. Cleared whenever a connection field
+// changes, because the tick would then be vouching for a different address.
+let _slayTestOk = false;
+
+// Wardrobe «Своё подключение для описаний», as the wardrobe module decides it
+// (it owns the guess for settings that predate the flag).
+function slaySwOwnConnection(s) {
+    const fn = window.slayWardrobe?.ownConnectionOn;
+    if (typeof fn === 'function') return fn(s);
+    return !!(s && s.swOwnConnection);
+}
+
+// Equipped items for the current character, both bodies, respecting each
+// body's mode (full outfit vs parts) the same way swBuildDescription does.
+function slayCountEquipped(swS) {
+    let cn = '';
+    try { cn = getActiveCharacterName() || ''; } catch (e) { /* no chat */ }
+    const co = cn && swS?.activeOutfits ? swS.activeOutfits[cn] : null;
+    if (!co) return 0;
+    const items = Array.isArray(swS.items) ? swS.items : [];
+    let n = 0;
+    for (const type of ['bot', 'user']) {
+        const mode = (type === 'bot' ? co.botMode : co.userMode) || co.mode || 'full';
+        const slots = mode === 'full' ? ['full', 'accessories', 'hair'] : ['top', 'bottom', 'shoes', 'accessories', 'hair'];
+        for (const cat of slots) { const id = co[type]?.[cat]; if (id && items.some(o => o && o.id === id)) n++; }
+    }
+    return n;
+}
+
+// One-line status under each section title, readable without opening it.
+// Text writes only, so it is cheap enough to run after every settings save.
+function updateSectionStatuses() {
+    if (!document.querySelector('.iig-settings')) return;
+    const set = (id, text) => { const el = document.getElementById('slay_sec_status_' + id); if (el) el.textContent = text; };
+    const settings = getSettings();
+    const apiType = settings.apiType || 'openai';
+    const isNaistera = apiType === 'naistera';
+    const isCustom = apiType === 'custom';
+    const fmt = isCustom ? (settings.customBodyFormat || 'chat') : 'chat';
+    // Подключение: «OpenAI · gpt-image-1 · ✓»
+    {
+        const typeLabel = { openai: 'OpenAI', gemini: 'Gemini', naistera: 'Naistera', custom: 'Custom' }[apiType] || apiType;
+        const model = isNaistera ? (normalizeNaisteraModel(settings.naisteraModel) || '—') : (settings.model || '—');
+        const parts = [typeLabel, model];
+        if (!settings.apiKey) parts.push('нет ключа');
+        else if (_slayTestOk) parts.push('✓');
+        set('api', parts.join(' · '));
+    }
+    // Картинка: «Caravaggio · 3:2 · 2K»
+    {
+        const parts = [settings.slayStyleName || 'Как в пресете'];
+        if (isCustom && fmt === 'images') parts.push(settings.size || '1024x1024');
+        else {
+            const ratio = isNaistera ? (settings.naisteraAspectRatio || 'auto') : (settings.aspectRatio || 'auto');
+            parts.push(ratio === 'auto' ? 'из промпта' : ratio);
+            // edits takes its size from the ratio; Naistera has no 1K/2K/4K at all.
+            if (!isNaistera && fmt !== 'edits') parts.push(settings.imageSize || '1K');
+        }
+        set('img', parts.join(' · '));
+    }
+    // Рефы: «2 из 6 слотов · 47 сохранённых»
+    {
+        let n = 0;
+        try {
+            const r = getCurrentCharacterRefs();
+            const has = (x) => !!(x && (x.imagePath || x.imageBase64 || x.imageData));
+            if (has(r.charRef)) n++;
+            if (has(r.userRef)) n++;
+            for (let i = 0; i < 4; i++) if (has(r.npcReferences?.[i])) n++;
+        } catch (e) { /* no chat yet */ }
+        let k = 0;
+        try { k = getSavedChars().length; } catch (e) { /* library not ready */ }
+        set('refs', `${n} из 6 слотов · ${k} ${slayPlural(k, 'сохранённый', 'сохранённых', 'сохранённых')}`);
+    }
+    // Гардероб: «надето 2 · описание в промпт»
+    {
+        const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
+        if (swS.wardrobeEnabled === false) set('ward', 'выкл');
+        else set('ward', `надето ${slayCountEquipped(swS)} · ${swS.sendOutfitDescription !== false ? 'описание в промпт' : 'описание выкл'}`);
+    }
+    // Ещё: «видео выкл»
+    {
+        const parts = [];
+        if (isNaistera) parts.push(`видео ${settings.naisteraVideoTest ? 'вкл' : 'выкл'}`);
+        parts.push(settings.externalBlocks ? 'extblocks вкл' : 'extblocks выкл');
+        parts.push('логи');
+        set('more', parts.join(' · '));
+    }
+}
+// Debounced: saveSettings fires in bursts (every keystroke in a field).
+function updateSectionStatusesSoon() {
+    clearTimeout(updateSectionStatusesSoon._t);
+    updateSectionStatusesSoon._t = setTimeout(() => {
+        try { updateSectionStatuses(); } catch (e) { iigLog('WARN', 'section statuses:', e?.message); }
+    }, 80);
 }
 
 function createSettingsUI() {
@@ -6491,6 +7707,147 @@ function createSettingsUI() {
 
     const swSettings = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
 
+    const swOwn = slaySwOwnConnection(swSettings);
+    const openSec = slayOpenSections(settings);
+    // Collapsible section shell (variant B of the short-menu mockup). The whole
+    // 40px header row is the tap target; the body is plain flow content, so the
+    // per-row toggles in updateVisibility keep working untouched inside it.
+    const sec = (id, icon, title, body, elId = `slay_sec_${id}`) => `
+                <div class="iig-section iig-sec${openSec[id] ? ' open' : ''}" data-sec="${id}" id="${elId}">
+                    <button type="button" class="iig-sec-hd" aria-expanded="${openSec[id] ? 'true' : 'false'}" aria-controls="${elId}_bd"><span class="iig-sec-ic"><i class="fa-solid ${icon}"></i></span><span class="iig-sec-t"><b>${title}</b><span class="iig-sec-status" id="slay_sec_status_${id}"></span></span><span class="iig-sec-chev"><i class="fa-solid fa-chevron-down"></i></span></button>
+                    <div class="iig-sec-bd" id="${elId}_bd">
+                        ${body}
+                    </div>
+                </div>`;
+    // ⓘ that reveals a long hint; the hint itself starts collapsed.
+    const info = (hintId) => `<button type="button" class="iig-info-btn" data-hint="${hintId}" title="Подсказка" aria-expanded="false" aria-controls="${hintId}"><i class="fa-solid fa-circle-info"></i></button>`;
+
+    const apiBody = `
+                        <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                        <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
+                        <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option><option value="edits" ${settings.customBodyFormat === 'edits' ? 'selected' : ''}>images/edits (GPT, с рефами)</option></select>${info('slay_custom_hint')}</div>
+                        <p class="hint iig-hint-long iig-hidden" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются). Формат «images/edits» (GPT) отправляет рефы файлами — нужен хотя бы один реф, модель обязательна (например gpt-image-1).</p>
+                        <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
+                        <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
+                        <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
+                        <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                        <label class="checkbox_label" id="slay_manual_model_row"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
+                        <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="nano banana 2" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2' ? 'selected' : ''}>Nano Banana 2</option><option value="nano banana 2 lite" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2 lite' ? 'selected' : ''}>Nano Banana 2 Lite</option><option value="nano banana pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana pro' ? 'selected' : ''}>Nano Banana Pro</option><option value="novelai v4.5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v4.5' ? 'selected' : ''}>NovelAI V4.5</option><option value="novelai v5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v5' ? 'selected' : ''}>NovelAI V5</option><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana (старая)</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI (старая)</option><option value="${NAISTERA_MANUAL}" ${!naisteraModelIsListed(settings.naisteraModel) ? 'selected' : ''}>— вписать вручную —</option></select></div>
+                        <div class="flex-row ${settings.apiType === 'naistera' && !naisteraModelIsListed(settings.naisteraModel) ? '' : 'iig-hidden'}" id="slay_naistera_manual_row"><label>Название модели</label><input type="text" id="slay_naistera_model_manual" class="text_pole flex1" placeholder="например nano-banana-2-lite" value="${sanitizeForHtml(naisteraModelIsListed(settings.naisteraModel) ? '' : (settings.naisteraModel || ''))}" autocomplete="off" spellcheck="false"></div>
+                        <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>`;
+
+    const imgBody = `
+                        <div class="flex-row ${settings.apiType === 'custom' && settings.customBodyFormat === 'images' ? '' : 'iig-hidden'}" id="slay_size_row"><label>Размер</label><select id="slay_size" class="flex1"><option value="1024x1024" ${settings.size === '1024x1024' ? 'selected' : ''}>1024x1024</option><option value="1792x1024" ${settings.size === '1792x1024' ? 'selected' : ''}>1792x1024</option><option value="1024x1792" ${settings.size === '1024x1792' ? 'selected' : ''}>1024x1792</option><option value="512x512" ${settings.size === '512x512' ? 'selected' : ''}>512x512</option></select></div>
+                        <div class="flex-row ${settings.apiType === 'custom' && settings.customBodyFormat === 'images' ? '' : 'iig-hidden'}" id="slay_quality_row"><label>Качество</label><select id="slay_quality" class="flex1"><option value="standard" ${settings.quality === 'standard' ? 'selected' : ''}>Standard</option><option value="hd" ${settings.quality === 'hd' ? 'selected' : ''}>HD</option></select></div>
+                        <div id="slay_gemini_params" class="iig-col ${settings.apiType !== 'gemini' ? 'iig-hidden' : ''}">
+                        <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="auto" ${(settings.aspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
+                        <div class="flex-row" id="slay_image_size_row"><label>Разрешение</label><select id="slay_image_size" class="flex1"><option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K</option><option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option><option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option></select></div>
+                        </div>
+                        <div id="slay_edits_params" class="iig-col ${settings.apiType === 'custom' && settings.customBodyFormat === 'edits' ? '' : 'iig-hidden'}">
+                        <div class="flex-row"><label>Качество GPT</label><select id="slay_edits_quality" class="flex1"><option value="auto" ${(settings.editsQuality || 'auto') === 'auto' ? 'selected' : ''}>auto</option><option value="low" ${settings.editsQuality === 'low' ? 'selected' : ''}>low</option><option value="medium" ${settings.editsQuality === 'medium' ? 'selected' : ''}>medium</option><option value="high" ${settings.editsQuality === 'high' ? 'selected' : ''}>high</option></select></div>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_edits_fidelity" ${settings.editsHighFidelity ? 'checked' : ''}><span>Точнее держать лица (input_fidelity: high)</span></label>
+                        <p class="hint">Размер берётся из соотношения сторон: квадрат 1024×1024, горизонталь 1536×1024, вертикаль 1024×1536</p>
+                        </div>
+                        <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
+                        <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Как в пресете'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
+                        <label class="checkbox_label" for="slay_style_to_preset" id="slay_style_preset_row"><input type="checkbox" id="slay_style_to_preset" ${settings.slayStyleToPreset ? 'checked' : ''}><span>Стиль в тогл пресета</span></label>
+                        <div class="flex-row iig-hidden" id="slay_style_target_row"><label>Тогл в пресете «<span id="slay_style_preset_name"></span>»</label><select id="slay_style_target" class="flex1"></select></div>
+                        <div id="slay_style_status" class="iig-style-status"></div>
+                        <div id="slay_image_context_section" class="iig-col">
+                            <div class="iig-subhead">Прошлые картинки как референс</div>
+                            <label class="checkbox_label"><input type="checkbox" id="slay_image_context_enabled" ${settings.imageContextEnabled ? 'checked' : ''}><span>Отправлять предыдущие картинки как reference</span></label>
+                            <div class="flex-row ${settings.imageContextEnabled ? '' : 'iig-hidden'}" id="slay_image_context_count_row"><label>Кол-во (макс ${MAX_CONTEXT_IMAGES})</label><input type="number" id="slay_image_context_count" class="text_pole flex1" value="${settings.imageContextCount}" min="1" max="${MAX_CONTEXT_IMAGES}"></div>
+                        </div>
+                        <div class="iig-subhead">Повторы</div>
+                        <div class="flex-row"><label>Макс. повторов</label><input type="number" id="slay_max_retries" class="text_pole flex1" value="${settings.maxRetries}" min="0" max="5"></div>
+                        <div class="flex-row"><label>Задержка (мс)</label><input type="number" id="slay_retry_delay" class="text_pole flex1" value="${settings.retryDelay}" min="500" max="10000" step="500"></div>`;
+
+    const refsBody = `
+                        <div class="iig-row-btn">
+                            <button type="button" id="slay_saved_toggle" class="iig-saved-toggle" title="Сохранённые персонажи — портреты с именами, годятся для любого чата">
+                            <i class="fa-solid fa-heart"></i> Сохранённые <span id="slay_saved_count" class="iig-saved-count"></span>
+                            </button>
+                            ${info('slay_refs_hint')}
+                        </div>
+                        <p class="hint iig-hint-long iig-hidden" id="slay_refs_hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
+                        <div class="iig-refs-grid">
+                        <div class="iig-refs-row iig-refs-main">
+                        <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                        <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                        </div>
+                        <div class="iig-refs-divider"><span>NPCs</span></div>
+                        <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
+                        </div>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_skip_crop" ${settings.skipCrop ? 'checked' : ''}><span>Не предлагать кроп картинок</span></label>
+                        <p class="hint" style="font-size:0.75em;">Касается рефов, образов и вещей гардероба.</p>
+                        <div id="slay_recent_refs_ribbon" class="iig-recent-refs-ribbon"></div>
+                        <div id="slay_saved_portraits" class="iig-saved-panel iig-hidden"></div>`;
+
+    const wardBody = `
+                        <div class="iig-row-btn">
+                            <div id="slay_sw_open_wardrobe" class="menu_button" style="flex:1;"><i class="fa-solid fa-shirt"></i> Открыть гардероб</div>
+                            ${info('slay_wardrobe_hint')}
+                        </div>
+                        <p class="hint iig-hint-long iig-hidden" id="slay_wardrobe_hint">Загрузите аутфиты для бота и юзера. Словесное описание надетого добавляется в промпт <b>независимо от генерации картинок</b> — гардеробом можно пользоваться и с выключенной генерацией. Изображение активного аутфита отправляется как референс, когда генерация включена.</p>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_desc" ${swSettings.sendOutfitDescription !== false ? 'checked' : ''}><span>Отправлять текстовое описание аутфита</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_image_bot" ${swSettings.sendOutfitImageBot !== false ? 'checked' : ''}><span>Отправлять картинку одежды бота</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_image_user" ${swSettings.sendOutfitImageUser !== false ? 'checked' : ''}><span>Отправлять картинку одежды юзера</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Иконка гардероба в окне чата</span></label>
+                        <div class="iig-subhead">Авто-описание через ИИ</div>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
+                        <div id="slay_sw_describe_prompt_section" class="iig-col ${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}">
+                            <div class="flex-row"><label>Стиль описания</label><select id="slay_sw_describe_prompt_style" class="flex1"><option value="detailed" ${(swSettings.describePromptStyle || 'detailed') === 'detailed' ? 'selected' : ''}>Детальный (costume designer)</option><option value="simple" ${(swSettings.describePromptStyle || 'detailed') === 'simple' ? 'selected' : ''}>Простой (краткий)</option></select></div>
+                        </div>
+                        <div id="slay_sw_describe_api_section" class="iig-col ${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}">
+                            <div class="iig-row-btn">
+                                <label class="checkbox_label" style="flex:1;min-width:0;"><input type="checkbox" id="slay_sw_own_connection" ${swOwn ? 'checked' : ''}><span>Своё подключение для описаний</span></label>
+                                ${info('slay_sw_own_hint')}
+                            </div>
+                            <p class="hint iig-hint-long iig-hidden" id="slay_sw_own_hint">Выключено — описания идут через основное подключение: адрес и ключ из раздела «Подключение». Включите, если для описаний нужен другой адрес, ключ или модель.</p>
+                            <div id="slay_sw_own_connection_body" class="iig-col iig-own-conn ${swOwn ? '' : 'iig-hidden'}">
+                                <div class="flex-row"><label>Способ</label><select id="slay_sw_describe_mode" class="flex1"><option value="direct" ${(swSettings.describeMode || 'direct') === 'direct' ? 'selected' : ''}>Прямой API</option><option value="chat" ${(swSettings.describeMode || 'direct') === 'chat' ? 'selected' : ''}>Через чат-API (расходует больше токенов)</option></select></div>
+                                <div id="slay_sw_direct_api_section" class="iig-col ${(swSettings.describeMode || 'direct') === 'direct' ? '' : 'iig-hidden'}">
+                                    <div class="flex-row"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
+                                    <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
+                                    <div class="flex-row"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
+                                    <div class="flex-row"><label>Модель</label><select id="slay_sw_describe_model_select" class="text_pole flex1 ${swSettings.describeManualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_sw_describe_model" class="text_pole flex1 ${swSettings.describeManualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}" autocomplete="off" spellcheck="false"><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                                    <label class="checkbox_label"><input type="checkbox" id="slay_sw_describe_manual" ${swSettings.describeManualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
+                                    <div id="slay_sw_describe_test" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
+                                    <p class="hint">Пустые Endpoint и API Key — возьмутся из раздела «Подключение».</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex-row"><label>Макс. размер (px)</label><input type="number" id="slay_sw_max_dim" class="text_pole flex1" value="${swSettings.maxDimension || 512}" min="128" max="1024" step="64"></div>
+                        <div class="flex-row"><label>Размер гардероба (ПК)</label><select id="slay_sw_modal_width" class="flex1">
+                        <option value="compact" ${swSettings.modalWidth === 'compact' ? 'selected' : ''}>Компактный (480px)</option>
+                        <option value="normal" ${(swSettings.modalWidth || 'normal') === 'normal' ? 'selected' : ''}>Обычный (560px)</option>
+                        <option value="wide" ${swSettings.modalWidth === 'wide' ? 'selected' : ''}>Широкий (800px)</option>
+                        <option value="xwide" ${swSettings.modalWidth === 'xwide' ? 'selected' : ''}>Очень широкий (1100px)</option>
+                        <option value="full" ${swSettings.modalWidth === 'full' ? 'selected' : ''}>Во весь экран</option>
+                        </select></div>
+                        <p class="hint" style="font-size:0.75em;">На мобильных устройствах всегда полноэкранный режим.</p>
+                        <div class="iig-row-btn">
+                            <div id="slay_sw_find_orphans" class="menu_button" style="flex:1;"><i class="fa-solid fa-broom"></i> Найти ничьи картинки</div>
+                            ${info('slay_sw_orphans_hint')}
+                        </div>
+                        <p class="hint iig-hint-long iig-hidden" id="slay_sw_orphans_hint">Покажет, сколько картинок в папке гардероба не привязано ни к одной вещи, и предложит их удалить.</p>`;
+
+    const moreBody = `
+                        <div id="slay_settings_body2" class="iig-col ${settings.enabled ? '' : 'iig-hidden'}">
+                            <label class="checkbox_label"><input type="checkbox" id="slay_external_blocks" ${settings.externalBlocks ? 'checked' : ''}><span>External blocks (extblocks)</span></label>
+                            <div id="slay_naistera_video_section" class="iig-col ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">
+                                <div class="iig-subhead">Видео (Naistera)</div>
+                                <label class="checkbox_label"><input type="checkbox" id="slay_naistera_video_test" ${settings.naisteraVideoTest ? 'checked' : ''}><span>Video test mode</span></label>
+                                <div class="flex-row ${settings.naisteraVideoTest ? '' : 'iig-hidden'}" id="slay_naistera_video_frequency_row"><label>Каждые N сообщений</label><input type="number" id="slay_naistera_video_every_n" class="text_pole flex1" value="${settings.naisteraVideoEveryN}" min="1" max="999"></div>
+                            </div>
+                        </div>
+                        <div class="iig-subhead">Отладка</div>
+                        <div id="slay_export_logs" class="menu_button" style="width:100%;"><i class="fa-solid fa-download"></i> Экспорт логов</div>
+                        <p class="hint iig-credit">v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank">Wewwa</a> · <a href="https://t.me/wewwajai" target="_blank">tg for support</a> · gallery by <a href="https://github.com/hydall" target="_blank">hydall</a> · based on <a href="https://github.com/0xl0cal/sillyimages" target="_blank">sillyimages</a> · wardrobe by <a href="https://github.com/delidgi/sillyimages" target="_blank">delidgi</a> · NPC by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank">aceeenvw</a></p>
+                        <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>`;
+
     const html = `
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
@@ -6499,162 +7856,29 @@ function createSettingsUI() {
         </div>
         <div class="inline-drawer-content">
             <div class="iig-settings">
-                <label class="checkbox_label"><input type="checkbox" id="slay_enabled" ${settings.enabled ? 'checked' : ''}><span>Включить генерацию</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="slay_sw_enabled" ${swSettings.wardrobeEnabled !== false ? 'checked' : ''}><span>Включить гардероб</span></label>
+                <!-- Two master switches; the old checkboxes keep their ids and handlers. -->
+                <div class="iig-masters">
+                    <label class="iig-master" for="slay_enabled"><span class="iig-master-t">Генерация</span><input type="checkbox" class="iig-switch" id="slay_enabled" ${settings.enabled ? 'checked' : ''}></label>
+                    <label class="iig-master" for="slay_sw_enabled"><span class="iig-master-t">Гардероб</span><input type="checkbox" class="iig-switch" id="slay_sw_enabled" ${swSettings.wardrobeEnabled !== false ? 'checked' : ''}></label>
+                </div>
+                <div class="iig-acc">
                 <div id="slay_settings_body" class="${settings.enabled ? '' : 'iig-hidden'}">
-                    <label class="checkbox_label"><input type="checkbox" id="slay_external_blocks" ${settings.externalBlocks ? 'checked' : ''}><span>External blocks (extblocks)</span></label>
-                    <hr>
-
-                    <!-- API -->
-                <div class="iig-section">
-                    <h4><i class="fa-solid fa-plug"></i> API</h4>
-                    <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
-                    <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option></select></div>
-                    <p class="hint ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются).</p>
-                    <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
-                    <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                    <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
-                    <label class="checkbox_label" id="slay_manual_model_row" style="margin-top:2px;"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
-                    <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
-                </div>
-                <hr>
-
-                <!-- Gen params -->
-                <div class="iig-section">
-                    <h4><i class="fa-solid fa-sliders"></i> Параметры генерации</h4>
-                    <div class="flex-row ${settings.apiType !== 'openai' ? 'iig-hidden' : ''}" id="slay_size_row"><label>Размер</label><select id="slay_size" class="flex1"><option value="1024x1024" ${settings.size === '1024x1024' ? 'selected' : ''}>1024x1024</option><option value="1792x1024" ${settings.size === '1792x1024' ? 'selected' : ''}>1792x1024</option><option value="1024x1792" ${settings.size === '1024x1792' ? 'selected' : ''}>1024x1792</option><option value="512x512" ${settings.size === '512x512' ? 'selected' : ''}>512x512</option></select></div>
-                    <div class="flex-row ${settings.apiType !== 'openai' ? 'iig-hidden' : ''}" id="slay_quality_row"><label>Качество</label><select id="slay_quality" class="flex1"><option value="standard" ${settings.quality === 'standard' ? 'selected' : ''}>Standard</option><option value="hd" ${settings.quality === 'hd' ? 'selected' : ''}>HD</option></select></div>
-                    <div id="slay_gemini_params" class="${settings.apiType !== 'gemini' ? 'iig-hidden' : ''}">
-                        <div class="flex-row"><label>Соотношение сторон</label><select id="slay_aspect_ratio" class="flex1"><option value="auto" ${(settings.aspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3</option><option value="3:2" ${settings.aspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="3:4" ${settings.aspectRatio === '3:4' ? 'selected' : ''}>3:4</option><option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option><option value="4:5" ${settings.aspectRatio === '4:5' ? 'selected' : ''}>4:5</option><option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4</option><option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option><option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option><option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9</option></select></div>
-                        <div class="flex-row"><label>Разрешение</label><select id="slay_image_size" class="flex1"><option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K</option><option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option><option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option></select></div>
-                    </div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="nano banana 2" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2' ? 'selected' : ''}>Nano Banana 2</option><option value="nano banana 2 lite" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2 lite' ? 'selected' : ''}>Nano Banana 2 Lite</option><option value="nano banana pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana pro' ? 'selected' : ''}>Nano Banana Pro</option><option value="novelai v4.5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v4.5' ? 'selected' : ''}>NovelAI V4.5</option><option value="novelai v5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v5' ? 'selected' : ''}>NovelAI V5</option><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana (старая)</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI (старая)</option><option value="${NAISTERA_MANUAL}" ${!NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? 'selected' : ''}>— вписать вручную —</option></select></div>
-                    <div class="flex-row ${settings.apiType === 'naistera' && !NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : 'iig-hidden'}" id="slay_naistera_manual_row"><label>Название модели</label><input type="text" id="slay_naistera_model_manual" class="text_pole flex1" placeholder="например nano-banana-2-lite" value="${sanitizeForHtml(NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase()) ? '' : (settings.naisteraModel || ''))}" autocomplete="off" spellcheck="false"></div>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
-                    <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
-                </div>
-
-                <!-- NPC refs -->
-                <div id="slay_refs_section" class="iig-refs">
-                    <h4 class="iig-refs-h4">
-                        <span><i class="fa-solid fa-user-group"></i> Референсы персонажей</span>
-                        <button type="button" id="slay_saved_toggle" class="iig-saved-toggle" title="Сохранённые персонажи — портреты с именами, годятся для любого чата">
-                            <i class="fa-solid fa-heart"></i> Сохранённые <span id="slay_saved_count" class="iig-saved-count"></span>
-                        </button>
-                    </h4>
-                    <p class="hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
-                    <div class="iig-refs-grid">
-                        <div class="iig-refs-row iig-refs-main">
-                            <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                            <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                        </div>
-                        <div class="iig-refs-divider"><span>NPCs</span></div>
-                        <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
-                    </div>
-                    <!-- v4.2 Recent refs ribbon — populated on render -->
-                    <label class="checkbox_label" style="margin-top:10px;"><input type="checkbox" id="slay_skip_crop" ${settings.skipCrop ? 'checked' : ''}><span>Не предлагать кроп картинок</span></label>
-                    <p class="hint" style="margin-top:2px;font-size:0.75em;">Касается рефов, образов и вещей гардероба.</p>
-                    <div id="slay_recent_refs_ribbon" class="iig-recent-refs-ribbon"></div>
-                    <!-- Saved character library — permanent, named, survives chat switches -->
-                    <div id="slay_saved_portraits" class="iig-saved-panel iig-hidden"></div>
-                </div>
+                ${sec('api', 'fa-plug', 'Подключение', apiBody)}
+                ${sec('img', 'fa-image', 'Картинка', imgBody)}
+                ${sec('refs', 'fa-user-group', 'Рефы', refsBody, 'slay_refs_section')}
                 <!-- v4.2 Floating popup for slot options (Файл / Вставить / Недавние) -->
                 <div id="slay_slot_options_popup" class="iig-slot-options-popup"></div>
                 <!-- v4.2 Floating popup for "assign recent to slot" -->
                 <div id="slay_assign_popup" class="iig-assign-popup"></div>
-
                 </div>
                 <!-- Wardrobe — deliberately OUTSIDE #slay_settings_body: it must stay
                      reachable when image generation is switched off, because the outfit
-                     description keeps going into the prompt either way. Its position in
-                     the panel is unchanged. -->
+                     description keeps going into the prompt either way. -->
                 <div id="slay_wardrobe_body" class="${swSettings.wardrobeEnabled !== false ? '' : 'iig-hidden'}">
-                <div class="iig-section">
-                    <h4><i class="fa-solid fa-shirt"></i> Гардероб</h4>
-                    <p class="hint" id="slay_wardrobe_hint">Загрузите аутфиты для бота и юзера. Словесное описание надетого добавляется в промпт <b>независимо от генерации картинок</b> — гардеробом можно пользоваться и с выключенной генерацией. Изображение активного аутфита отправляется как референс, когда генерация включена.</p>
-                    <div class="flex-row"><div id="slay_sw_open_wardrobe" class="menu_button" style="width:100%;"><i class="fa-solid fa-shirt"></i> Открыть гардероб</div></div>
-                    <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
-                    <div id="slay_sw_describe_prompt_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:6px;">
-                        <div class="flex-row"><label>Стиль описания</label><select id="slay_sw_describe_prompt_style" class="flex1"><option value="detailed" ${(swSettings.describePromptStyle || 'detailed') === 'detailed' ? 'selected' : ''}>Детальный (costume designer)</option><option value="simple" ${(swSettings.describePromptStyle || 'detailed') === 'simple' ? 'selected' : ''}>Простой (краткий)</option></select></div>
-                    </div>
-
-                    <div id="slay_sw_describe_api_section" class="${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}" style="margin-top:8px;padding:12px;border-radius:10px;background:rgba(244,114,182,0.04);border:1px solid rgba(244,114,182,0.1);">
-                        <div class="flex-row"><label>Способ</label><select id="slay_sw_describe_mode" class="flex1"><option value="direct" ${(swSettings.describeMode || 'direct') === 'direct' ? 'selected' : ''}>Прямой API</option><option value="chat" ${(swSettings.describeMode || 'direct') === 'chat' ? 'selected' : ''}>Через чат-API (расходует больше токенов)</option></select></div>
-
-                        <div id="slay_sw_direct_api_section" class="${(swSettings.describeMode || 'direct') === 'direct' ? '' : 'iig-hidden'}">
-                            <div class="flex-row" style="margin-top:6px;"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><select id="slay_sw_describe_model_select" class="text_pole flex1 ${swSettings.describeManualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_sw_describe_model" class="text_pole flex1 ${swSettings.describeManualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(swSettings.describeModel || 'gemini-2.5-flash')}" autocomplete="off" spellcheck="false"><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
-                            <label class="checkbox_label" style="margin-top:2px;"><input type="checkbox" id="slay_sw_describe_manual" ${swSettings.describeManualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
-                            <div id="slay_sw_describe_test" class="menu_button iig-test-connection" style="margin-top:8px;"><i class="fa-solid fa-wifi"></i> Тест</div>
-                            <p class="hint" style="margin-top:4px;">Оставьте Endpoint и API Key пустыми — будут использованы из основных настроек. Или укажите свои для отдельного подключения.</p>
-                        </div>
-                    </div>
-
-                    <p class="hint" style="margin-top:10px;font-weight:600;color:var(--slay-pink,#f472b6);">Настройки гардероба:</p>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_desc" ${swSettings.sendOutfitDescription !== false ? 'checked' : ''}><span>Отправлять текстовое описание аутфита</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image_bot" ${swSettings.sendOutfitImageBot !== false ? 'checked' : ''}><span>Отправлять картинку одежды бота</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_send_outfit_image_user" ${swSettings.sendOutfitImageUser !== false ? 'checked' : ''}><span>Отправлять картинку одежды юзера</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
-                    <label class="checkbox_label" style="margin-top:8px;"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
-                    <label class="checkbox_label" style="margin-top:4px;"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Иконка гардероба в окне чата</span></label>
-                    <div class="flex-row" style="margin-top:6px;"><label>Макс. размер (px)</label><input type="number" id="slay_sw_max_dim" class="text_pole flex1" value="${swSettings.maxDimension || 512}" min="128" max="1024" step="64"></div>
-                    <div class="flex-row" style="margin-top:6px;"><label>Размер гардероба (ПК)</label><select id="slay_sw_modal_width" class="flex1">
-                        <option value="compact" ${swSettings.modalWidth === 'compact' ? 'selected' : ''}>Компактный (480px)</option>
-                        <option value="normal" ${(swSettings.modalWidth || 'normal') === 'normal' ? 'selected' : ''}>Обычный (560px)</option>
-                        <option value="wide" ${swSettings.modalWidth === 'wide' ? 'selected' : ''}>Широкий (800px)</option>
-                        <option value="xwide" ${swSettings.modalWidth === 'xwide' ? 'selected' : ''}>Очень широкий (1100px)</option>
-                        <option value="full" ${swSettings.modalWidth === 'full' ? 'selected' : ''}>Во весь экран</option>
-                    </select></div>
-                    <p class="hint" style="margin-top:4px;font-size:0.75em;">На мобильных устройствах всегда полноэкранный режим.</p>
-                    <div class="flex-row" style="margin-top:10px;"><div id="slay_sw_find_orphans" class="menu_button" style="width:100%;"><i class="fa-solid fa-broom"></i> Найти ничьи картинки</div></div>
-                    <p class="hint" style="margin-top:4px;font-size:0.75em;">Покажет, сколько картинок в папке гардероба не привязано ни к одной вещи, и предложит их удалить.</p>
+                ${sec('ward', 'fa-shirt', 'Гардероб', wardBody)}
                 </div>
-
+                ${sec('more', 'fa-gear', 'Ещё', moreBody)}
                 </div>
-                <!-- back inside the generation-only block -->
-                <div id="slay_settings_body2" class="${settings.enabled ? '' : 'iig-hidden'}">
-                <!-- Image context -->
-                <div id="slay_image_context_section" class="iig-section">
-                    <h4><i class="fa-solid fa-layer-group"></i> Контекст изображений</h4>
-                    <label class="checkbox_label"><input type="checkbox" id="slay_image_context_enabled" ${settings.imageContextEnabled ? 'checked' : ''}><span>Отправлять предыдущие картинки как reference</span></label>
-                    <div class="flex-row ${settings.imageContextEnabled ? '' : 'iig-hidden'}" id="slay_image_context_count_row"><label>Кол-во (макс ${MAX_CONTEXT_IMAGES})</label><input type="number" id="slay_image_context_count" class="text_pole flex1" value="${settings.imageContextCount}" min="1" max="${MAX_CONTEXT_IMAGES}"></div>
-                </div>
-
-                <!-- Naistera video -->
-                <div id="slay_naistera_video_section" class="iig-section ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">
-                    <h4><i class="fa-solid fa-video"></i> Видео (Naistera)</h4>
-                    <label class="checkbox_label"><input type="checkbox" id="slay_naistera_video_test" ${settings.naisteraVideoTest ? 'checked' : ''}><span>Video test mode</span></label>
-                    <div class="flex-row ${settings.naisteraVideoTest ? '' : 'iig-hidden'}" id="slay_naistera_video_frequency_row"><label>Каждые N сообщений</label><input type="number" id="slay_naistera_video_every_n" class="text_pole flex1" value="${settings.naisteraVideoEveryN}" min="1" max="999"></div>
-                </div>
-                <hr>
-
-                <!-- Retry -->
-                <div class="iig-section">
-                    <h4><i class="fa-solid fa-rotate"></i> Повторы</h4>
-                    <div class="flex-row"><label>Макс. повторов</label><input type="number" id="slay_max_retries" class="text_pole flex1" value="${settings.maxRetries}" min="0" max="5"></div>
-                    <div class="flex-row"><label>Задержка (мс)</label><input type="number" id="slay_retry_delay" class="text_pole flex1" value="${settings.retryDelay}" min="500" max="10000" step="500"></div>
-                </div>
-                <hr>
-
-                <!-- Debug -->
-                <div class="iig-section">
-                    <h4><i class="fa-solid fa-bug"></i> Отладка</h4>
-                    <div id="slay_export_logs" class="menu_button"><i class="fa-solid fa-download"></i> Экспорт логов</div>
-                </div>
-                </div>
-                <p class="hint iig-credit" style="text-align:center;opacity:0.5;margin-top:4px;line-height:1.55;">
-                    v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank" style="color:inherit;text-decoration:underline;">Wewwa</a>
-                    · <a href="https://t.me/wewwajai" target="_blank" style="color:inherit;text-decoration:underline;">tg for support</a><br>
-                    gallery update by <a href="https://github.com/hydall" target="_blank" style="color:inherit;text-decoration:underline;">hydall</a>
-                    · based on sillyimages by <a href="https://github.com/0xl0cal/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">0xl0cal</a>,
-                    wardrobe system by <a href="https://github.com/delidgi/sillyimages" target="_blank" style="color:inherit;text-decoration:underline;">delidgi</a>,
-                    NPC system by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank" style="color:inherit;text-decoration:underline;">aceeenvw</a>
-                </p>
-                <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
             </div>
         </div>
     </div>`;
@@ -6681,6 +7905,7 @@ function createSettingsUI() {
     bindRefSlotEvents();
     renderRefSlots();
     renderRecentRefsRibbon();
+    updateSectionStatuses();
 
     // Saved-character library: collapsed by default so it doesn't push the ref
     // slots down, but the counter on the button shows it has something in it.
@@ -6796,6 +8021,13 @@ function renderRecentRefsRibbon() {
 // Selection survives re-renders so relabelling doesn't collapse the strip the
 // user is working in.
 let _swSelChar = null, _swSelLook = null;
+// Which chip is open: 'all' | 'none' | folder id. Memory only — never saved
+// and never synced, so the phone and the PC can't argue about where everyone
+// went. Resets to «Все» on reload.
+let _swFolderFilter = 'all';
+// Whose look strip was drawn last: its scroll position is only worth keeping
+// while the strip still belongs to the same person.
+let _swLastRenderedChar = null;
 
 function renderSavedPortraits() {
     const host = document.getElementById('slay_saved_portraits');
@@ -6812,63 +8044,151 @@ function renderSavedPortraits() {
         return;
     }
 
-    // Keep the selection pointing at something real after a delete or rename.
-    const sel = chars.find(c => c.id === _swSelChar) || chars[0];
-    _swSelChar = sel.id;
-    const look = sel.looks.find(l => l.id === _swSelLook) || sel.looks[0];
-    _swSelLook = look.id;
-
     const esc = sanitizeForHtml;
     const firstName = (n) => (swNameList(n)[0] || 'без имени');
 
+    // Folders. A chip pointing at a folder that no longer exists falls back
+    // to «Все» instead of showing an empty row with no way out.
+    const folders = getSavedFolders();
+    if (_swFolderFilter !== 'all' && _swFolderFilter !== 'none' && !folders.some(f => f.id === _swFolderFilter)) _swFolderFilter = 'all';
+    const openFolder = findSavedFolder(_swFolderFilter);
+    const folderIdsOf = new Map(chars.map(c => [c.id, swCharFolderIds(c)]));
+    const vis = swCharsInFilter(chars, _swFolderFilter);
+    const noneCount = chars.filter(c => !folderIdsOf.get(c.id).length).length;
+
+    // A re-render must not throw the strips back to the left edge: they scroll
+    // sideways on a phone, and a relabel or a tick in a dialog is no reason to
+    // lose your place. The look strip keeps its place only for the same person.
+    const prevPeopleScroll = host.querySelector('.iig-people-row')?.scrollLeft || 0;
+    const prevStripScroll = host.querySelector('.iig-look-strip')?.scrollLeft || 0;
+    const prevChipScroll = host.querySelector('.iig-folder-chips')?.scrollLeft || 0;
+
+    // Keep the selection pointing at something real after a delete or rename —
+    // and at someone the open chip actually shows. Inside a folder the look
+    // that opens first is the one labelled like the folder.
+    const sel = vis.find(c => c.id === _swSelChar) || vis[0] || null;
+    const sameChar = !!sel && sel.id === _swLastRenderedChar;
+    _swLastRenderedChar = sel ? sel.id : null;
+    let look = null;
+    if (sel) {
+        _swSelChar = sel.id;
+        look = sel.looks.find(l => l.id === _swSelLook) || pickLookForFolder(sel, _swFolderFilter);
+        _swSelLook = look.id;
+    }
+
+    // Head. Until the first folder exists the whole feature is one ghost pill
+    // on the right; after that the pill moves into the chip row as the last «＋».
+    let html = `<div class="iig-recent-refs-head${folders.length ? '' : ' iig-has-pill'}">
+        <span class="iig-recent-refs-title"><i class="fa-solid fa-heart"></i> Сохранённые</span>
+        <span class="iig-saved-head-r"><span class="iig-recent-refs-hint">персонаж → образ → слот</span>${folders.length ? '' : `<button type="button" class="iig-folder-pill" title="Новая папка"><i class="fa-solid fa-plus"></i> папка</button>`}</span>
+    </div>`;
+
+    // Chip row: [Все N] [папка n]… [Без папки n] [＋]. «Без папки» only while
+    // somebody is actually in it (or it is the open chip, so it can be left).
+    if (folders.length) {
+        const chip = (id, name, count) => {
+            const on = _swFolderFilter === id;
+            const real = id !== 'all' && id !== 'none';
+            return `<button type="button" class="iig-fchip${on ? ' on' : ''}" role="tab" aria-selected="${on}" data-f="${esc(id)}" title="${esc(name)}"><span class="iig-fchip-t">${esc(name)}</span> <span class="iig-fchip-n">${count}</span>${on && real ? ' <i class="fa-solid fa-pen iig-fchip-pen"></i>' : ''}</button>`;
+        };
+        html += `<div class="iig-folder-chips" role="tablist" aria-label="Папки">`;
+        html += chip('all', 'Все', chars.length);
+        for (const f of folders) html += chip(f.id, f.name, chars.filter(c => folderIdsOf.get(c.id).includes(f.id)).length);
+        if (noneCount > 0 || _swFolderFilter === 'none') html += chip('none', 'Без папки', noneCount);
+        html += `<button type="button" class="iig-fchip iig-fchip-plus" title="Новая папка" aria-label="Новая папка"><i class="fa-solid fa-plus"></i></button></div>`;
+    }
+
     // Top row: one face per PERSON, not per picture. The row stays short even
     // when someone has six AUs behind them; the badge says how many.
-    let html = `<div class="iig-recent-refs-head">
-        <span class="iig-recent-refs-title"><i class="fa-solid fa-heart"></i> Сохранённые</span>
-        <span class="iig-recent-refs-hint">персонаж → образ → слот</span>
-    </div><div class="iig-people-row">`;
-    for (const c of chars) {
-        const cover = c.looks[0];
-        html += `<div class="iig-person${c.id === sel.id ? ' on' : ''}" data-char="${esc(c.id)}" title="${esc(c.names)}" tabindex="0">
-            <div class="iig-person-thumb"><img src="${esc(cover.path)}" alt="" loading="lazy" decoding="async"></div>
-            ${c.looks.length > 1 ? `<span class="iig-person-badge">${c.looks.length}</span>` : ''}
-            <div class="iig-person-name">${esc(firstName(c.names))}</div>
-        </div>`;
+    if (!vis.length) {
+        html += `<div class="iig-folder-empty">${openFolder
+            ? `В папке «${esc(openFolder.name)}» пока никого. Тапни чип ещё раз → «Выбрать персонажей», или открой персонажа во «Все» и нажми 📁.`
+            : 'Без папки никого нет — все персонажи разложены по папкам.'}</div>`;
+    } else {
+        html += `<div class="iig-people-row">`;
+        for (const c of vis) {
+            const cover = pickLookForFolder(c, _swFolderFilter);
+            html += `<div class="iig-person${c.id === sel.id ? ' on' : ''}" data-char="${esc(c.id)}" title="${esc(c.names)}" tabindex="0">
+                <div class="iig-person-thumb"><img src="${esc(cover.path)}" alt="" loading="lazy" decoding="async"></div>
+                ${c.looks.length > 1 ? `<span class="iig-person-badge">${c.looks.length}</span>` : ''}
+                <div class="iig-person-name">${esc(firstName(c.names))}</div>
+            </div>`;
+        }
+        html += `</div>`;
     }
-    html += `</div>`;
 
     // Expansion: everything about the selected person and nothing about anyone
     // else. Labels get real room here, which is why they can be read in full.
-    html += `<div class="iig-look-panel">
-        <div class="iig-look-head">
-            <span class="iig-look-names">${esc(sel.names || 'без имени')}</span>
-            <button class="iig-saved-btn iig-char-rename" title="Изменить имена"><i class="fa-solid fa-pen"></i></button>
-            ${chars.length > 1 ? `<button class="iig-saved-btn iig-char-merge" title="\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c \u0441 \u0434\u0440\u0443\u0433\u0438\u043c"><i class="fa-solid fa-code-merge"></i></button>` : ''}
-        </div>
-        <div class="iig-look-strip">`;
-    for (const l of sel.looks) {
-        html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
-            <div class="iig-look-thumb"><img src="${esc(l.path)}" alt="" loading="lazy" decoding="async"></div>
-            <div class="iig-look-label${l.label ? '' : ' iig-look-nolabel'}">${esc(l.label || '—')}</div>
+    // An empty folder has nobody to expand, so the panel is simply absent.
+    if (sel) {
+        const inFolders = folderIdsOf.get(sel.id).map(id => folders.find(f => f.id === id)).filter(Boolean);
+        html += `<div class="iig-look-panel">
+            <div class="iig-look-head">
+                <span class="iig-look-names">${esc(sel.names || 'без имени')}</span>
+                <button class="iig-saved-btn iig-char-rename" title="Изменить имена"><i class="fa-solid fa-pen"></i></button>
+                ${chars.length > 1 ? `<button class="iig-saved-btn iig-char-merge" title="\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c \u0441 \u0434\u0440\u0443\u0433\u0438\u043c"><i class="fa-solid fa-code-merge"></i></button>` : ''}
+                <button class="iig-saved-btn iig-char-folders${inFolders.length ? ' on' : ''}" title="${inFolders.length ? 'Папки: ' + esc(inFolders.map(f => f.name).join(' · ')) : 'Папки'}"><i class="fa-solid fa-folder"></i></button>
+            </div>
+            <div class="iig-look-strip">`;
+        for (const l of sel.looks) {
+            html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
+                <div class="iig-look-thumb"><img src="${esc(l.path)}" alt="" loading="lazy" decoding="async"></div>
+                <div class="iig-look-label${l.label ? '' : ' iig-look-nolabel'}">${esc(l.label || '—')}</div>
+            </div>`;
+        }
+        html += `<div class="iig-look-add" id="slay_add_look" tabindex="0" title="\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437 \u044d\u0442\u043e\u043c\u0443 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0443">
+                <i class="fa-solid fa-plus"></i><span>\u0435\u0449\u0451 \u043e\u0431\u0440\u0430\u0437</span>
+            </div>`;
+        html += `</div>
+            <div class="iig-look-tools">
+                <button class="iig-look-tool" data-act="crop"><i class="fa-solid fa-crop-simple"></i><span>Обрезать</span></button>
+                <button class="iig-look-tool" data-act="replace"><i class="fa-solid fa-image"></i><span>Заменить</span></button>
+                <button class="iig-look-tool" data-act="label"><i class="fa-solid fa-pen"></i><span>Подпись</span></button>
+                <button class="iig-look-tool danger" data-act="remove"><i class="fa-solid fa-trash-can"></i><span>Убрать</span></button>
+            </div>
+            <div class="iig-look-assign">
+                <span class="iig-look-assign-lbl">Поставить в:</span>
+                <span class="iig-assign-chips" id="slay_look_slots"></span>
+            </div>
         </div>`;
     }
-    html += `<div class="iig-look-add" id="slay_add_look" tabindex="0" title="\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437 \u044d\u0442\u043e\u043c\u0443 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0443">
-            <i class="fa-solid fa-plus"></i><span>\u0435\u0449\u0451 \u043e\u0431\u0440\u0430\u0437</span>
-        </div>`;
-    html += `</div>
-        <div class="iig-look-tools">
-            <button class="iig-look-tool" data-act="crop"><i class="fa-solid fa-crop-simple"></i><span>Обрезать</span></button>
-            <button class="iig-look-tool" data-act="replace"><i class="fa-solid fa-image"></i><span>Заменить</span></button>
-            <button class="iig-look-tool" data-act="label"><i class="fa-solid fa-pen"></i><span>Подпись</span></button>
-            <button class="iig-look-tool danger" data-act="remove"><i class="fa-solid fa-trash-can"></i><span>Убрать</span></button>
-        </div>
-        <div class="iig-look-assign">
-            <span class="iig-look-assign-lbl">Поставить в:</span>
-            <span class="iig-assign-chips" id="slay_look_slots"></span>
-        </div>
-    </div>`;
 
     host.innerHTML = html;
+
+    // Put the strips back where they were (see above).
+    const peopleRow = host.querySelector('.iig-people-row');
+    if (peopleRow && prevPeopleScroll) peopleRow.scrollLeft = prevPeopleScroll;
+    const lookStrip = host.querySelector('.iig-look-strip');
+    if (lookStrip && sameChar && prevStripScroll) lookStrip.scrollLeft = prevStripScroll;
+    const chipRow = host.querySelector('.iig-folder-chips');
+    if (chipRow && prevChipScroll) chipRow.scrollLeft = prevChipScroll;
+
+    // Folder chips. A tap filters; a tap on the chip that is already open is
+    // the way into that folder's menu. «＋» (pill or chip) makes a folder and
+    // goes straight on to picking who is in it.
+    const newFolderFlow = async () => {
+        const name = await slayPromptInput('Название папки — например, сеттинг или AU', '');
+        if (name === null) return;
+        const f = createSavedFolder(name);
+        if (!f) return;
+        _swFolderFilter = f.id; _swSelLook = null;
+        renderSavedPortraits();
+        swScrollActiveChip(host);
+        await swOpenFolderMembers(f.id);
+    };
+    host.querySelector('.iig-folder-pill')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); newFolderFlow(); });
+    host.querySelector('.iig-fchip-plus')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); newFolderFlow(); });
+    for (const chipEl of host.querySelectorAll('.iig-fchip[data-f]')) {
+        chipEl.addEventListener('click', async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const f = chipEl.dataset.f;
+            if (f === _swFolderFilter && findSavedFolder(f)) { await swOpenFolderMenu(f); return; }
+            _swFolderFilter = f;
+            _swSelLook = null;   // let the folder choose the look that opens
+            renderSavedPortraits();
+            swScrollActiveChip(host);
+        });
+    }
 
     // Slot buttons come from the DOM, so the NPC count always matches reality.
     const chips = host.querySelector('#slay_look_slots');
@@ -6967,7 +8287,7 @@ function renderSavedPortraits() {
         if (!okd || !picker.value) return;
         const targetId = picker.value;
         if (mergeSavedChars(sel.id, targetId)) {
-            _swSelChar = targetId; _swSelLook = null;
+            revealSavedChar(targetId);
             renderSavedPortraits();
             toastr.success('\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u044b', 'SLAY Images', { timeOut: 1800 });
         }
@@ -6977,6 +8297,10 @@ function renderSavedPortraits() {
         e.preventDefault(); e.stopPropagation();
         const next = await slayPromptInput('Имена через запятую — по ним расширение узнаёт персонажа в промпте', sel.names || '');
         if (next !== null) renameSavedChar(sel.id, next.trim());
+    });
+    host.querySelector('.iig-char-folders')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        swOpenCharFolders(sel.id);
     });
     // All four act on the SELECTED look — the one the strip is highlighting.
     host.querySelector('.iig-look-tools')?.addEventListener('click', async (e) => {
@@ -7055,13 +8379,19 @@ function renderSavedPortraits() {
             // How many places would still point at this file once the look is gone?
             const otherUses = slayCountPathUses(doomedPath) - 1;
             const last = sel.looks.length === 1;
+            // The popup renders HTML: real line breaks need <br>, and names
+            // are user text, so they are escaped like everywhere else.
             const head = last
-                ? `Это последний образ «${sel.names}». Убрать его — значит убрать персонажа целиком.`
-                : `Убрать образ «${look.label || 'без подписи'}»?`;
+                ? `Это последний образ «${esc(sel.names)}». Убрать его — значит убрать персонажа целиком.`
+                : `Убрать образ «${esc(look.label || 'без подписи')}»?`;
             const tail = otherUses > 0
-                ? `\n\nКартинка останется на диске — её ${slayPlural(otherUses, 'использует', 'используют', 'используют')} ещё ${otherUses} ${slayPlural(otherUses, 'место', 'места', 'мест')} (другой образ, вещь гардероба или слот в другом чате).`
-                : `\n\nБольше на эту картинку никто не ссылается — она будет удалена и с диска.`;
-            if (!(await slayConfirm(head + tail))) return;
+                ? `<br><br>Картинка останется на диске — её ${slayPlural(otherUses, 'использует', 'используют', 'используют')} ещё ${otherUses} ${slayPlural(otherUses, 'место', 'места', 'мест')} (другой образ, вещь гардероба или слот в другом чате).`
+                : `<br><br>Больше на эту картинку никто не ссылается — она будет удалена и с диска.`;
+            // Inside a folder «Убрать» is easy to read as «убрать из папки». It is not.
+            const folderNote = openFolder
+                ? `<br><br>Образ удалится из библиотеки целиком, а не только из папки «${esc(openFolder.name)}». Убрать из папки — кнопка 📁 рядом с именем.`
+                : '';
+            if (!(await slayConfirm(head + tail + folderNote))) return;
             _swSelLook = null;
             removeSavedLook(sel.id, look.id);
             if (otherUses <= 0) {
@@ -7091,6 +8421,209 @@ function renderSavedPortraits() {
             toastr.success(`${sel.names}${look.label ? ` — ${look.label}` : ''}`, 'SLAY Images', { timeOut: 1800 });
         });
     }
+}
+
+// Bring the open chip into view after a tap — only as far as needed, so the
+// row does not jump when the chip is already visible.
+function swScrollActiveChip(host) {
+    const row = host.querySelector('.iig-folder-chips');
+    const on = row && row.querySelector('.iig-fchip.on');
+    if (!row || !on || row.scrollWidth <= row.clientWidth) return;
+    const l = on.offsetLeft, r = l + on.offsetWidth;
+    if (l < row.scrollLeft + 8) row.scrollLeft = Math.max(0, l - 12);
+    else if (r > row.scrollLeft + row.clientWidth - 8) row.scrollLeft = r - row.clientWidth + 12;
+}
+
+// Tap on the chip that is already open: what to do with this folder.
+async function swOpenFolderMenu(folderId) {
+    const f = findSavedFolder(folderId);
+    if (!f) return;
+    const n = swFolderMemberCount(folderId);
+    const pick = await slayChoose(
+        `Папка «${f.name}»`,
+        `${n} ${slayPlural(n, 'персонаж', 'персонажа', 'персонажей')}. Удаление папки не трогает ни персонажей, ни картинки.`,
+        [
+            { key: 'members', label: 'Выбрать персонажей', primary: true },
+            { key: 'rename', label: 'Переименовать' },
+            { key: 'delete', label: 'Удалить папку', danger: true },
+        ]);
+    if (pick === 'members') { await swOpenFolderMembers(folderId); return; }
+    if (pick === 'rename') {
+        const next = await slayPromptInput('Новое название папки', f.name);
+        if (next === null) return;
+        if (renameSavedFolder(folderId, next)) renderSavedPortraits();
+        return;
+    }
+    if (pick === 'delete') {
+        const ok = await slayConfirm(`Удалить папку «${sanitizeForHtml(f.name)}»?<br><br>Персонажи и картинки останутся — просто выпадут во «Все» и «Без папки».`);
+        if (!ok) return;
+        if (deleteSavedFolder(folderId)) {
+            _swFolderFilter = 'all';
+            renderSavedPortraits();
+            toastr.info(`Папка «${f.name}» удалена`, 'SLAY Images', { timeOut: 1800 });
+        }
+    }
+}
+
+// Who is in this folder. One checklist: members are sorted to the top ONCE
+// when it opens and then nothing moves — a tick flips the row in place and
+// search only hides rows, so the list never jumps out from under the finger.
+// Nothing is written until «Готово».
+async function swOpenFolderMembers(folderId) {
+    const f = findSavedFolder(folderId);
+    if (!f) return;
+    try { toastr.clear(); } catch (_) {}
+    const ctx = SillyTavern.getContext();
+    if (typeof ctx.callGenericPopup !== 'function') { toastr.warning('Нужна версия SillyTavern с попапами', 'SLAY Images'); return; }
+    const esc = sanitizeForHtml;
+    const chars = getSavedChars();
+    const picked = new Set(chars.filter(c => swCharInFolder(c, folderId)).map(c => c.id));
+    const ordered = [...chars.filter(c => picked.has(c.id)), ...chars.filter(c => !picked.has(c.id))];
+    // Narrow the list by where people already are: «Без папки» or another
+    // folder. Only shown when there is something to narrow by.
+    const filterChips = [
+        ['all', 'Все', chars.length],
+        ['none', 'Без папки', chars.filter(c => swCharFolderIds(c).length === 0).length],
+        ...getSavedFolders().filter(x => x.id !== folderId).map(x => [x.id, x.name, chars.filter(c => swCharInFolder(c, x.id)).length]),
+    ].filter(([id, , n]) => id === 'all' || n > 0);
+    let fflt = 'all';
+    const wrap = document.createElement('div');
+    wrap.className = 'iig-fm';
+    wrap.innerHTML = `
+        <div class="iig-fm-title">Кто в папке «${esc(f.name)}»</div>
+        <div class="iig-fm-sub">Отметь персонажей. Один и тот же персонаж может лежать в нескольких папках.</div>
+        <div class="iig-fm-counter"></div>
+        <input type="text" class="text_pole iig-fm-search" placeholder="Поиск по имени" autocomplete="off" spellcheck="false">
+        ${filterChips.length > 2 ? `<div class="iig-folder-chips iig-fm-chips">${filterChips.map(([id, name, n]) => `<button type="button" class="iig-fchip${id === 'all' ? ' on' : ''}" data-f="${esc(id)}" aria-pressed="${id === 'all'}"><span class="iig-fchip-t">${esc(name)}</span> <span class="iig-fchip-n">${n}</span></button>`).join('')}</div>` : ''}
+        <div class="iig-fm-list">${ordered.map(c => `
+            <button type="button" class="iig-fm-row${picked.has(c.id) ? ' on' : ''}" data-id="${esc(c.id)}" aria-pressed="${picked.has(c.id)}">
+                <img src="${esc(c.looks[0].path)}" alt="" loading="lazy" decoding="async">
+                <span class="iig-fm-t"><span class="iig-fm-a">${esc(c.names || 'без имени')}</span><span class="iig-fm-b">${c.looks.length} ${slayPlural(c.looks.length, 'образ', 'образа', 'образов')}</span></span>
+                <span class="iig-ck"><i class="fa-solid fa-check"></i></span>
+            </button>`).join('')}</div>
+        <div class="iig-fm-none" style="display:none;">Никто не подходит</div>`;
+    const counter = wrap.querySelector('.iig-fm-counter');
+    const updateCounter = () => { counter.textContent = `Выбрано: ${picked.size} из ${chars.length}`; };
+    updateCounter();
+    const rows = [...wrap.querySelectorAll('.iig-fm-row')];
+    for (const row of rows) {
+        row.addEventListener('click', (e) => {
+            e.preventDefault();
+            const id = row.dataset.id;
+            const on = !picked.has(id);
+            if (on) picked.add(id); else picked.delete(id);
+            row.classList.toggle('on', on);
+            row.setAttribute('aria-pressed', String(on));
+            updateCounter();
+        });
+    }
+    const search = wrap.querySelector('.iig-fm-search');
+    const none = wrap.querySelector('.iig-fm-none');
+    const inFilter = (c) => fflt === 'all' ? true : fflt === 'none' ? swCharFolderIds(c).length === 0 : swCharInFolder(c, fflt);
+    const applyFilter = () => {
+        const q = search.value.trim().toLowerCase();
+        let shown = 0;
+        for (const row of rows) {
+            const c = chars.find(x => x.id === row.dataset.id);
+            // Any single name matches — the same rule the prompt matcher uses.
+            const hit = !!c && inFilter(c) && (!q || swNameList(c.names).some(nm => nm.toLowerCase().includes(q)));
+            row.style.display = hit ? '' : 'none';
+            if (hit) shown++;
+        }
+        none.style.display = shown ? 'none' : '';
+    };
+    search.addEventListener('input', applyFilter);
+    for (const chip of wrap.querySelectorAll('.iig-fm-chips .iig-fchip')) {
+        chip.addEventListener('click', (e) => {
+            e.preventDefault();
+            fflt = chip.dataset.f;
+            for (const c2 of wrap.querySelectorAll('.iig-fm-chips .iig-fchip')) { const on = c2 === chip; c2.classList.toggle('on', on); c2.setAttribute('aria-pressed', String(on)); }
+            applyFilter();
+        });
+    }
+    const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+    const okd = await ctx.callGenericPopup(wrap, CONFIRM, '', { okButton: 'Готово', cancelButton: 'Отмена' });
+    if (!okd) return;
+    let changed = 0;
+    for (const c of chars) {
+        const was = swCharInFolder(c, folderId), now = picked.has(c.id);
+        if (was === now) continue;
+        const ids = swCharFolderIds(c).filter(x => x !== folderId);
+        if (now) ids.push(folderId);
+        swSetCharFoldersRaw(c, ids);
+        changed++;
+    }
+    if (changed) saveSettings();
+    renderSavedPortraits();
+}
+
+// Which folders ONE character is in — the 📁 button by the name. Ticks apply
+// on «Готово»; the one thing that happens straight away is «＋ Новая папка»,
+// because a folder that exists only until Cancel would be odd to explain.
+async function swOpenCharFolders(charId) {
+    const ch = getSavedChars().find(c => c.id === charId);
+    if (!ch) return;
+    try { toastr.clear(); } catch (_) {}
+    const ctx = SillyTavern.getContext();
+    if (typeof ctx.callGenericPopup !== 'function') { toastr.warning('Нужна версия SillyTavern с попапами', 'SLAY Images'); return; }
+    const esc = sanitizeForHtml;
+    const chars = getSavedChars();
+    const picked = new Set(swCharFolderIds(ch));
+    const countIn = (fid) => chars.filter(c => swCharInFolder(c, fid)).length;
+    const rowHtml = (f, on, count) => `<button type="button" class="iig-fd-row${on ? ' on' : ''}" data-id="${esc(f.id)}" aria-pressed="${on}">
+            <i class="fa-solid fa-folder iig-fd-ico"></i>
+            <span class="iig-fm-t"><span class="iig-fm-a">${esc(f.name)}</span></span>
+            <span class="iig-fd-n">${count}</span>
+            <span class="iig-ck"><i class="fa-solid fa-check"></i></span>
+        </button>`;
+    const wrap = document.createElement('div');
+    wrap.className = 'iig-fm';
+    wrap.innerHTML = `
+        <div class="iig-fm-title">Папки — ${esc(swNameList(ch.names)[0] || ch.names || 'без имени')}</div>
+        <div class="iig-fd-list">${getSavedFolders().map(f => rowHtml(f, picked.has(f.id), countIn(f.id))).join('')}
+            <button type="button" class="iig-fd-row iig-fd-new"><i class="fa-solid fa-plus iig-fd-ico"></i><span class="iig-fm-t"><span class="iig-fm-a">Новая папка</span></span></button>
+        </div>
+        <div class="iig-fd-note" style="display:none;"></div>
+        <div class="iig-fm-hint">Папки только для порядка — на генерацию не влияют.</div>`;
+    const list = wrap.querySelector('.iig-fd-list');
+    const bindRow = (row) => row.addEventListener('click', (e) => {
+        e.preventDefault();
+        const id = row.dataset.id;
+        const on = !picked.has(id);
+        if (on) picked.add(id); else picked.delete(id);
+        row.classList.toggle('on', on);
+        row.setAttribute('aria-pressed', String(on));
+    });
+    for (const row of list.querySelectorAll('.iig-fd-row[data-id]')) bindRow(row);
+    let created = 0;
+    list.querySelector('.iig-fd-new').addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const name = await slayPromptInput('Название папки — например, сеттинг или AU', '');
+        if (name === null) return;
+        const f = createSavedFolder(name);
+        if (!f) return;
+        created++;
+        picked.add(f.id);
+        const tmp = document.createElement('div');
+        tmp.innerHTML = rowHtml(f, true, 0);
+        const row = tmp.firstElementChild;
+        bindRow(row);
+        list.insertBefore(row, list.querySelector('.iig-fd-new'));
+        const note = wrap.querySelector('.iig-fd-note');
+        note.textContent = `Папка «${f.name}» создана и отмечена — попадёт в неё по «Готово».`;
+        note.style.display = '';
+    });
+    const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+    const okd = await ctx.callGenericPopup(wrap, CONFIRM, '', { okButton: 'Готово', cancelButton: 'Отмена' });
+    if (!okd) {
+        // Cancel changes nothing about the character, but a folder made on
+        // the way exists now and the chip row has to show it.
+        if (created) renderSavedPortraits();
+        return;
+    }
+    setSavedCharFolders(ch.id, [...picked]);
+    // If they just left the open folder, the render picks the first one left.
+    renderSavedPortraits();
 }
 
 function bindRecentRefsEvents(host) {
@@ -7451,8 +8984,10 @@ function bindRefSlotEvents() {
             if (!path) { toastr.warning('\u0412 \u044d\u0442\u043e\u043c \u0441\u043b\u043e\u0442\u0435 \u043d\u0435\u0442 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', 'SLAY Images'); return; }
             const res = await slayPromptSaveLook((ref && ref.name) || '', path);
             if (!res) return;
-            const ch = saveLook({ charId: res.charId, names: res.names, label: res.label, path });
-            if (ch) { _swSelChar = ch.id; _swSelLook = null; }
+            const ch = saveLook({ charId: res.charId, names: res.names, label: res.label, path, folders: res.folderId ? [res.folderId] : null });
+            // Saved into a folder other than the open one? Switch to «Все» so
+            // the new character is actually on screen.
+            if (ch) revealSavedChar(ch.id);
             openSavedPortraits({ scroll: true });
             toastr.success(ch ? `${ch.names}${res.label ? ` \u2014 ${res.label}` : ''}` : '\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e', 'SLAY Images', { timeOut: 2200 });
         });
@@ -7558,6 +9093,381 @@ function bindRefSlotEvents() {
 }
 
 // Bumped alongside manifest.json — used to invalidate style cache when parse format changes
+// ═══════════════════════════════════════════════════════════════════════
+// Style picker helpers (S1–S4): favourites, custom styles, download/share,
+// style → preset toggle. Top-level on purpose — openStylePickerModal is one
+// big closure and the harnesses in _tests/s pull these out and run them
+// without a DOM.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Lazy arrays/objects: defaultSettings holds primitives only (getSettings
+// copies defaults by reference), so each list is created on first use.
+function slayStyleFavs() {
+    const s = getSettings();
+    if (!Array.isArray(s.slayStyleFavs)) s.slayStyleFavs = [];
+    return s.slayStyleFavs;
+}
+function slayCustomStyles() {
+    const s = getSettings();
+    if (!Array.isArray(s.slayCustomStyles)) s.slayCustomStyles = [];
+    return s.slayCustomStyles;
+}
+function slayStyleMap(key) {
+    const s = getSettings();
+    if (!s[key] || typeof s[key] !== 'object' || Array.isArray(s[key])) s[key] = {};
+    return s[key];
+}
+
+// Site card → {name, tags, desc, images, stability, stabilityText, prompt, block}.
+// `prompt` is the «Гемини» panel (goes to the picture); `block` is the
+// «Длинный» panel — the whole <image_gen> instruction that the preset toggle
+// gets when the «В тогл пресета» switch is on. Cards without a long panel
+// simply carry block = ''.
+function slayParseStyleCards(html, base) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const result = [];
+    for (const card of doc.querySelectorAll('article.style-card')) {
+        const name = card.querySelector('h2.card-title')?.textContent.trim() || '';
+        // Site cards write tags either comma- or space-separated; take both.
+        const tags = (card.getAttribute('data-tags') || '').split(/[,\s]+/).map(t => t.trim()).filter(Boolean);
+        const descEl = card.querySelector('p.card-desc');
+        const desc = (descEl?.getAttribute('data-ru') || descEl?.textContent || '').trim();
+        const images = [...card.querySelectorAll('.carousel-track img')]
+            .map(img => { const r = img.getAttribute('src') || ''; return r ? new URL(r, base).href : ''; })
+            .filter(Boolean);
+        const stableBadge = card.querySelector('.badge-green');
+        const expBadge = card.querySelector('.badge-yellow');
+        const stability = stableBadge ? 'stable' : (expBadge ? 'exp' : '');
+        const stabilityText = stableBadge
+            ? (stableBadge.getAttribute('data-ru') || stableBadge.textContent).trim()
+            : expBadge ? (expBadge.getAttribute('data-ru') || expBadge.textContent).trim() : '';
+        const promptRaw = card.querySelector('.prompt-panel[data-panel="direct"] .prompt-code')?.textContent.trim() || '';
+        // Any «[Describe …]» placeholder the site puts in front, not one wording.
+        const prompt = promptRaw.replace(/^\[Describe[^\]]*\]\.?\s*/i, '').trim();
+        const block = card.querySelector('.prompt-panel[data-panel="long"] .prompt-code')?.textContent.trim() || '';
+        if (name && prompt) result.push({ name, tags, desc, images, stability, stabilityText, prompt, block });
+    }
+    return result;
+}
+
+// Chip filter → the cards to draw. activeTag: '' (all) | '__fav' | '__mine' | site tag.
+// Custom styles have no tags, so they show under «Все», «Мои» and «Избранное» only.
+function slayFilterStyles(styles, customs, favs, activeTag) {
+    const all = [...styles, ...customs];
+    if (!activeTag) return all;
+    if (activeTag === '__fav') return all.filter(s => favs.includes(s.name));
+    if (activeTag === '__mine') return customs.slice();
+    return styles.filter(s => (s.tags || []).includes(activeTag));
+}
+
+// The toggle that should hold the style: the one already carrying the
+// extension's HTML block (data-iig-instruction / <image_gen>). Markers
+// (chat history, world info…) are never candidates.
+function slayFindStylePromptTarget(prompts) {
+    if (!Array.isArray(prompts)) return null;
+    const p = prompts.find(p => p && !p.marker && p.identifier && /data-iig-instruction|<image_gen>/i.test(String(p.content || '')));
+    return p ? p.identifier : null;
+}
+
+// Where the style goes right now. Verified against SillyTavern 1.19.0:
+//   ctx.mainApi                         st-context.js:200  (main_api)
+//   ctx.chatCompletionSettings          st-context.js:227  (oai_settings; .prompts = [{identifier,name,content,marker…}])
+//   ctx.getPresetManager('openai')      st-context.js:288 → preset-manager.js:83
+//   pm.getSelectedPresetName()          preset-manager.js:403
+//   pm.getCompletionPresetByName(n)     preset-manager.js:757  (openai: the full saved preset object)
+//   pm.savePreset(n, obj, {skipUpdate}) preset-manager.js:473  (POST /api/presets/save with the FULL object)
+// mode: 'off' | 'textapi' | 'nopreset' | 'ok'
+function slayStylePresetState() {
+    const settings = getSettings();
+    if (!settings.slayStyleToPreset) return { mode: 'off' };
+    const ctx = SillyTavern.getContext();
+    if (ctx.mainApi !== 'openai') return { mode: 'textapi' };
+    const pm = typeof ctx.getPresetManager === 'function' ? ctx.getPresetManager('openai') : null;
+    const presetName = (pm && typeof pm.getSelectedPresetName === 'function') ? String(pm.getSelectedPresetName() || '') : '';
+    if (!pm || !presetName) return { mode: 'nopreset' };
+    const prompts = Array.isArray(ctx.chatCompletionSettings?.prompts) ? ctx.chatCompletionSettings.prompts : [];
+    const stored = slayStyleMap('slayStyleTarget')[presetName] || '';
+    const identifier = stored && prompts.some(p => p && p.identifier === stored) ? stored : '';
+    return { mode: 'ok', ctx, pm, presetName, prompts, stored, identifier };
+}
+
+// True when the active preset's toggle already carries the picked style: the
+// model then writes the style into its own prompt, so the image-time
+// [STYLE:] replacement must stay out of the way (S4).
+function slayStyleInPreset() {
+    try {
+        const st = slayStylePresetState();
+        if (st.mode !== 'ok' || !st.identifier) return false;
+        return Object.hasOwn(slayStyleMap('slayStyleWritten'), st.presetName + '|' + st.identifier);
+    } catch (e) { return false; }
+}
+
+// ST does not expose the PromptManager instance (openai.js:535 `export let
+// promptManager` is on neither the context nor window). When a build does,
+// re-render so the toggle shows its new text; otherwise it shows after the
+// next preset load — the saved file and oai_settings are already right.
+function slayRerenderPromptManager(ctx) {
+    const pmgr = ctx?.promptManager || window.promptManager || null;
+    if (pmgr && typeof pmgr.render === 'function') {
+        try { pmgr.render(false); } catch (e) { iigLog('WARN', 'promptManager.render failed:', e?.message); }
+    } else {
+        iigLog('INFO', 'promptManager is not exposed by this SillyTavern — the toggle text refreshes on the next preset load');
+    }
+}
+
+// Writes `block` into the chosen toggle of the active preset: the live
+// oai_settings.prompts entry AND the preset file through the preset manager,
+// the way ST's own writePresetExtensionField does it (preset-manager.js:882).
+// restore=true puts the saved original back. Resolves true after a write.
+async function slayApplyStyleToPreset({ styleName = '', block = '', restore = false } = {}) {
+    const T = 'SLAY Images';
+    const st = slayStylePresetState();
+    if (st.mode === 'off') return false;
+    if (st.mode === 'textapi') { toastr.warning('Запись стиля в пресет работает только для Chat Completion', T); return false; }
+    if (st.mode === 'nopreset') { toastr.warning('Не выбран пресет Chat Completion', T); return false; }
+    if (!st.identifier) { toastr.warning('Выберите тогл для этого пресета — в настройках под строкой «Стиль»', T); return false; }
+    const { ctx, pm, presetName, identifier } = st;
+    const preset = typeof pm.getCompletionPresetByName === 'function' ? pm.getCompletionPresetByName(presetName) : null;
+    // Never save a partial object: ST would overwrite the preset file with it.
+    if (!preset || typeof preset !== 'object' || !Array.isArray(preset.prompts) || Object.keys(preset).length < 2) {
+        toastr.error(`Не удалось прочитать пресет «${presetName}» целиком — ничего не записано`, T);
+        return false;
+    }
+    const livePrompts = Array.isArray(ctx.chatCompletionSettings?.prompts) ? ctx.chatCompletionSettings.prompts : [];
+    const livePrompt = livePrompts.find(p => p && p.identifier === identifier) || null;
+    const presetPrompt = preset.prompts.find(p => p && p.identifier === identifier) || null;
+    if (!livePrompt && !presetPrompt) { toastr.warning('В пресете нет такого тогла — выберите другой', T); return false; }
+    const toggleName = (livePrompt || presetPrompt).name || identifier;
+    const key = presetName + '|' + identifier;
+    const backups = slayStyleMap('slayStyleBackup');
+    const written = slayStyleMap('slayStyleWritten');
+    const current = String((livePrompt || presetPrompt).content ?? '');
+    let next;
+    if (restore) {
+        if (!Object.hasOwn(backups, key)) { toastr.info(`Тогл «${toggleName}» не менялся — восстанавливать нечего`, T); return false; }
+        next = String(backups[key] ?? '');
+    } else {
+        if (!String(block || '').trim()) return false;
+        if (!Object.hasOwn(backups, key)) backups[key] = current;
+        next = String(block);
+    }
+    // Hand edits in the toggle must not be lost silently: the text is neither
+    // the original nor what we wrote last time.
+    const manual = current !== String(backups[key] ?? '')
+        && (!Object.hasOwn(written, key) || current !== String(written[key] ?? ''))
+        && current !== next;
+    if (manual && !(await slayConfirm('Текст тогла менялся вручную. Перезаписать?'))) return false;
+    if (livePrompt) livePrompt.content = next;
+    if (presetPrompt && presetPrompt !== livePrompt) presetPrompt.content = next;
+    try {
+        await pm.savePreset(presetName, preset, { skipUpdate: true });
+    } catch (e) {
+        // File not written → memory goes back too, so the toggle never shows a
+        // style the preset file does not have.
+        if (livePrompt) livePrompt.content = current;
+        if (presetPrompt && presetPrompt !== livePrompt) presetPrompt.content = current;
+        iigLog('ERROR', 'savePreset failed:', e?.message || e);
+        toastr.error('Пресет не сохранился: ' + (e?.message || e), T);
+        return false;
+    }
+    try { ctx.saveSettingsDebounced?.(); } catch (_) { }
+    if (restore) { delete written[key]; delete backups[key]; }
+    else written[key] = next;
+    saveSettings();
+    slayRerenderPromptManager(ctx);
+    if (restore) toastr.success(`Тогл «${toggleName}» восстановлен`, T, { timeOut: 3000 });
+    else toastr.success(`Стиль «${styleName}» записан в тогл «${toggleName}» пресета «${presetName}»`, T, { timeOut: 4000 });
+    slayRenderStyleStatus();
+    return true;
+}
+
+// Status line under the «Стиль» row + the per-preset toggle select.
+function slayRenderStyleStatus() {
+    const statusEl = document.getElementById('slay_style_status');
+    if (!statusEl) return;
+    const row = document.getElementById('slay_style_target_row');
+    const sel = document.getElementById('slay_style_target');
+    const cb = document.getElementById('slay_style_to_preset');
+    const settings = getSettings();
+    if (cb) cb.checked = !!settings.slayStyleToPreset;
+    let st;
+    try { st = slayStylePresetState(); } catch (e) { iigLog('WARN', 'style status:', e?.message); st = { mode: 'off' }; }
+    const hideRow = (text) => { statusEl.textContent = text; row?.classList.add('iig-hidden'); };
+    if (st.mode === 'off') return hideRow('Стиль только к картинке (тумблер выключен)');
+    if (st.mode === 'textapi') return hideRow('Только для Chat Completion');
+    if (st.mode === 'nopreset') return hideRow('Не выбран пресет Chat Completion');
+    const { presetName, prompts } = st;
+    let identifier = st.identifier;
+    if (!identifier && !st.stored) {
+        // First look at this preset: pick the toggle that already holds our block.
+        const auto = slayFindStylePromptTarget(prompts);
+        if (auto) { identifier = auto; slayStyleMap('slayStyleTarget')[presetName] = auto; saveSettings(); }
+    }
+    row?.classList.remove('iig-hidden');
+    const nameEl = document.getElementById('slay_style_preset_name');
+    if (nameEl) nameEl.textContent = presetName;
+    if (sel) {
+        const esc = sanitizeForHtml;
+        const opts = prompts.filter(p => p && !p.marker && p.identifier);
+        sel.innerHTML = '<option value="">— выберите тогл —</option>'
+            + opts.map(p => `<option value="${esc(p.identifier)}"${p.identifier === identifier ? ' selected' : ''}>${esc(p.name || p.identifier)}</option>`).join('');
+        sel.value = identifier || '';
+    }
+    if (!identifier) {
+        statusEl.textContent = st.stored ? 'Выберите тогл для этого пресета' : '⚠ В пресете нет подходящего тогла — выберите вручную';
+        return;
+    }
+    const toggle = prompts.find(p => p && p.identifier === identifier);
+    const toggleName = toggle?.name || identifier;
+    if (Object.hasOwn(slayStyleMap('slayStyleWritten'), presetName + '|' + identifier) && settings.slayStyle) {
+        statusEl.textContent = `✓ Стиль «${settings.slayStyleName}» в тогле «${toggleName}» пресета «${presetName}»`;
+    } else {
+        statusEl.textContent = `Тогл «${toggleName}» пресета «${presetName}» — выберите стиль, и он запишется туда`;
+    }
+}
+
+// «＋ Свой стиль» / ✎ on a custom card. Resolves to the saved item or null.
+async function slayEditCustomStyleDialog(existing) {
+    const T = 'SLAY Images';
+    const ctx = SillyTavern.getContext();
+    if (typeof ctx.callGenericPopup !== 'function') { toastr.warning('Нужна версия SillyTavern с попапами', T); return null; }
+    const wrap = document.createElement('div');
+    wrap.className = 'iig-fm slay-cs';
+    wrap.innerHTML = `
+        <div class="iig-fm-title">${existing ? 'Изменить стиль' : 'Свой стиль'}</div>
+        <label class="slay-cs-l"><span>Название</span><input type="text" class="text_pole slay-cs-name" maxlength="60" placeholder="Например, Мой нуар" autocomplete="off" spellcheck="false"></label>
+        <label class="slay-cs-l"><span>Текст стиля (суффикс и Avoid: …)</span><textarea class="text_pole slay-cs-prompt" rows="5" placeholder="Rendered as … Avoid: …"></textarea></label>
+        <label class="slay-cs-l"><span>Целый блок для пресета (можно оставить пустым)</span><textarea class="text_pole slay-cs-block" rows="5" placeholder="&lt;image_gen&gt; … — то, что пишется в тогл пресета"></textarea></label>
+        <div class="iig-fm-hint">Текст стиля идёт к картинке вместо стиля из промпта. Блок нужен только тумблеру «В тогл пресета».</div>`;
+    const nameIn = wrap.querySelector('.slay-cs-name');
+    const promptIn = wrap.querySelector('.slay-cs-prompt');
+    const blockIn = wrap.querySelector('.slay-cs-block');
+    if (existing) { nameIn.value = existing.name || ''; promptIn.value = existing.prompt || ''; blockIn.value = existing.block || ''; }
+    const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+    const okd = await ctx.callGenericPopup(wrap, CONFIRM, '', { okButton: 'Сохранить', cancelButton: 'Отмена', wide: true });
+    if (!okd) return null;
+    const name = nameIn.value.trim();
+    const prompt = promptIn.value.trim();
+    const block = blockIn.value.trim();
+    if (!name || !prompt) { toastr.warning('Нужны название и текст стиля', T); return null; }
+    const list = slayCustomStyles();
+    if (list.some(c => c !== existing && String(c.name).toLowerCase() === name.toLowerCase())) { toastr.warning('Стиль с таким названием уже есть', T); return null; }
+    let item;
+    if (existing && list.includes(existing)) {
+        item = existing;
+        // Favourites are keyed by name — follow the rename.
+        const favs = slayStyleFavs(); const fi = favs.indexOf(item.name);
+        if (fi >= 0 && item.name !== name) favs[fi] = name;
+        item.name = name; item.prompt = prompt; item.block = block;
+    } else {
+        item = { id: swUid('cs'), name, prompt, block };
+        list.push(item);
+    }
+    saveSettings();
+    return item;
+}
+
+// ── Download / share of generated pictures and videos (S3) ──
+function iigMediaFileName(src, blobType, isVideo) {
+    const d = new Date(); const p = n => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+    const base = String(src || '').startsWith('data:') ? '' : (String(src || '').split('?')[0].split('#')[0].split('/').pop() || '');
+    const m = /\.([a-z0-9]{2,5})$/i.exec(base);
+    let ext = m ? m[1].toLowerCase() : '';
+    if (!ext) {
+        const t = String(blobType || '').toLowerCase();
+        ext = t.includes('png') ? 'png' : (t.includes('jpeg') || t.includes('jpg')) ? 'jpg' : t.includes('webp') ? 'webp'
+            : t.includes('gif') ? 'gif' : t.includes('mp4') ? 'mp4' : t.includes('webm') ? 'webm' : (isVideo ? 'mp4' : 'png');
+    }
+    return `iig_${stamp}.${ext}`;
+}
+
+// mode: 'auto' (share sheet when the device has one, else a download),
+// 'download' (always the file), 'share' (sheet; download when there is none).
+// A share sheet is a phone thing: on a desktop Chrome navigator.share exists
+// too, but people there expect a plain download, and «Поделиться» just confuses.
+function iigHasShareSheet() {
+    try {
+        if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false;
+        if (!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) return false;
+        const probe = new File([new Uint8Array([137, 80, 78, 71])], 'probe.png', { type: 'image/png' });
+        return navigator.canShare({ files: [probe] });
+    } catch (_) { return false; }
+}
+
+async function iigSaveMedia(src, { mode = 'auto', isVideo = false } = {}) {
+    const T = 'SLAY Images';
+    if (!src) return;
+    try {
+        const resp = await fetch(src);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const blob = await resp.blob();
+        const name = iigMediaFileName(src, blob.type, isVideo);
+        const type = blob.type || (isVideo ? 'video/mp4' : 'image/png');
+        const file = (typeof File === 'function') ? new File([blob], name, { type }) : null;
+        const canShare = !!(file && typeof navigator.share === 'function' && typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }));
+        if (mode === 'share' || (mode === 'auto' && canShare && iigHasShareSheet())) {
+            if (canShare) {
+                try { await navigator.share({ files: [file], title: name }); return; }
+                catch (e) {
+                    if (e && e.name === 'AbortError') return;   // the user closed the sheet
+                    iigLog('WARN', 'share failed, falling back to download:', e?.message);
+                }
+            } else {
+                toastr.info('На этом устройстве нет «Поделиться» — скачиваю файл', T, { timeOut: 2500 });
+            }
+        }
+        if ('download' in document.createElement('a')) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = name; a.rel = 'noopener'; a.style.display = 'none';
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+            return;
+        }
+        window.open(src, '_blank');
+    } catch (e) {
+        iigLog('ERROR', 'download failed:', e?.message || e);
+        toastr.error('Не удалось скачать: ' + (e?.message || e), T);
+    }
+}
+
+// ⬇ next to ↻ on a generated picture (S3a). The handler looks the media up
+// at click time, so it keeps working after a regen swaps the element.
+function attachDownloadButton(wrap, mediaEl) {
+    if (!wrap || !mediaEl || wrap.querySelector(':scope > .iig-dl-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'iig-dl-btn';
+    btn.type = 'button';
+    btn.title = 'Скачать';
+    btn.innerHTML = '<i class="fa-solid fa-download"></i>';
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (btn.classList.contains('iig-regen-busy')) return;
+        const media = wrap.querySelector(':scope > img, :scope > video') || mediaEl;
+        const isVideo = media.tagName === 'VIDEO';
+        btn.classList.add('iig-regen-busy');
+        try { await iigSaveMedia(media.currentSrc || media.getAttribute('src') || media.src, { mode: 'auto', isVideo }); }
+        finally { btn.classList.remove('iig-regen-busy'); }
+    });
+    wrap.appendChild(btn);
+}
+
+// Videos have no regen button of their own; they get the wrap + ⬇ only.
+function attachVideoDownloadButton(video) {
+    if (!video || video.tagName !== 'VIDEO' || video.dataset.iigDlBound === '1' || !video.parentNode) return;
+    if (video.closest('.iig-error-placeholder')) return;
+    video.dataset.iigDlBound = '1';
+    let wrap = video.parentNode.classList?.contains('iig-img-wrap') ? video.parentNode : null;
+    if (!wrap) {
+        wrap = document.createElement('span');
+        wrap.className = 'iig-img-wrap';
+        video.parentNode.insertBefore(wrap, video);
+        wrap.appendChild(video);
+    }
+    attachDownloadButton(wrap, video);
+}
+
 const STYLE_CACHE_EXT_VERSION = SLAY_VERSION;
 const STYLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h fallback when ETag isn't supported
 
@@ -7621,32 +9531,12 @@ async function openStylePickerModal() {
     // Cache structure: { v, styles, etag, lastModified, ts }
     //   v = extension version at time of cache (invalidates on extension upgrade)
     //   ts = cache creation timestamp (for TTL fallback when ETag isn't available)
-    const CACHE_KEY = 'slay_styles_cache_v2';
+    // v3: entries carry `block` (the long panel) since 5.1 — older caches are skipped.
+    const CACHE_KEY = 'slay_styles_cache_v3';
     let styles = [];
 
-    const parseStyles = (html) => {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        const result = [];
-        for (const card of doc.querySelectorAll('article.style-card')) {
-            const name = card.querySelector('h2.card-title')?.textContent.trim() || '';
-            const tags = (card.dataset.tags || '').split(',').map(t => t.trim()).filter(Boolean);
-            const descEl = card.querySelector('p.card-desc');
-            const desc = (descEl?.getAttribute('data-ru') || descEl?.textContent || '').trim();
-            const images = [...card.querySelectorAll('.carousel-track img')]
-                .map(img => { const r = img.getAttribute('src') || ''; return r ? new URL(r, BASE).href : ''; })
-                .filter(Boolean);
-            const stableBadge = card.querySelector('.badge-green');
-            const expBadge = card.querySelector('.badge-yellow');
-            const stability = stableBadge ? 'stable' : (expBadge ? 'exp' : '');
-            const stabilityText = stableBadge
-                ? (stableBadge.getAttribute('data-ru') || stableBadge.textContent).trim()
-                : expBadge ? (expBadge.getAttribute('data-ru') || expBadge.textContent).trim() : '';
-            const promptRaw = card.querySelector('.prompt-panel[data-panel="direct"] .prompt-code')?.textContent.trim() || '';
-            const prompt = promptRaw.replace(/^\[Describe your scene here\]\.\s*/i, '').trim();
-            if (name && prompt) result.push({ name, tags, desc, images, stability, stabilityText, prompt });
-        }
-        return result;
-    };
+    // Parsing lives in slayParseStyleCards (top-level, harness-tested).
+    const parseStyles = (html) => slayParseStyleCards(html, BASE);
 
     const readCache = () => {
         try {
@@ -7727,12 +9617,32 @@ async function openStylePickerModal() {
     // bodyEl is declared in the cache block above — reused here
 
     const renderFilters = () => {
-        filtersEl.innerHTML = ['', ...allTags].map(t =>
-            `<button class="slay-style-chip${activeTag === t ? ' active' : ''}" data-tag="${t}">${t ? (TAG_LABELS[t] || t) : 'Все'}</button>`
-        ).join('');
+        const favCount = slayStyleFavs().length;
+        const mineCount = slayCustomStyles().length;
+        // The chip disappears with its last card — never leave an empty filter on.
+        if (activeTag === '__fav' && !favCount) activeTag = '';
+        if (activeTag === '__mine' && !mineCount) activeTag = '';
+        const chips = [{ key: '', label: 'Все' }];
+        if (favCount) chips.push({ key: '__fav', label: `♥ Избранное ${favCount}` });
+        if (mineCount) chips.push({ key: '__mine', label: 'Мои' });
+        for (const t of allTags) chips.push({ key: t, label: TAG_LABELS[t] || t });
+        filtersEl.innerHTML = chips.map(c =>
+            `<button type="button" class="slay-style-chip${activeTag === c.key ? ' active' : ''}" data-tag="${sanitizeForHtml(c.key)}">${sanitizeForHtml(c.label)}</button>`
+        ).join('') + `<label class="slay-style-switch" title="Записывать выбранный стиль в тогл пресета Chat Completion"><input type="checkbox" class="slay-style-switch-cb"${settings.slayStyleToPreset ? ' checked' : ''}><span>В тогл пресета</span></label>`;
         for (const btn of filtersEl.querySelectorAll('.slay-style-chip')) {
             btn.addEventListener('click', () => { activeTag = btn.dataset.tag; renderFilters(); renderGrid(); });
         }
+        // S4 switch: same setting as the checkbox under «Стиль» in the settings.
+        filtersEl.querySelector('.slay-style-switch-cb')?.addEventListener('change', (e) => {
+            settings.slayStyleToPreset = !!e.target.checked;
+            saveSettings();
+            slayRenderStyleStatus();
+            if (!settings.slayStyleToPreset) return;
+            const st = slayStylePresetState();
+            if (st.mode === 'textapi') toastr.info('Только для Chat Completion — стиль пойдёт только к картинке', 'SLAY Images');
+            else if (st.mode === 'nopreset') toastr.info('Не выбран пресет Chat Completion', 'SLAY Images');
+            else if (st.mode === 'ok' && !st.identifier && !slayFindStylePromptTarget(st.prompts)) toastr.warning('В пресете нет подходящего тогла — выберите его в настройках под строкой «Стиль»', 'SLAY Images');
+        });
     };
 
     const settings = getSettings();
@@ -7762,31 +9672,46 @@ async function openStylePickerModal() {
         </div>`;
     };
 
-    const makeCard = (s, isSel, isNoReplace) => {
-        const encodedPrompt = s ? encodeURIComponent(s.prompt) : '';
-        const encodedName = s ? encodeURIComponent(s.name) : '';
+    // idx = position in the list renderGrid drew (data-sidx), -1 for «Как в пресете».
+    const makeCard = (s, isSel, isNoReplace, idx) => {
         if (isNoReplace) {
             return `<article class="slay-sc${isSel ? ' selected' : ''}">
               <div class="slay-sc-carousel slay-sc-no-media"><i class="fa-solid fa-ban"></i></div>
-              <div class="slay-sc-body slay-sc-selectable" data-style="" data-name="">
-                <div class="slay-sc-head"><span class="slay-sc-name">Не заменять</span></div>
-                <p class="slay-sc-desc">Использовать стиль из оригинального промпта</p>
+              <div class="slay-sc-body slay-sc-selectable" data-sidx="-1" data-style="" data-name="">
+                <div class="slay-sc-head"><span class="slay-sc-name">Как в пресете</span></div>
+                <p class="slay-sc-desc">Стиль из промпта, ничего не заменять</p>
               </div>
             </article>`;
         }
+        const encodedPrompt = encodeURIComponent(s.prompt);
+        const encodedName = encodeURIComponent(s.name);
+        const isFav = slayStyleFavs().includes(s.name);
         const badgeCls = s.stability === 'stable' ? 'slay-sc-badge-stable' : (s.stability === 'exp' ? 'slay-sc-badge-exp' : '');
-        const badgeHtml = s.stabilityText ? `<span class="slay-sc-badge ${badgeCls}">${sanitizeForHtml(s.stabilityText)}</span>` : '';
-        return `<article class="slay-sc${isSel ? ' selected' : ''}">
+        const badgeHtml = s.custom
+            ? '<span class="slay-sc-badge slay-sc-badge-mine">мой</span>'
+            : (s.stabilityText ? `<span class="slay-sc-badge ${badgeCls}">${sanitizeForHtml(s.stabilityText)}</span>` : '');
+        const tools = s.custom
+            ? '<span class="slay-sc-tools"><button type="button" class="slay-sc-edit" title="Изменить"><i class="fa-solid fa-pen"></i></button><button type="button" class="slay-sc-del" title="Удалить"><i class="fa-solid fa-trash"></i></button></span>'
+            : '';
+        return `<article class="slay-sc${isSel ? ' selected' : ''}${s.custom ? ' slay-sc-custom' : ''}" data-sidx="${idx}">
           ${makeCarousel(s.images)}
-          <div class="slay-sc-body slay-sc-selectable" data-style="${encodedPrompt}" data-name="${encodedName}">
+          <button type="button" class="slay-sc-fav${isFav ? ' on' : ''}" aria-pressed="${isFav}" title="${isFav ? 'Убрать из избранного' : 'В избранное'}"><i class="fa-${isFav ? 'solid' : 'regular'} fa-heart"></i></button>
+          <div class="slay-sc-body slay-sc-selectable" data-sidx="${idx}" data-style="${encodedPrompt}" data-name="${encodedName}">
             <div class="slay-sc-head">
               <span class="slay-sc-name">${sanitizeForHtml(s.name)}</span>
-              ${badgeHtml}
+              ${badgeHtml}${tools}
             </div>
             ${s.desc ? `<p class="slay-sc-desc">${sanitizeForHtml(s.desc)}</p>` : ''}
           </div>
         </article>`;
     };
+    const makeAddCard = () => `<article class="slay-sc slay-sc-add">
+          <div class="slay-sc-carousel slay-sc-no-media"><i class="fa-solid fa-plus"></i></div>
+          <div class="slay-sc-body slay-sc-addbtn">
+            <div class="slay-sc-head"><span class="slay-sc-name">＋ Свой стиль</span></div>
+            <p class="slay-sc-desc">Название, текст стиля и, если нужно, блок для пресета</p>
+          </div>
+        </article>`;
 
     // Attach carousel logic to all .slay-sc-carousel elements inside a container
     const initCarousels = (container) => {
@@ -7827,14 +9752,71 @@ async function openStylePickerModal() {
     };
 
     const renderGrid = () => {
-        const visible = activeTag ? styles.filter(s => s.tags.includes(activeTag)) : styles;
+        const customs = slayCustomStyles().map(c => ({ ...c, tags: [], images: [], custom: true }));
+        const visible = slayFilterStyles(styles, customs, slayStyleFavs(), activeTag);
         const noReplaceActive = !settings.slayStyle;
         bodyEl.innerHTML = `<div class="slay-style-grid">
-          ${makeCard(null, noReplaceActive, true)}
-          ${visible.map(s => makeCard(s, settings.slayStyle === s.prompt, false)).join('')}
+          ${makeCard(null, noReplaceActive, true, -1)}
+          ${visible.map((s, i) => makeCard(s, settings.slayStyle === s.prompt, false, i)).join('')}
+          ${makeAddCard()}
         </div>`;
 
         initCarousels(bodyEl);
+        const cardStyle = (el) => visible[parseInt(el.closest('.slay-sc')?.dataset.sidx, 10)] || null;
+
+        // ♥ toggles the favourite without selecting the card (S1).
+        for (const fb of bodyEl.querySelectorAll('.slay-sc-fav')) {
+            fb.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const s = cardStyle(fb);
+                if (!s) return;
+                const favs = slayStyleFavs();
+                const i = favs.indexOf(s.name);
+                const on = i < 0;
+                if (on) favs.push(s.name); else favs.splice(i, 1);
+                saveSettings();
+                fb.classList.toggle('on', on);
+                fb.setAttribute('aria-pressed', String(on));
+                fb.title = on ? 'Убрать из избранного' : 'В избранное';
+                fb.querySelector('i').className = `fa-${on ? 'solid' : 'regular'} fa-heart`;
+                renderFilters();
+                if (activeTag === '__fav') renderGrid();   // the card just left this list
+            });
+        }
+        // ✎ / 🗑 on custom cards (S2).
+        for (const b of bodyEl.querySelectorAll('.slay-sc-edit, .slay-sc-del')) {
+            b.addEventListener('click', async (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const s = cardStyle(b);
+                const item = s && slayCustomStyles().find(c => c.id === s.id);
+                if (!item) return;
+                if (b.classList.contains('slay-sc-del')) {
+                    if (!(await slayConfirm(`Удалить стиль «${sanitizeForHtml(item.name)}»?`))) return;
+                    const list = slayCustomStyles();
+                    list.splice(list.indexOf(item), 1);
+                    const favs = slayStyleFavs(); const fi = favs.indexOf(item.name);
+                    if (fi >= 0) favs.splice(fi, 1);
+                    saveSettings();
+                } else {
+                    const wasSelected = settings.slayStyle === item.prompt;
+                    const saved = await slayEditCustomStyleDialog(item);
+                    if (!saved) return;
+                    if (wasSelected) {
+                        settings.slayStyle = saved.prompt; settings.slayStyleName = saved.name; saveSettings();
+                        const nameEl = document.getElementById('slay_style_name');
+                        if (nameEl) nameEl.textContent = saved.name;
+                    }
+                }
+                if (!overlay.isConnected) return;
+                renderFilters(); renderGrid();
+            });
+        }
+        bodyEl.querySelector('.slay-sc-addbtn')?.addEventListener('click', async (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            const saved = await slayEditCustomStyleDialog(null);
+            if (!saved || !overlay.isConnected) return;
+            renderFilters(); renderGrid();
+        });
 
         // Select on body/description click only
         for (const selectable of bodyEl.querySelectorAll('.slay-sc-selectable')) {
@@ -7843,11 +9825,22 @@ async function openStylePickerModal() {
                 ev.stopPropagation();
                 const prompt = selectable.dataset.style ? decodeURIComponent(selectable.dataset.style) : '';
                 const name = selectable.dataset.name ? decodeURIComponent(selectable.dataset.name) : '';
+                const idx = parseInt(selectable.dataset.sidx, 10);
+                const picked = idx >= 0 ? visible[idx] : null;
                 settings.slayStyle = prompt;
-                settings.slayStyleName = name || 'Не заменять';
+                settings.slayStyleName = name || 'Как в пресете';
                 saveSettings();
                 const nameEl = document.getElementById('slay_style_name');
                 if (nameEl) nameEl.textContent = settings.slayStyleName;
+                // S4: with the switch on the full block goes into the preset toggle;
+                // «Как в пресете» puts the original toggle text back.
+                if (settings.slayStyleToPreset) {
+                    const swallow = (e) => iigLog('ERROR', 'style → preset failed:', e?.message || e);
+                    if (!picked) slayApplyStyleToPreset({ restore: true }).catch(swallow);
+                    else if (!String(picked.block || '').trim()) toastr.warning('У этого стиля нет блока для пресета, стиль пойдёт только к картинке', 'SLAY Images', { timeOut: 5000 });
+                    else slayApplyStyleToPreset({ styleName: picked.name, block: picked.block }).catch(swallow);
+                }
+                slayRenderStyleStatus();
                 // Defer overlay teardown: if we remove it synchronously during the click,
                 // the following touchend/pointerup lands on whatever was behind the overlay
                 // (the ST extensions drawer backdrop), which interprets the tap as "outside
@@ -7936,21 +9929,26 @@ function bindSettingsEvents() {
         document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
         document.getElementById('slay_settings_body2')?.classList.toggle('iig-hidden', !settings.enabled);
         document.getElementById('slay_custom_format_row')?.classList.toggle('iig-hidden', !isCustom);
-        document.getElementById('slay_custom_hint')?.classList.toggle('iig-hidden', !isCustom);
+        // The custom hint sits behind an ⓘ: shown only for custom AND once opened.
+        { const ch = document.getElementById('slay_custom_hint'); if (ch) ch.classList.toggle('iig-hidden', !isCustom || ch.dataset.open !== '1'); }
 
         const currentNaisModel = normalizeNaisteraModel(settings.naisteraModel);
         // Custom + images/generations body: no slot for reference images —
         // hide the refs UI so users don't configure refs that silently vanish.
-        const isCustomImages = isCustom && (settings.customBodyFormat || 'chat') === 'images';
-        const supportsRefs = (!isNaistera || currentNaisModel.startsWith('grok') || currentNaisModel.startsWith('nano banana')) && !isCustomImages;
+        // 'edits' takes them as files and counts like 'chat'.
+        const customFormat = isCustom ? (settings.customBodyFormat || 'chat') : 'chat';
+        const isCustomImages = isCustom && customFormat === 'images';
+        const isCustomEdits = isCustom && customFormat === 'edits';
+        const supportsRefs = (!isNaistera || naisteraModelSupportsRefs(currentNaisModel)) && !isCustomImages;
 
         document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
-        // size (WxH) is used by openai dall-e style AND custom images/generations
-        document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !(isOpenAI || isCustomImages));
-        document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
+        // size (WxH) and quality are read only by custom images/generations;
+        // openai mode sends ratio/resolution inside the prompt instead.
+        document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !isCustomImages);
+        document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isCustomImages);
         document.getElementById('slay_naistera_model_row')?.classList.toggle('iig-hidden', !isNaistera);
         {
-            const manualPicked = !NAISTERA_MODELS.includes(String(settings.naisteraModel || '').toLowerCase());
+            const manualPicked = !naisteraModelIsListed(settings.naisteraModel);
             document.getElementById('slay_naistera_manual_row')?.classList.toggle('iig-hidden', !(isNaistera && manualPicked));
         }
         document.getElementById('slay_naistera_aspect_row')?.classList.toggle('iig-hidden', !isNaistera);
@@ -7960,6 +9958,9 @@ function bindSettingsEvents() {
         // injects them into the prompt too ([aspect_ratio: X] [image_size: Y]) —
         // show for gemini, openai, and custom chat-format alike.
         document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !(isGemini || isOpenAI || (isCustom && !isCustomImages)));
+        // edits: the ratio picks the size; 1K/2K/4K means nothing there.
+        document.getElementById('slay_image_size_row')?.classList.toggle('iig-hidden', isCustomEdits);
+        document.getElementById('slay_edits_params')?.classList.toggle('iig-hidden', !isCustomEdits);
 
         document.getElementById('slay_refs_section')?.classList.toggle('iig-hidden', !supportsRefs);
         document.getElementById('slay_image_context_section')?.classList.toggle('iig-hidden', !supportsRefs);
@@ -7983,9 +9984,11 @@ function bindSettingsEvents() {
             if (!supportsRefs && isNaistera) {
                 wardrobeHint.textContent = 'Модель не поддерживает референсы. Будут отправляться только текстовые описания.';
                 wardrobeHint.style.color = '#ff9800';
+                wardrobeHint.classList.remove('iig-hidden');   // a warning is not a hint: always visible
             } else {
                 wardrobeHint.textContent = 'Загрузите аутфиты для бота и юзера. Изображение активного аутфита отправится как референс, а словесное описание будет добавлено в промпт.';
                 wardrobeHint.style.color = '';
+                wardrobeHint.classList.toggle('iig-hidden', wardrobeHint.dataset.open !== '1');
             }
         }
         // Avatar ref sections removed
@@ -8004,6 +10007,7 @@ function bindSettingsEvents() {
         document.getElementById('slay_wardrobe_body')?.classList.toggle('iig-hidden', !e.target.checked);
         // Apply immediately: drop or restore the outfit injection and the bar button.
         try { window.slayWardrobe?.refresh?.(); } catch (err) { iigLog('WARN', 'wardrobe refresh failed:', err.message); }
+        updateSectionStatusesSoon();
     });
     document.getElementById('slay_enabled')?.addEventListener('change', (e) => {
         settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot();
@@ -8011,6 +10015,40 @@ function bindSettingsEvents() {
         else iigStripOurUi();
     });
     document.getElementById('slay_external_blocks')?.addEventListener('change', (e) => { settings.externalBlocks = e.target.checked; saveSettings(); });
+
+    // ── Collapsible sections + ⓘ hints ──
+    // One delegated handler on the panel: section headers toggle and remember
+    // their state; ⓘ buttons reveal the long hint next to them.
+    const panelRoot = document.querySelector('.iig-settings');
+    panelRoot?.addEventListener('click', (e) => {
+        const hd = e.target.closest?.('.iig-sec-hd');
+        if (hd && panelRoot.contains(hd)) {
+            e.preventDefault();
+            const sec = hd.closest('.iig-sec');
+            if (!sec) return;
+            const open = !sec.classList.contains('open');
+            sec.classList.toggle('open', open);
+            hd.setAttribute('aria-expanded', open ? 'true' : 'false');
+            const id = sec.dataset.sec;
+            if (id) { slayOpenSections(settings)[id] = open; SillyTavern.getContext().saveSettingsDebounced(); }
+            return;
+        }
+        const ib = e.target.closest?.('.iig-info-btn');
+        if (ib && panelRoot.contains(ib)) {
+            e.preventDefault(); e.stopPropagation();
+            const hint = document.getElementById(ib.dataset.hint || '');
+            if (!hint) return;
+            const show = hint.classList.contains('iig-hidden');
+            hint.classList.toggle('iig-hidden', !show);
+            hint.dataset.open = show ? '1' : '';
+            ib.setAttribute('aria-expanded', show ? 'true' : 'false');
+        }
+    });
+    document.getElementById('slay_sw_own_connection')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.swOwnConnection = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+        document.getElementById('slay_sw_own_connection_body')?.classList.toggle('iig-hidden', !e.target.checked);
+    });
 
     // ── Connection profiles ──
     // Saved {name, apiType, endpoint, apiKey, model} snapshots. Applying one
@@ -8043,6 +10081,10 @@ function bindSettingsEvents() {
         settings.apiKey = p.apiKey || '';
         settings.model = p.model || '';
         settings.customBodyFormat = p.customBodyFormat || 'chat';
+        _slayTestOk = false;
+        // Older profiles have no Naistera fields — leave the live ones alone then.
+        if (p.naisteraModel) settings.naisteraModel = normalizeNaisteraModel(p.naisteraModel);
+        if (p.naisteraAspectRatio) settings.naisteraAspectRatio = p.naisteraAspectRatio;
         saveSettings();
         // Sync visible inputs to the applied profile
         const typeSel = document.getElementById('slay_api_type');
@@ -8055,7 +10097,14 @@ function bindSettingsEvents() {
         if (modelInput) modelInput.value = settings.model;
         const fmtSel = document.getElementById('slay_custom_body_format');
         if (fmtSel) fmtSel.value = settings.customBodyFormat;
+        const nmSel = document.getElementById('slay_naistera_model');
+        if (nmSel) nmSel.value = naisteraModelIsListed(settings.naisteraModel) ? normalizeNaisteraModel(settings.naisteraModel) : NAISTERA_MANUAL;
+        const nmInp = document.getElementById('slay_naistera_model_manual');
+        if (nmInp) nmInp.value = naisteraModelIsListed(settings.naisteraModel) ? '' : (settings.naisteraModel || '');
+        const naSel = document.getElementById('slay_naistera_aspect_ratio');
+        if (naSel) naSel.value = settings.naisteraAspectRatio || 'auto';
         updateVisibility();
+        iigSyncModelInputMode({ forceManual: settings.apiType === 'custom' || settings.apiType === 'naistera' });
         toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
     });
     document.getElementById('slay_conn_profile_save')?.addEventListener('click', async () => {
@@ -8071,6 +10120,8 @@ function bindSettingsEvents() {
             apiKey: settings.apiKey,
             model: settings.model,
             customBodyFormat: settings.customBodyFormat || 'chat',
+            naisteraModel: settings.naisteraModel,
+            naisteraAspectRatio: settings.naisteraAspectRatio,
         };
         const existing = profiles.findIndex(x => x.name === name);
         if (existing >= 0) profiles[existing] = snapshot;
@@ -8080,11 +10131,14 @@ function bindSettingsEvents() {
         toastr.success(`Профиль «${name}» сохранён`, 'SLAY Images', { timeOut: 2000 });
     });
     document.getElementById('slay_conn_profile_delete')?.addEventListener('click', async () => {
-        const sel = document.getElementById('slay_conn_profile');
-        const name = sel?.value;
-        if (!name) { toastr.info('Выберите профиль для удаления', 'SLAY Images', { timeOut: 2000 }); return; }
+        // Pick from a list, not from the <select>: choosing there APPLIES the
+        // profile, so «удалить» used to overwrite the live connection first.
+        const profiles = getConnProfiles();
+        if (profiles.length === 0) { toastr.info('Профилей пока нет', 'SLAY Images', { timeOut: 2000 }); return; }
+        const name = await slayChoose('Удалить профиль', 'Какой профиль удалить? Текущее подключение не изменится.', profiles.map(p => ({ key: p.name, label: p.name, danger: true })));
+        if (!name) return;
         if (!(await slayConfirm(`Удалить профиль «${name}»?`))) return;
-        settings.connectionProfiles = getConnProfiles().filter(x => x.name !== name);
+        settings.connectionProfiles = profiles.filter(x => x.name !== name);
         saveSettings();
         renderConnProfiles();
         toastr.info(`Профиль «${name}» удалён`, 'SLAY Images', { timeOut: 2000 });
@@ -8104,18 +10158,18 @@ function bindSettingsEvents() {
                 toastr.info(`Endpoint остался прежним: ${host}. Если это адрес другого провайдера — поменяйте его перед вводом нового ключа.`, 'SLAY Images', { timeOut: 9000 });
             } catch (e) { /* unparseable endpoint — nothing useful to say */ }
         }
-        settings.apiType = next; saveSettings(); updateVisibility();
+        settings.apiType = next; _slayTestOk = false; saveSettings(); updateVisibility();
         // custom / naistera have no model listing — hand the user the text field.
         iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' });
         if (next !== 'custom' && next !== 'naistera' && !settings.manualModel && settings.endpoint && settings.apiKey) {
             populateModelDatalist({ silent: true }).catch(() => {});
         }
     });
-    document.getElementById('slay_endpoint')?.addEventListener('input', (e) => { settings.endpoint = e.target.value; saveSettings(); });
+    document.getElementById('slay_endpoint')?.addEventListener('input', (e) => { settings.endpoint = e.target.value; _slayTestOk = false; saveSettings(); });
     // sanitizeApiKey strips zero-width unicode + NBSP that ride in from
     // clipboard (esp. Telegram) and would otherwise crash fetch with
     // "String contains non ISO-8859-1 code point".
-    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = sanitizeApiKey(e.target.value); saveSettings(); });
+    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = sanitizeApiKey(e.target.value); _slayTestOk = false; saveSettings(); });
     document.getElementById('slay_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('slay_api_key'); const icon = document.querySelector('#slay_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
@@ -8152,7 +10206,16 @@ function bindSettingsEvents() {
     // phone it gets the native picker instead of datalist's awkward behaviour.
     async function populateModelDatalist({ silent = false } = {}) {
         if (!document.getElementById('slay_model_select')) return 0;
-        const models = await fetchModels();
+        let models = [];
+        let failed = false;
+        try { models = await fetchModels({ throwOnError: true }); }
+        catch (error) {
+            // One red toast with the real reason — not «не удалось» here and
+            // «Моделей: 0» a moment later.
+            failed = true;
+            iigLog('WARN', 'populateModelDatalist: fetch failed:', error.message);
+            if (!silent) { const ex = slayExplainError(error); toastr[ex.tone === 'warning' ? 'warning' : 'error'](ex.short, 'SLAY Images', { timeOut: 8000 }); }
+        }
         // Re-resolve AFTER the await: ST can re-render the extensions drawer
         // mid-fetch, and populating a detached node looks like an empty dropdown.
         const sel = document.getElementById('slay_model_select');
@@ -8173,7 +10236,10 @@ function bindSettingsEvents() {
             if (m === current) o.selected = true;
             sel.appendChild(o);
         }
-        if (!silent) toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
+        if (!silent && !failed) {
+            if (models.length > 0) toastr.success(`Моделей: ${models.length}`, 'SLAY Images');
+            else if (getSettings().apiType !== 'custom') toastr.warning('Адрес ответил, но моделей не вернул — включите ручной ввод', 'SLAY Images', { timeOut: 6000 });
+        }
         return models.length;
     }
 
@@ -8187,10 +10253,18 @@ function bindSettingsEvents() {
         if (forceManual && !st.manualModel && (st.apiType === 'custom' || st.apiType === 'naistera')) {
             st.manualModel = true; saveSettings();
         }
-        const manual = !!st.manualModel;
+        // Custom never has a list: just the text field, no switch, no «пусто».
+        const isCustom = st.apiType === 'custom';
+        const manual = isCustom || !!st.manualModel;
         const cb = document.getElementById('slay_manual_model');
         if (cb) cb.checked = manual;
-        document.getElementById('slay_model')?.classList.toggle('iig-hidden', !manual);
+        document.getElementById('slay_manual_model_row')?.classList.toggle('iig-hidden', isCustom);
+        const mi = document.getElementById('slay_model');
+        if (mi) {
+            if (mi.dataset.ph === undefined) mi.dataset.ph = mi.placeholder || '';
+            mi.placeholder = isCustom ? ((st.customBodyFormat === 'edits') ? 'gpt-image-2' : 'имя модели (можно оставить пустым)') : mi.dataset.ph;
+            mi.classList.toggle('iig-hidden', !manual);
+        }
         document.getElementById('slay_model_select')?.classList.toggle('iig-hidden', manual);
         document.getElementById('slay_refresh_models')?.classList.toggle('iig-hidden', manual);
     }
@@ -8214,9 +10288,11 @@ function bindSettingsEvents() {
                 .catch(() => iigSyncModelInputMode({ forceManual: true }));
         }
     }
-    document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); updateVisibility(); });
+    document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); updateVisibility(); iigSyncModelInputMode(); });
     document.getElementById('slay_size')?.addEventListener('change', (e) => { settings.size = e.target.value; saveSettings(); });
     document.getElementById('slay_quality')?.addEventListener('change', (e) => { settings.quality = e.target.value; saveSettings(); });
+    document.getElementById('slay_edits_quality')?.addEventListener('change', (e) => { settings.editsQuality = e.target.value; saveSettings(); });
+    document.getElementById('slay_edits_fidelity')?.addEventListener('change', (e) => { settings.editsHighFidelity = e.target.checked; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
     document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => {
@@ -8230,12 +10306,31 @@ function bindSettingsEvents() {
         settings.naisteraModel = normalizeNaisteraModel(e.target.value);
         saveSettings(); updateVisibility();
     });
+    // Store the canonical spelling (see canonNaisteraModelName) while the user
+    // types; tidy the field itself and re-check the refs gate once they leave it.
     document.getElementById('slay_naistera_model_manual')?.addEventListener('input', (e) => {
-        const v = String(e.target.value || '').trim();
+        const v = canonNaisteraModelName(e.target.value);
         if (v) { settings.naisteraModel = v; saveSettings(); }
+    });
+    document.getElementById('slay_naistera_model_manual')?.addEventListener('change', (e) => {
+        const v = canonNaisteraModelName(e.target.value);
+        if (!v) return;
+        if (e.target.value !== v) e.target.value = v;
+        // Typed a listed name? Then it belongs in the dropdown, not here.
+        const sel = document.getElementById('slay_naistera_model');
+        if (sel && naisteraModelIsListed(v)) { sel.value = v; e.target.value = ''; }
+        updateVisibility();
     });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
+    document.getElementById('slay_style_to_preset')?.addEventListener('change', (e) => { settings.slayStyleToPreset = !!e.target.checked; saveSettings(); slayRenderStyleStatus(); });
+    document.getElementById('slay_style_target')?.addEventListener('change', (e) => {
+        const st = slayStylePresetState();
+        if (st.mode !== 'ok') return;
+        const targets = slayStyleMap('slayStyleTarget');
+        if (e.target.value) targets[st.presetName] = e.target.value; else delete targets[st.presetName];
+        saveSettings(); slayRenderStyleStatus();
+    });
     document.getElementById('slay_image_context_enabled')?.addEventListener('change', (e) => { settings.imageContextEnabled = e.target.checked; saveSettings(); updateVisibility(); });
     document.getElementById('slay_image_context_count')?.addEventListener('input', (e) => { settings.imageContextCount = normalizeImageContextCount(e.target.value); e.target.value = String(settings.imageContextCount); saveSettings(); });
     document.getElementById('slay_send_char_ref')?.addEventListener('change', (e) => {
@@ -8264,59 +10359,91 @@ function bindSettingsEvents() {
         // Re-read settings fresh in case user just changed them
         const currentSettings = getSettings();
         iigLog('INFO', `Test connection: apiType=${currentSettings.apiType}, endpoint=${currentSettings.endpoint}, apiKey=${currentSettings.apiKey ? 'set' : 'empty'}`);
+        // Green flash only when the probe really proved something.
+        let ok = false;
         try {
             if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera') throw new Error('Укажите endpoint');
             if (!currentSettings.apiKey) throw new Error('Укажите API key');
+            // A bare HEAD carries no key, so 401/403/404/405 from it prove nothing
+            // either way — neutral, not red. Red is for silence only.
+            const headProbe = async (u) => {
+                const r = await fetch(u, { method: 'HEAD' }).catch(() => null);
+                if (!r) { const e = new Error('Failed to fetch'); e.slayUrl = u; throw e; }
+                if (r.status === 401 || r.status === 403 || r.status === 404 || r.status === 405) {
+                    toastr.info(`Адрес отвечает (HTTP ${r.status}). Проверить можно только генерацией.`, 'SLAY Images', { timeOut: 7000 });
+                    return false;
+                }
+                if (r.ok) { toastr.success('Адрес отвечает. Полностью это проверяется только настоящей генерацией.', 'SLAY Images', { timeOut: 5000 }); return true; }
+                toastr.warning(`Адрес ответил ${r.status}. Проверить можно только генерацией.`, 'SLAY Images', { timeOut: 7000 });
+                return false;
+            };
             if (currentSettings.apiType === 'naistera') {
                 // Probing the site ROOT reported OK while generation was dead: the
                 // address generation uses is /api/generate. Only a POST there truly
                 // proves anything, and that would cost a picture — so check the path
                 // exists and say plainly what that does and does not prove.
-                const base = (currentSettings.endpoint || 'https://naistera.org').replace(/\/+$/, '');
+                const base = getEffectiveEndpoint(currentSettings).replace(/\/+$/, '');
                 const genUrl = base.endsWith('/api/generate') ? base : `${base}/api/generate`;
-                const r = await fetch(genUrl, { method: 'HEAD' }).catch(() => null);
-                if (!r) toastr.error(`Адрес недоступен из браузера: ${genUrl}`, 'SLAY Images', { timeOut: 9000 });
-                else if (r.status === 404) toastr.error(`По адресу ${genUrl} ничего нет (404). Проверьте Endpoint.`, 'SLAY Images', { timeOut: 9000 });
-                else if (r.status === 401 || r.status === 403) toastr.warning('Адрес есть, но ключ не подошёл', 'SLAY Images', { timeOut: 7000 });
-                else toastr.success('Адрес отвечает. Полностью это проверяется только настоящей генерацией.', 'SLAY Images', { timeOut: 5000 });
+                ok = await headProbe(genUrl);
             } else if (currentSettings.apiType === 'custom') {
-                // Custom = full URL to a generation endpoint; there is no
-                // /v1/models to probe and a real POST would cost the user a
-                // generation. HEAD tells us at least that the host answers.
-                const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
-                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
-                // Any answer at all used to count as success — a 404 was reported
-                // as «адрес отвечает» with a green tick.
-                if (!r) toastr.error(`Адрес недоступен из браузера: ${testUrl}`, 'SLAY Images', { timeOut: 9000 });
-                else if (r.status === 404) toastr.error(`По этому адресу ничего нет (404). Проверьте URL: ${testUrl}`, 'SLAY Images', { timeOut: 9000 });
-                else if (r.status === 401 || r.status === 403) toastr.warning('Адрес есть, но ключ не подошёл', 'SLAY Images', { timeOut: 7000 });
-                else if (r.status === 405) toastr.success('Адрес есть. Проверочный запрос он не принимает — это нормально.', 'SLAY Images', { timeOut: 7000 });
-                else if (r.ok) toastr.success('Адрес отвечает. Полностью это проверяется только настоящей генерацией.', 'SLAY Images', { timeOut: 5000 });
-                else toastr.warning(`Адрес ответил ${r.status}. Проверить можно только генерацией.`, 'SLAY Images', { timeOut: 7000 });
+                // A real POST with the key and an (almost) empty body. The server
+                // checks the path and the key first and rejects the body before
+                // any picture is made — so this proves address + key for free.
+                // A bare HEAD used to answer 404 on perfectly working routes.
+                const url = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
+                const fmt = currentSettings.customBodyFormat || 'chat';
+                const model = String(currentSettings.model || '').trim();
+                if (fmt === 'edits' && !model) throw new Error('Для images/edits впиши модель (например gpt-image-2)');
+                const body = model ? JSON.stringify({ model }) : '{}';
+                let r;
+                try { r = await fetch(url, { method: 'POST', headers: buildAuthHeaders(currentSettings.apiKey, { 'Content-Type': 'application/json' }), body }); }
+                catch (e0) { const e = new Error('Failed to fetch'); e.slayUrl = url; throw e; }
+                const text = await r.text().catch(() => '');
+                let said = ''; try { said = slayProviderSaid(text); } catch (_) { said = ''; }
+                const suffix = said ? `: ${said}` : '';
+                const modelBad = /model/i.test(text) && /not.?found|does not exist|invalid|unknown|unsupported|не найден/i.test(text);
+                const fail = (status) => { const e = new Error(`API Error (${status}): ${text.slice(0, 300)}`); e.slayUrl = url; e.status = status; throw e; };
+                if (r.status === 401 || r.status === 403) fail(r.status);
+                if (r.status === 404 && !modelBad) fail(404);
+                if (r.status === 405) toastr.warning('Адрес отвечает, но не принимает запросы (405) — URL должен вести на саму точку генерации', 'SLAY Images', { timeOut: 8000 });
+                else if (modelBad) toastr.warning(`Адрес и ключ приняты, но модель «${model}» не принята${suffix}`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status === 429) toastr.warning(`Адрес и ключ приняты, но провайдер отвечает «лимит или баланс» (429)${suffix}`, 'SLAY Images', { timeOut: 9000 });
+                else if (r.status >= 500) toastr.warning(`Адрес есть, но у провайдера сбой (${r.status})${suffix}`, 'SLAY Images', { timeOut: 8000 });
+                else if (r.ok || r.status >= 400) {
+                    ok = true;
+                    toastr.success(`Подключение работает: адрес и ключ приняты${model ? `, модель «${model}»` : ''} (формат ${fmt})`, 'SLAY Images', { timeOut: 6000 });
+                } else toastr.warning(`Адрес ответил ${r.status}${suffix}`, 'SLAY Images', { timeOut: 8000 });
             } else {
                 // Probe the dialect the user actually selected, and say which
                 // address was tried — an unfamiliar /v1beta/… in the message is
                 // usually the moment someone realises the API type is wrong.
                 const base = normalizeApiEndpoint(currentSettings.endpoint);
                 const probe = slayModelsUrl(currentSettings.apiType, base);
-                const models = await fetchModels();
+                const models = await fetchModels({ throwOnError: true });
                 if (models.length > 0) {
+                    ok = true;
                     toastr.success(`Подключение работает — моделей: ${models.length}`, 'SLAY Images', { timeOut: 4000 });
                 } else {
+                    // A 2xx with nothing in it — the address is alive, the dialect
+                    // or the path may still be wrong. Not a green tick.
                     toastr.warning(
                         `Адрес ответил, но моделей не вернул.<br>Проверяли: ${probe}<br>Если путь выглядит незнакомо — проверьте «Тип API».`,
                         'SLAY Images', { timeOut: 10000, escapeHtml: false });
                 }
             }
-            btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700);
+            _slayTestOk = ok;
+            if (ok) { btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700); }
         } catch (error) {
             const ex = slayExplainError(error);
             iigLog('ERROR', 'Test connection failed:', error.message);
+            _slayTestOk = false;
             // The one place where a 404 explanation pays for itself: the user is
-            // standing in the settings, one dropdown away from the fix.
-            toastr[ex.tone === 'warning' ? 'warning' : 'error'](ex.short, 'SLAY Images', { timeOut: 9000 });
+            // standing in the settings, one dropdown away from the fix. The
+            // address goes along — on a test it is the thing being checked.
+            const where = ex.url ? ` — ${String(ex.url).replace(/[<>]/g, '')}` : '';
+            toastr[ex.tone === 'warning' ? 'warning' : 'error'](`${ex.short}${where}`, 'SLAY Images', { timeOut: 9000 });
             btn.classList.add('test-fail'); setTimeout(() => btn.classList.remove('test-fail'), 700);
-        } finally { btn.classList.remove('testing'); icon.className = orig; }
+        } finally { btn.classList.remove('testing'); icon.className = orig; updateSectionStatuses(); }
     });
 
     // Wardrobe handlers
@@ -8379,9 +10506,10 @@ function bindSettingsEvents() {
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
             // Host and key resolve as a pair — never send the main key to a
             // custom describe endpoint (see swAnalyzeOutfit for the full note).
-            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
-            const key = swS.describeEndpoint ? (swS.describeKey || '') : (iigS.apiKey || '');
-            if (swS.describeEndpoint && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
+            const ownEp = slaySwOwnConnection(swS) ? (swS.describeEndpoint || '') : '';
+            const ep = normalizeApiEndpoint(ownEp || iigS.endpoint || '');
+            const key = ownEp ? (swS.describeKey || '') : (iigS.apiKey || '');
+            if (ownEp && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             // Same dialect question as the main endpoint: 'auto' guesses from the
             // model name, which is what swAnalyzeOutfit does when it generates.
@@ -8389,7 +10517,7 @@ function bindSettingsEvents() {
             const dgem = dfmt === 'gemini'
                 || (dfmt === 'auto' && String(swS.describeModel || '').toLowerCase().includes('gemini'));
             const url = slayModelsUrl(dgem ? 'gemini' : 'openai', ep);
-            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem }) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status} — проверяли ${url}`);
             const data = await resp.json();
             const models = slayParseModelList(data).sort();
@@ -8426,25 +10554,38 @@ function bindSettingsEvents() {
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
             // Host and key resolve as a pair — never send the main key to a
             // custom describe endpoint (see swAnalyzeOutfit for the full note).
-            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
-            const key = swS.describeEndpoint ? (swS.describeKey || '') : (iigS.apiKey || '');
-            if (swS.describeEndpoint && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
+            const ownEp = slaySwOwnConnection(swS) ? (swS.describeEndpoint || '') : '';
+            const ep = normalizeApiEndpoint(ownEp || iigS.endpoint || '');
+            const key = ownEp ? (swS.describeKey || '') : (iigS.apiKey || '');
+            if (ownEp && !key) { toastr.error('Укажите ключ к своему Endpoint для описаний — основной ключ туда не отправляется.', 'Гардероб', { timeOut: 8000 }); return; }
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
-            const url = `${ep}/v1/models`;
-            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            // Same dialect question as the 🔄 button next door: a Gemini-style
+            // host lists its models at /v1beta/models, and in Google's shape.
+            const dfmt = swS.describeApiFormat || 'auto';
+            const dgem = dfmt === 'gemini'
+                || (dfmt === 'auto' && String(swS.describeModel || '').toLowerCase().includes('gemini'));
+            const url = slayModelsUrl(dgem ? 'gemini' : 'openai', ep);
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem }) });
+            if (!resp.ok) throw slayHttpError(resp.status, await resp.text().catch(() => ''), url);
             const data = await resp.json();
-            const count = (data.data || []).length;
-            toastr.success(`Connection OK — ${count} моделей доступно`, 'Гардероб');
-            btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700);
+            const count = slayParseModelList(data).length;
+            if (count > 0) {
+                toastr.success(`Подключение работает — моделей: ${count}`, 'Гардероб');
+                btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700);
+            } else {
+                toastr.warning(`Адрес ответил, но моделей не вернул. Проверяли: ${url}`, 'Гардероб', { timeOut: 8000 });
+            }
         } catch (error) {
-            toastr.error(`Ошибка: ${error.message}`, 'Гардероб');
+            const ex = slayExplainError(error);
+            const where = ex.url ? ` — ${String(ex.url).replace(/[<>]/g, '')}` : '';
+            toastr[ex.tone === 'warning' ? 'warning' : 'error'](`${ex.short}${where}`, 'Гардероб', { timeOut: 9000 });
             btn.classList.add('test-fail'); setTimeout(() => btn.classList.remove('test-fail'), 700);
         } finally { btn.classList.remove('testing'); icon.className = orig; }
     });
     document.getElementById('slay_sw_send_outfit_desc')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.sendOutfitDescription = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+        updateSectionStatusesSoon();
     });
     document.getElementById('slay_sw_send_outfit_image_bot')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
@@ -8465,7 +10606,9 @@ function bindSettingsEvents() {
     document.getElementById('slay_sw_show_float')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.showFloatingBtn = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
-        if (e.target.checked) swInjectFloatingBtn();
+        // swInjectFloatingBtn lives inside the wardrobe IIFE — from here it was
+        // a ReferenceError, so the icon never appeared until the next refresh.
+        if (e.target.checked) window.slayWardrobe?.refresh?.();
         else $('#sw-bar-btn').remove();
     });
     document.getElementById('slay_sw_max_dim')?.addEventListener('change', (e) => {
@@ -8485,13 +10628,14 @@ function bindSettingsEvents() {
     });
 
     updateVisibility();
+    slayRenderStyleStatus();
 }
 
 // ── Lightbox ──
 function initLightbox() {
     if (document.getElementById('slay_lightbox')) return;
     const overlay = document.createElement('div'); overlay.id = 'slay_lightbox'; overlay.className = 'iig-lightbox';
-    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div></div>`;
+    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><div class="iig-lightbox-bar"><span class="iig-lightbox-file"></span><button type="button" class="iig-lightbox-dl" title="Скачать файл"><i class="fa-solid fa-download"></i> Скачать</button><button type="button" class="iig-lightbox-share" title="Поделиться"><i class="fa-solid fa-share-nodes"></i> Поделиться</button></div></div>`;
     document.body.appendChild(overlay);
     const close = (e) => {
         // CRITICAL: stop the event from bubbling to document. Otherwise ST's extensions
@@ -8505,6 +10649,29 @@ function initLightbox() {
     };
     overlay.querySelector('.iig-lightbox-backdrop').addEventListener('click', close);
     overlay.querySelector('.iig-lightbox-close').addEventListener('click', close);
+
+    // ── Bottom bar: file name, «⬇ Скачать», «Поделиться» (S3b) ──
+    const fileEl = overlay.querySelector('.iig-lightbox-file');
+    const dlBtn = overlay.querySelector('.iig-lightbox-dl');
+    const shareBtn = overlay.querySelector('.iig-lightbox-share');
+    const lbSrc = () => overlay.querySelector('.iig-lightbox-img').getAttribute('src') || '';
+    overlay.addEventListener('slay-lightbox-open', () => {
+        const src = lbSrc();
+        let name = '';
+        if (src.startsWith('data:')) name = 'ещё не сохранена';
+        else { try { name = decodeURIComponent(src.split('?')[0].split('#')[0].split('/').pop() || ''); } catch (_) { name = src.split('/').pop() || ''; } }
+        fileEl.textContent = name;
+        fileEl.title = name;
+        // No share sheet on this device (desktop browsers) → only «Скачать».
+        shareBtn.style.display = iigHasShareSheet() ? '' : 'none';
+    });
+    const lbSave = async (btn, mode) => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try { await iigSaveMedia(lbSrc(), { mode }); } finally { btn.disabled = false; }
+    };
+    dlBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); lbSave(dlBtn, 'download'); });
+    shareBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); lbSave(shareBtn, 'share'); });
 
     // ── Pinch-zoom, drag and double-tap, touch only ──────────────────────────
     // SillyTavern's own viewport meta carries user-scalable=no, so the browser
@@ -8596,7 +10763,7 @@ function initLightbox() {
             || img.hasAttribute('data-iig-instruction');
     };
     document.addEventListener('click', (e) => {
-        if (e.target.closest?.('.iig-regen-btn')) return;
+        if (e.target.closest?.('.iig-regen-btn, .iig-dl-btn')) return;
         // Interactive elements keep their clicks — capture-phase preventDefault
         // here would hijack buttons/links/inputs that sit over a chat image
         // (message action buttons, bot-template controls, edit textarea).
@@ -8702,6 +10869,8 @@ function updateHeaderStatusDot() {
             addButtonsToExistingMessages();
             renderRefSlots();
             attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true });
+            // Pictures that finished while another chat was open (P6).
+            iigApplyPendingResults().catch(e => iigLog('WARN', 'pending results apply failed:', e?.message));
         }, 300);
     });
 
@@ -8712,6 +10881,18 @@ function updateHeaderStatusDot() {
     if (context.event_types.SETTINGS_UPDATED) {
         context.eventSource.on(context.event_types.SETTINGS_UPDATED, () => {
             renderRefSlotsDebounced();
+        });
+    }
+
+    // Preset / API switches move the toggle the style lives in (S4): refresh
+    // the status line under «Стиль». Events verified in events.js (1.19.0):
+    // OAI_PRESET_CHANGED_AFTER:38, PRESET_CHANGED:92, MAIN_API_CHANGED:96,
+    // CHATCOMPLETION_SOURCE_CHANGED:35.
+    for (const evName of ['OAI_PRESET_CHANGED_AFTER', 'PRESET_CHANGED', 'MAIN_API_CHANGED', 'CHATCOMPLETION_SOURCE_CHANGED']) {
+        const evType = context.event_types?.[evName];
+        if (!evType) continue;
+        context.eventSource.on(evType, () => {
+            setTimeout(() => { try { slayRenderStyleStatus(); } catch (e) { iigLog('WARN', 'style status refresh failed:', e?.message); } }, 50);
         });
     }
 

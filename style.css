@@ -340,6 +340,24 @@
     display: -webkit-box;
     -webkit-line-clamp: 4;
     -webkit-box-orient: vertical;
+    /* The explanation may carry a line break before the provider's sentence. */
+    white-space: pre-line;
+}
+/* What the server literally answered — its own block, three lines, quieter
+   than the explanation above it. */
+.iig-error-placeholder .iig-error-raw {
+    color: var(--SmartThemeBodyColor, rgba(255,255,255,0.7));
+    font-size: 0.72em;
+    line-height: 1.4;
+    opacity: 0.55;
+    max-width: 100%;
+    word-break: break-word;
+    max-height: 4.3em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
 }
 /* The address we knocked on. Quiet, but present: an unfamiliar /v1beta/ here is
    usually the moment someone realises their API type is wrong. */
@@ -520,6 +538,69 @@
 @media (hover: none) {
     .iig-regen-btn { opacity: 0.55; }
     .iig-regen-btn:active { opacity: 1; transform: scale(0.95); }
+}
+
+/* «Сохранить ещё раз» — the picture arrived but ST refused to store the file.
+   Always visible (not hover-only): without it the picture is gone on the next
+   re-render, and on a phone there is no hover anyway. */
+.iig-resave-btn {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 16px;
+    background: rgba(244, 114, 182, 0.92);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.iig-resave-btn:hover { background: rgba(244, 114, 182, 1); }
+.iig-resave-btn:disabled { opacity: 0.6; cursor: wait; }
+
+/* ⬇ «Скачать» — twin of the regen button, to its right (S3a). */
+.iig-dl-btn {
+    position: absolute;
+    top: 8px;
+    left: 50px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .2s, background .2s, transform .15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    padding: 0;
+    z-index: 3;
+    line-height: 1;
+}
+.iig-img-wrap:hover .iig-dl-btn,
+.iig-img-wrap:focus-within .iig-dl-btn,
+.iig-dl-btn.iig-regen-busy { opacity: 1; }
+.iig-dl-btn:hover {
+    background: rgba(244, 114, 182, 0.9);
+    transform: scale(1.08);
+    border-color: rgba(255, 255, 255, 0.45);
+}
+.iig-dl-btn.iig-regen-busy { background: rgba(60, 60, 70, 0.8); cursor: wait; }
+/* A video has no regen button, so ⬇ takes the first slot. */
+.iig-img-wrap > video ~ .iig-dl-btn { left: 8px; }
+@media (hover: none) {
+    .iig-dl-btn { opacity: 0.55; }
+    .iig-dl-btn:active { opacity: 1; transform: scale(0.95); }
 }
 
 .iig-key-toggle {
@@ -978,8 +1059,8 @@
 .iig-lightbox-content {
     position: relative;
     max-width: 90vw;
-    max-height: calc(100vh - 120px);
-    max-height: calc(100dvh - 120px);
+    max-height: calc(100vh - 100px);
+    max-height: calc(100dvh - 100px);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -989,11 +1070,29 @@
 
 .iig-lightbox-img {
     max-width: 90vw;
-    max-height: calc(100vh - 140px);
-    max-height: calc(100dvh - 140px);
+    /* leaves room for the caption and the download bar below */
+    max-height: calc(100vh - 200px);
+    max-height: calc(100dvh - 200px);
     border-radius: 12px;
     object-fit: contain;
 }
+
+/* Bottom bar: file name + «⬇ Скачать» / «Поделиться» (S3b). */
+.iig-lightbox-bar {
+    display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+    max-width: 90vw; z-index: 2;
+}
+.iig-lightbox-file {
+    color: rgba(255, 255, 255, 0.55); font-size: 0.75em; max-width: 46vw;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.iig-lightbox-dl, .iig-lightbox-share {
+    display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px;
+    border-radius: 18px; background: rgba(244, 114, 182, 0.2); border: 1px solid rgba(244, 114, 182, 0.3);
+    color: #f9a8d4; font-size: 0.85em; line-height: 1; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.iig-lightbox-dl:hover, .iig-lightbox-share:hover { background: rgba(244, 114, 182, 0.35); }
+.iig-lightbox-dl:disabled, .iig-lightbox-share:disabled { opacity: 0.6; cursor: wait; }
 
 .iig-lightbox-caption {
     color: rgba(255, 255, 255, 0.5);
@@ -1694,6 +1793,45 @@
 .slay-sc-desc {
     font-size: 0.75em; line-height: 1.5; opacity: .65;
     color: var(--SmartThemeFontColor,#ccc);
+}
+
+/* ── ♥ favourite, custom cards, «＋ Свой стиль», preset switch (S1/S2/S4) ── */
+.slay-sc { position: relative; }
+.slay-sc-fav {
+    position: absolute; top: 8px; right: 8px; z-index: 3;
+    width: 36px; height: 36px; border-radius: 50%; padding: 0;
+    background: rgba(0,0,0,0.55); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    display: flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1;
+    cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .18s, transform .15s;
+}
+.slay-sc-fav:hover { background: rgba(244,114,182,0.7); transform: scale(1.08); }
+.slay-sc-fav.on { color: #f472b6; }
+.slay-sc-badge-mine { background: rgba(244,114,182,0.14); color: #f9a8d4; border: 1px solid rgba(244,114,182,0.35); }
+.slay-sc-tools { display: inline-flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.slay-sc-edit, .slay-sc-del {
+    width: 30px; height: 30px; border-radius: 50%; padding: 0; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.06); color: var(--SmartThemeFontColor,#ccc); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1;
+}
+.slay-sc-edit:hover { background: rgba(244,114,182,0.25); color: #f9a8d4; }
+.slay-sc-del:hover { background: rgba(248,113,113,0.25); color: #fca5a5; }
+.slay-sc-add { border-style: dashed; }
+.slay-sc-addbtn { cursor: pointer; }
+.slay-sc-addbtn:hover { background: rgba(244,114,182,0.06); }
+.slay-style-switch {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 0.75em;
+    cursor: pointer; white-space: nowrap; min-height: 28px; color: var(--SmartThemeFontColor,#ccc);
+}
+.slay-style-switch input { margin: 0; }
+/* «Свой стиль» dialog fields (inside ST's popup) */
+.slay-cs-l { display: flex; flex-direction: column; gap: 4px; font-size: 0.85em; margin-bottom: 8px; text-align: left; }
+.slay-cs-l input, .slay-cs-l textarea { font-size: 16px; width: 100%; box-sizing: border-box; }
+.slay-cs-l textarea { min-height: 90px; resize: vertical; }
+/* status line under «Стиль» (S4) */
+.iig-style-status { font-size: 0.75em; opacity: 0.75; line-height: 1.4; margin: -2px 0 6px; }
+@media (max-width: 600px) {
+    #slay_style_target_row { flex-wrap: wrap; }
+    #slay_style_target_row > select { flex-basis: 100%; }
 }
 
 /* ── Mobile ── */
@@ -2770,6 +2908,165 @@
 .iig-look-add:active { transform: scale(0.96); }
 
 
+/* ============ Папки: чипы над рядом лиц ============ */
+/* A folder is a tag on a character and nothing more — these chips only decide
+   who is in the row below. Phone first: one line that scrolls sideways under
+   the thumb; on a desktop the same chips simply wrap. The open chip gets a
+   solid pink border, not just a tint — a tint alone vanishes on bright custom
+   themes and color-mix() is not everywhere yet. */
+.iig-saved-head-r { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Ghost pill in the head while no folder exists yet. */
+.iig-folder-pill {
+    flex-shrink: 0;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px dashed color-mix(in srgb, var(--slay-pink) 45%, transparent);
+    background: transparent;
+    color: var(--slay-pink);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px;
+    white-space: nowrap;
+}
+.iig-folder-pill i { font-size: 10px; }
+.iig-folder-pill:hover { background: color-mix(in srgb, var(--slay-pink) 12%, transparent); border-style: solid; }
+.iig-folder-pill:active { transform: scale(0.96); }
+
+.iig-folder-chips {
+    position: relative;      /* chips measure offsetLeft against the row */
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 2px 2px 8px;
+    min-width: 0;
+    max-width: 100%;
+}
+.iig-fchip {
+    flex: 0 0 auto;
+    min-height: 32px;
+    max-width: 160px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: rgba(0, 0, 0, 0.28);
+    color: #c9c6d1;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background .13s, color .13s, border-color .13s;
+}
+/* The name is its own span: ellipsis does not apply to a flex container's
+   bare text, only to a block with overflow of its own. */
+.iig-fchip-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.iig-fchip-n { font-size: 11px; opacity: .6; font-variant-numeric: tabular-nums; }
+/* Tiny pen on the open folder chip: a hint that a second tap opens its menu. */
+.iig-fchip-pen { font-size: 10px; opacity: .7; }
+.iig-fchip.on {
+    border: 1px solid var(--slay-pink);
+    background: rgba(244, 114, 182, 0.14);
+    color: var(--slay-pink-bright, #f9a8d4);
+}
+.iig-fchip.on .iig-fchip-n { opacity: .85; }
+.iig-fchip-plus { width: 32px; min-width: 32px; padding: 0; justify-content: center; color: var(--slay-pink); font-size: 13px; }
+@media (hover: hover) {
+    .iig-fchip:hover { border-color: color-mix(in srgb, var(--slay-pink) 50%, transparent); color: var(--slay-pink); }
+}
+.iig-fchip:active { transform: scale(0.96); }
+.iig-fchip:focus-visible { outline: 2px solid var(--slay-pink); outline-offset: 2px; }
+
+/* Empty folder: the row is replaced by a sentence that says what to do next. */
+.iig-folder-empty {
+    margin: 2px 2px 10px;
+    padding: 12px 10px;
+    border: 1px dashed var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #9d9aa6;
+    text-align: center;
+}
+
+/* The three buttons by the name are thumb-sized everywhere, and the folder
+   one turns pink while the character sits in at least one folder. */
+.iig-look-head .iig-saved-btn { width: 32px; height: 32px; font-size: 13px; border-radius: 8px; flex-shrink: 0; }
+.iig-char-folders.on {
+    color: var(--slay-pink-bright, #f9a8d4);
+    background: rgba(244, 114, 182, 0.16);
+    box-shadow: inset 0 0 0 1px var(--slay-pink);
+}
+
+/* ---- Folder dialogs: member checklist and per-character folder ticks ---- */
+.iig-fm { text-align: left; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.iig-fm-title { font-size: 15px; font-weight: 600; color: var(--slay-pink); }
+.iig-fm-sub { font-size: 12px; opacity: .7; line-height: 1.45; }
+.iig-fm-counter { font-size: 12px; color: var(--slay-pink-bright, #f9a8d4); }
+/* 16px or iOS zooms the page on focus and never zooms back out. */
+.iig-fm-search { font-size: 16px !important; min-height: 38px; margin: 2px 0 4px; }
+.iig-fm-list, .iig-fd-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 46vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    min-width: 0;
+}
+.iig-fm-row, .iig-fd-row {
+    display: grid;
+    grid-template-columns: 38px 1fr auto;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
+    flex: 0 0 auto;              /* a flex column with max-height squashes rows and they overlap */
+    min-height: 44px;
+    padding: 5px 8px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: rgba(0, 0, 0, 0.22);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.iig-fd-row { grid-template-columns: 22px 1fr auto auto; min-height: 42px; }
+.iig-fm-row:hover, .iig-fd-row:hover { background: rgba(0, 0, 0, 0.35); }
+.iig-fm-row.on, .iig-fd-row.on {
+    border-color: rgba(244, 114, 182, 0.4);
+    background: rgba(244, 114, 182, 0.12);
+}
+.iig-fm-row img { width: 38px; height: 50px; object-fit: cover; border-radius: 7px; display: block; }
+.iig-fm-t { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.iig-fm-a { font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iig-fm-b { font-size: 11px; opacity: .6; }
+.iig-fm-row.on .iig-fm-a, .iig-fd-row.on .iig-fm-a { color: var(--slay-pink); }
+.iig-fd-ico { font-size: 14px; opacity: .8; text-align: center; }
+.iig-fd-n { font-size: 11px; opacity: .6; font-variant-numeric: tabular-nums; }
+.iig-fd-new .iig-fm-a, .iig-fd-new .iig-fd-ico { color: var(--slay-pink); opacity: 1; }
+.iig-fd-note { font-size: 11.5px; color: var(--slay-pink-bright, #f9a8d4); }
+/* The check circle: empty ring, filled pink when on. */
+.iig-ck {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    border: 2px solid #8a8794;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px;
+    color: transparent;
+    flex-shrink: 0;
+    transition: background .12s, border-color .12s, color .12s;
+}
+.iig-fm-row.on .iig-ck, .iig-fd-row.on .iig-ck { background: var(--slay-pink); border-color: var(--slay-pink); color: #17171d; }
+.iig-fm-none { font-size: 11px; opacity: .55; padding: 8px 2px; }
+.iig-fm .iig-folder-chips { margin: 0 0 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.iig-fm .iig-folder-chips::-webkit-scrollbar { display: none; }
+.iig-fm-hint { font-size: 11.5px; opacity: .55; margin-top: 4px; }
+/* Save dialog: single-select folder chips, a size down from the panel row. */
+.iig-folder-chips-sm { padding: 2px 0 4px; }
+.iig-folder-chips-sm .iig-fchip { min-height: 30px; font-size: 12px; }
+
 /* ---- Character picker inside dialogs ---- */
 /* Replaces a <select> that had grown to seventeen entries. Filter first, pick
    from what is left — the same "any single name matches" rule the prompt uses. */
@@ -2886,6 +3183,20 @@
     .slk-list { max-height: 46vh; }
 
     .iig-look-names { font-size: 13px; }
+
+    /* Folder chips: one row that scrolls sideways. The ghost pill wins over
+       the hint — the two do not fit beside the title on a phone. */
+    .iig-folder-chips, .iig-folder-chips-sm {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+    }
+    .iig-folder-chips::-webkit-scrollbar { display: none; }
+    .iig-recent-refs-head.iig-has-pill .iig-recent-refs-hint { display: none; }
+    .iig-folder-pill { height: 30px; font-size: 12px; }
 }
 
 /* Touch without a narrow screen (tablets, convertibles) still has no hover, so
@@ -3288,4 +3599,154 @@
 }
 .slay-choose-box {
     margin: auto;
+}
+
+/* ==================== Short settings menu (variant B) ==================== */
+/* Two master switches on one row; the inputs keep their old ids, only the
+   look changed from a checkbox to a toggle. */
+.iig-masters {
+    display: flex;
+    gap: 6px;
+}
+.iig-master {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 40px;
+    padding: 6px 10px;
+    margin: 0;
+    border-radius: var(--slay-radius-sm);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 12%, var(--SmartThemeBorderColor));
+    background: var(--SmartThemeBlurTintColor);
+    font-size: 0.9em;
+    font-weight: 500;
+    cursor: pointer;
+}
+.iig-master-t {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap !important;
+}
+.iig-switch {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 36px;
+    height: 22px;
+    border-radius: 11px;
+    background: #55555f;
+    border: 0;
+    position: relative;
+    flex: 0 0 auto;
+    margin: 0;
+    cursor: pointer;
+    transition: background .15s;
+}
+.iig-switch::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    transition: left .15s;
+}
+.iig-switch:checked { background: var(--slay-pink); }
+.iig-switch:checked::after { left: 17px; }
+.iig-switch:focus-visible { outline: 2px solid var(--slay-pink); outline-offset: 2px; }
+
+/* Collapsible sections. The card look comes from .iig-section; here only the
+   header row (40px, whole row tappable), the chevron and the body. */
+.iig-acc { display: flex; flex-direction: column; }
+.iig-section.iig-sec { padding: 0; margin-bottom: 6px; }
+.iig-section.iig-sec:hover { transform: none; }
+.iig-sec-hd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 4px 12px;
+    margin: 0;
+    background: linear-gradient(135deg,
+        color-mix(in srgb, var(--slay-pink) 6%, var(--SmartThemeBlurTintColor)) 0%,
+        color-mix(in srgb, var(--slay-pink) 3%, var(--SmartThemeBlurTintColor)) 100%);
+    border: 0;
+    border-radius: 0;
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: none;
+}
+.iig-sec-hd:focus-visible { outline: 2px solid var(--slay-pink); outline-offset: -2px; }
+.iig-sec-ic { width: 22px; text-align: center; flex: 0 0 auto; color: var(--slay-pink); }
+.iig-sec-t { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.iig-sec-t b { font-size: 0.95em; font-weight: 600; color: var(--slay-pink); letter-spacing: 0.02em; }
+.iig-sec-status {
+    font-size: 0.75em;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap !important;
+}
+.iig-sec-status:empty { display: none; }
+.iig-sec-chev { flex: 0 0 auto; opacity: 0.6; font-size: 0.85em; transition: transform .15s; }
+.iig-sec.open > .iig-sec-hd .iig-sec-chev { transform: rotate(180deg); }
+.iig-sec.open > .iig-sec-hd { border-bottom: 1px solid color-mix(in srgb, var(--slay-pink) 10%, var(--SmartThemeBorderColor)); }
+.iig-sec-bd, .iig-col { display: flex; flex-direction: column; gap: 6px; }
+.iig-sec-bd { padding: 10px 12px 12px; }
+.iig-sec:not(.open) > .iig-sec-bd { display: none; }
+.iig-sec-bd .iig-refs-grid { padding: 4px 0 6px; }
+.iig-sec-bd .checkbox_label { margin: 0; }
+.iig-subhead {
+    font-size: 0.72em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--slay-pink);
+    opacity: 0.75;
+    padding-top: 6px;
+}
+.iig-row-btn { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.iig-row-btn > .menu_button { flex: 1 1 auto; }
+
+/* ⓘ: long hints hide behind it; tap to read. */
+.iig-info-btn {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: var(--slay-radius-sm);
+    border: 1px solid color-mix(in srgb, var(--slay-pink) 20%, var(--SmartThemeBorderColor));
+    background: transparent;
+    color: var(--slay-pink);
+    opacity: 0.8;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font: inherit;
+    box-shadow: none;
+}
+.iig-info-btn[aria-expanded="true"] { background: var(--slay-pink-soft); opacity: 1; }
+.iig-info-btn:focus-visible { outline: 2px solid var(--slay-pink); outline-offset: 2px; }
+.iig-settings .hint.iig-hint-long { margin: 0 0 2px; }
+.iig-settings .iig-credit { text-align: center; opacity: 0.5; margin-top: 6px; line-height: 1.55; font-size: 0.75em; }
+.iig-settings .iig-credit a { color: inherit; text-decoration: underline; }
+.iig-own-conn {
+    padding: 10px;
+    border-radius: 10px;
+    background: rgba(244, 114, 182, 0.04);
+    border: 1px solid rgba(244, 114, 182, 0.1);
+}
+
+@media (max-width: 600px) {
+    /* Same widths as the desktop rows; only the header gets a touch tighter. */
+    .iig-sec-hd { padding: 4px 10px; }
+    .iig-sec-bd { padding: 8px 10px 10px; }
+    .iig-sec-status { font-size: 0.72em; }
 }
