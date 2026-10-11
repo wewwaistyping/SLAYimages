@@ -28,6 +28,7 @@
  */
 const SLAY_VERSION = '5.0.0';
 
+
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
    ╚═══════════════════════════════════════════════════════════════╝ */
@@ -2799,6 +2800,24 @@ const defaultSettings = Object.freeze({
     naisteraSendUserAvatar: false,
     naisteraVideoTest: false,
     naisteraVideoEveryN: 1,
+    // NovelAI Diffusion (native ST /api/novelai/generate-image)
+    novelModel: 'nai-diffusion-5-full',
+    novelCustomModel: '',
+    novelResolution: 'auto',
+    novelSampler: 'k_euler_ancestral',
+    novelScheduler: 'karras',
+    novelSteps: 28,
+    novelScale: 5,
+    novelSeed: -1,
+    novelUpscale: 1,
+    novelPrefix: 'best quality, absurdres, aesthetic,',
+    novelNegative: 'lowres, bad anatomy, bad hands, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+    novelAnlasGuard: true,
+    novelSm: false,
+    novelSmDyn: false,
+    novelDecrisper: false,
+    novelVarietyBoost: false,
+    _novelSyncedKey: '',
     // NPC refs (flat storage)
     charRef: { name: '', imageBase64: '', imagePath: '' },
     userRef: { name: '', imageBase64: '', imagePath: '' },
@@ -2847,7 +2866,7 @@ const VIDEO_MODEL_KEYWORDS = [
 ];
 
 function isImageModel(modelId) {
-    const mid = modelId.toLowerCase();
+    const mid = String(modelId || '').toLowerCase();
     for (const kw of VIDEO_MODEL_KEYWORDS) { if (mid.includes(kw)) return false; }
     if (mid.includes('vision') && mid.includes('preview')) return false;
     for (const kw of IMAGE_MODEL_KEYWORDS) { if (mid.includes(kw)) return true; }
@@ -2855,13 +2874,95 @@ function isImageModel(modelId) {
 }
 
 function isGeminiModel(modelId) {
-    return modelId.toLowerCase().includes('nano-banana');
+    return String(modelId || '').toLowerCase().includes('nano-banana');
 }
 
-// ── Naistera/endpoint helpers (from sillyimages-master) ──
+// ── Naistera/NovelAI/endpoint helpers (from sillyimages-master) ──
 const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
+const NOVELAI_MODELS = Object.freeze([
+    { value: 'nai-diffusion-5-full', label: 'NAI Diffusion V5 Full (Новинка)' },
+    { value: 'nai-diffusion-5-full-medium', label: 'NAI Diffusion V5 Full Medium (Новинка)' },
+    { value: 'nai-diffusion-5-curated', label: 'NAI Diffusion V5 Curated (Новинка)' },
+    { value: 'nai-diffusion-4-5-full', label: 'NAI Diffusion Anime V4.5 Full' },
+    { value: 'nai-diffusion-4-5-curated', label: 'NAI Diffusion Anime V4.5 Curated' },
+    { value: 'nai-diffusion-4-full', label: 'NAI Diffusion V4 Full' },
+    { value: 'nai-diffusion-4-curated-preview', label: 'NAI Diffusion V4 Curated' },
+    { value: 'nai-diffusion-3', label: 'NAI Diffusion Anime V3' },
+    { value: 'nai-diffusion-furry-3', label: 'NAI Diffusion Furry V3' },
+    { value: 'nai-diffusion-2', label: 'NAI Diffusion Anime V2' },
+    { value: 'custom', label: 'Своя модель (ввести ID вручную)...' },
+]);
+function isPredefinedNovelModel(modelId) {
+    return Boolean(modelId && NOVELAI_MODELS.some(m => m.value === modelId && m.value !== 'custom'));
+}
+function getEffectiveNovelModel(settingsObj) {
+    if (!settingsObj) return 'nai-diffusion-5-full';
+    const m = settingsObj.novelModel || 'nai-diffusion-5-full';
+    if (m === 'custom' || !isPredefinedNovelModel(m)) {
+        const custom = String(settingsObj.novelCustomModel || (m !== 'custom' ? m : '')).trim();
+        return custom || 'nai-diffusion-5-full';
+    }
+    return m;
+}
+const NOVELAI_RESOLUTIONS = Object.freeze([
+    { value: 'auto', label: 'Из промпта (Авто: 832×1216 / 1216×832 / 1024×1024)' },
+    { value: '832x1216', label: '832×1216 (Портрет 2:3 — Opus Free)' },
+    { value: '1216x832', label: '1216×832 (Альбом 3:2 — Opus Free)' },
+    { value: '1024x1024', label: '1024×1024 (Квадрат 1:1 — Opus Free)' },
+    { value: '1024x1536', label: '1024×1536 (Большой портрет)' },
+    { value: '1536x1024', label: '1536×1024 (Большой альбом)' },
+    { value: '1472x1472', label: '1472×1472 (Большой квадрат)' },
+    { value: '1088x1920', label: '1088×1920 (Обои портрет)' },
+    { value: '1920x1088', label: '1920×1088 (Обои альбом)' },
+    { value: '512x768', label: '512×768 (Малый портрет)' },
+    { value: '768x512', label: '768×512 (Малый альбом)' },
+    { value: '640x640', label: '640×640 (Малый квадрат)' },
+]);
+const NOVELAI_SAMPLERS = Object.freeze([
+    { value: 'k_euler_ancestral', label: 'Euler Ancestral (k_euler_ancestral)' },
+    { value: 'k_euler', label: 'Euler (k_euler)' },
+    { value: 'k_dpmpp_2m', label: 'DPM++ 2M (k_dpmpp_2m)' },
+    { value: 'k_dpmpp_sde', label: 'DPM++ SDE (k_dpmpp_sde)' },
+    { value: 'k_dpmpp_2s_ancestral', label: 'DPM++ 2S Ancestral (k_dpmpp_2s_ancestral)' },
+    { value: 'k_dpm_fast', label: 'DPM Fast (k_dpm_fast)' },
+    { value: 'ddim', label: 'DDIM (ddim)' },
+]);
+const NOVELAI_SCHEDULERS = Object.freeze([
+    { value: 'karras', label: 'Karras' },
+    { value: 'native', label: 'Native' },
+    { value: 'exponential', label: 'Exponential' },
+    { value: 'polyexponential', label: 'Polyexponential' },
+]);
+function resolveNovelDimensions(resolutionSetting, promptAspectRatio, anlasGuard) {
+    let width = 832;
+    let height = 1216;
+    const res = String(resolutionSetting || 'auto').trim().toLowerCase();
+    if (res !== 'auto' && /^\d+x\d+$/.test(res)) {
+        const [w, h] = res.split('x').map(Number);
+        if (w >= 64 && h >= 64) { width = w; height = h; }
+    } else {
+        const ar = String(promptAspectRatio || '').trim();
+        if (ar === '1:1') {
+            width = 1024; height = 1024;
+        } else if (ar === '3:2' || ar === '4:3' || ar === '5:4' || ar === '16:9' || ar === '21:9') {
+            width = 1216; height = 832;
+        } else {
+            width = 832; height = 1216;
+        }
+    }
+    if (anlasGuard) {
+        const MAX_PIXELS = 1024 * 1024;
+        const SNAP = 64;
+        if (width * height > MAX_PIXELS) {
+            const ratio = Math.sqrt(MAX_PIXELS / (width * height));
+            width = Math.max(SNAP, Math.floor((width * ratio) / SNAP) * SNAP);
+            height = Math.max(SNAP, Math.floor((height * ratio) / SNAP) * SNAP);
+        }
+    }
+    return { width, height };
+}
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
-const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
+const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', novelai: 'Встроенный прокси Таверны (/api/novelai/generate-image)', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
 function normalizeNaisteraModel(model) {
     const raw = String(model || '').trim().toLowerCase();
@@ -3144,7 +3245,7 @@ function nameIsInPrompt(rawName, lowerPrompt) {
 }
 
 function matchNpcReferences(prompt, npcList) {
-    if (!prompt || !npcList || npcList.length === 0) return [];
+    if (!prompt || typeof prompt !== 'string' || !npcList || npcList.length === 0) return [];
     const lowerPrompt = prompt.toLowerCase();
     const matched = [];
     for (const npc of npcList) {
@@ -4344,14 +4445,388 @@ async function generateImageNaistera(prompt, style, options = {}) {
     return result.data_url;
 }
 
+let _sessionSyncedNovelKey = '';
+
+async function syncNovelApiKeyIfNeeded(rawKey) {
+    const key = sanitizeApiKey(rawKey);
+    if (!key) return false;
+    const settings = getSettings();
+    if (key === _sessionSyncedNovelKey && key === settings._novelSyncedKey) {
+        return true;
+    }
+    const resp = await fetch('/api/secrets/write', {
+        method: 'POST',
+        headers: SillyTavern.getContext().getRequestHeaders(),
+        body: JSON.stringify({ key: 'api_key_novel', value: key, label: 'SLAY Images' }),
+    });
+    if (!resp.ok) {
+        throw new Error(`Не удалось сохранить API ключ NovelAI в секреты Таверны (HTTP ${resp.status})`);
+    }
+    _sessionSyncedNovelKey = key;
+    settings._novelSyncedKey = key;
+    saveSettings();
+    return true;
+}
+
+function parseNovelAICharacters(basePrompt, baseNegative, options = {}) {
+    const cleanBase = String(basePrompt || '').replace(STYLE_BLOCK_RE, '').trim();
+    const rawChars = Array.isArray(options.characters) ? options.characters : [];
+    const parsedChars = [];
+    let hasCoords = false;
+
+    if (rawChars.length > 0) {
+        for (const c of rawChars) {
+            if (!c) continue;
+            if (typeof c === 'string') {
+                const p = c.replace(STYLE_BLOCK_RE, '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+                if (p) parsedChars.push({ name: '', prompt: p, uc: '', center: { x: 0.5, y: 0.5 }, hasCoords: false });
+                continue;
+            }
+            const p = String(c.prompt ?? c.char_caption ?? c.tags ?? c.description ?? '')
+                .replace(STYLE_BLOCK_RE, '')
+                .replace(/^[\s,]+|[\s,]+$/g, '')
+                .trim();
+            if (!p) continue;
+            const uc = String(c.uc ?? c.negative ?? c.negative_prompt ?? '')
+                .replace(/^[\s,]+|[\s,]+$/g, '')
+                .trim();
+            const centerRaw = c.center ?? (Array.isArray(c.centers) ? c.centers[0] : null);
+            const cx = Number(centerRaw?.x);
+            const cy = Number(centerRaw?.y);
+            const validCoord = centerRaw != null && Number.isFinite(cx) && Number.isFinite(cy);
+            if (validCoord) hasCoords = true;
+            parsedChars.push({
+                name: String(c.name ?? c.char ?? c.character ?? '').trim(),
+                prompt: p,
+                uc,
+                center: validCoord
+                    ? { x: Math.max(0, Math.min(1, cx)), y: Math.max(0, Math.min(1, cy)) }
+                    : { x: 0.5, y: 0.5 },
+                hasCoords: validCoord,
+            });
+        }
+    } else if (cleanBase.includes('|')) {
+        const posParts = cleanBase.split(/\\?\|/u).map(s => s.replace(/^[\s,]+|[\s,]+$/g, '').trim());
+        const negParts = String(baseNegative || '').split(/\\?\|/u).map(s => s.replace(/^[\s,]+|[\s,]+$/g, '').trim());
+        const baseOnly = posParts[0] || '';
+        const charPos = posParts.slice(1);
+        const charNeg = negParts.slice(1);
+        for (let i = 0; i < charPos.length; i++) {
+            if (!charPos[i]) continue;
+            parsedChars.push({
+                name: '',
+                prompt: charPos[i],
+                uc: charNeg[i] || '',
+                center: { x: 0.5, y: 0.5 },
+                hasCoords: false,
+            });
+        }
+        return { basePrompt: baseOnly, baseNegative: negParts[0] || '', parsedChars, hasCoords: false };
+    }
+
+    return { basePrompt: cleanBase, baseNegative: String(baseNegative || '').trim(), parsedChars, hasCoords };
+}
+
+function uint8ToBase64(u8) {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < u8.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, u8.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+}
+
+function extractPngSliceFromBytes(bytes) {
+    const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const IEND_CRC = [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+    let start = -1;
+    for (let i = 0; i <= bytes.length - 8; i++) {
+        if (PNG_SIG.every((b, j) => bytes[i + j] === b)) { start = i; break; }
+    }
+    if (start === -1) return null;
+    for (let i = start + 8; i <= bytes.length - 8; i++) {
+        if (IEND_CRC.every((b, j) => bytes[i + j] === b)) {
+            return bytes.subarray(start, i + 8);
+        }
+    }
+    return bytes.subarray(start);
+}
+
+async function extractNovelAIImageFromArrayBuffer(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    if (!bytes.length) throw new Error('Пустой ответ от NovelAI');
+
+    // 1. JSON response ({ images: [{ image: "..." }] } or raw base64 string)
+    if (bytes[0] === 0x7b || bytes[0] === 0x5b) {
+        const text = new TextDecoder().decode(bytes).trim();
+        const parsed = JSON.parse(text);
+        const b64 = parsed?.images?.[0]?.image || parsed?.image || parsed?.data?.[0]?.b64_json || parsed?.output;
+        if (typeof b64 === 'string' && b64.trim()) {
+            const clean = b64.trim();
+            return clean.startsWith('data:') ? clean : `data:image/png;base64,${clean}`;
+        }
+        throw new Error(`NovelAI JSON response missing image data: ${text.slice(0, 200)}`);
+    }
+
+    // 2. ZIP archive (PK\x03\x04)
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const method = view.getUint16(8, true);
+        let compSize = view.getUint32(18, true);
+        const fnLen = view.getUint16(26, true);
+        const extLen = view.getUint16(28, true);
+        const dataOffset = 30 + fnLen + extLen;
+
+        if (!compSize) {
+            for (let i = bytes.length - 46; i >= dataOffset; i--) {
+                if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x01 && bytes[i + 3] === 0x02) {
+                    compSize = view.getUint32(i + 20, true);
+                    break;
+                }
+            }
+        }
+
+        const rawEntry = compSize > 0 ? bytes.subarray(dataOffset, dataOffset + compSize) : bytes.subarray(dataOffset);
+        if (method === 0) {
+            const pngSlice = extractPngSliceFromBytes(rawEntry) || rawEntry;
+            return `data:image/png;base64,${uint8ToBase64(pngSlice)}`;
+        }
+        if (method === 8 && typeof DecompressionStream !== 'undefined') {
+            const ds = new DecompressionStream('deflate-raw');
+            const writer = ds.writable.getWriter();
+            writer.write(rawEntry).catch(() => {});
+            writer.close().catch(() => {});
+            const decompressedBuf = await new Response(ds.readable).arrayBuffer();
+            const decompressedBytes = new Uint8Array(decompressedBuf);
+            const pngSlice = extractPngSliceFromBytes(decompressedBytes) || decompressedBytes;
+            return `data:image/png;base64,${uint8ToBase64(pngSlice)}`;
+        }
+    }
+
+    // 3. Raw PNG or embedded PNG bytes
+    const pngSlice = extractPngSliceFromBytes(bytes);
+    if (pngSlice) {
+        return `data:image/png;base64,${uint8ToBase64(pngSlice)}`;
+    }
+
+    // 4. Plain base64 text response
+    const asText = new TextDecoder().decode(bytes).trim();
+    if (asText.startsWith('data:image/') || /^[A-Za-z0-9+/=\r\n]+$/.test(asText.slice(0, 128))) {
+        return asText.startsWith('data:') ? asText : `data:image/png;base64,${asText}`;
+    }
+
+    throw new Error(`Не удалось извлечь PNG из ответа NovelAI (${bytes.length} байт)`);
+}
+
+async function generateImageNovelAI(prompt, style, options = {}) {
+    const settings = getSettings();
+    if (settings.apiKey) {
+        await syncNovelApiKeyIfNeeded(settings.apiKey);
+    }
+
+    const model = getEffectiveNovelModel(settings);
+    const isV5 = model.startsWith('nai-diffusion-5') || model.includes('diffusion-5');
+    const isV4 = model.includes('nai-diffusion-4') || isV5;
+    const sampler = settings.novelSampler || 'k_euler_ancestral';
+    const scheduler = isV5 ? 'karras' : (settings.novelScheduler || 'karras');
+    const anlasGuard = settings.novelAnlasGuard !== false;
+    const { width, height } = resolveNovelDimensions(settings.novelResolution, options.aspectRatio, anlasGuard);
+    const rawSteps = Number(settings.novelSteps) || 28;
+    const steps = anlasGuard ? Math.min(28, Math.max(1, rawSteps)) : Math.max(1, Math.min(50, rawSteps));
+    const scale = Number.isFinite(Number(settings.novelScale)) ? Number(settings.novelScale) : 5;
+    const seedVal = Number(settings.novelSeed);
+    const seed = Number.isInteger(seedVal) && seedVal >= 0 ? seedVal : undefined;
+    const resolvedSeed = seed !== undefined ? seed : Math.floor(Math.random() * 4294967295);
+
+    const sm = !isV4 && sampler !== 'ddim' && Boolean(settings.novelSm);
+    const sm_dyn = sm && Boolean(settings.novelSmDyn);
+    const canUpscale = ['nai-diffusion-2', 'nai-diffusion-3', 'nai-diffusion-furry-3'].includes(model) && !anlasGuard;
+    const upscale_ratio = canUpscale ? (Number(settings.novelUpscale) || 1) : 1;
+
+    const combinedNegative = [String(settings.novelNegative || '').trim(), String(options.uc || '').trim()]
+        .map(s => s.replace(/^[\s,]+|[\s,]+$/g, ''))
+        .filter(Boolean)
+        .join(', ');
+
+    const { basePrompt: cleanPrompt, baseNegative, parsedChars, hasCoords } = parseNovelAICharacters(prompt, combinedNegative, options);
+    const cleanStyle = String(style || '').trim();
+    const prefix = String(settings.novelPrefix || '').trim();
+    const fullBasePrompt = [prefix, cleanStyle, cleanPrompt]
+        .map(s => s.replace(/^[\s,]+|[\s,]+$/g, ''))
+        .filter(Boolean)
+        .join(', ');
+
+    const characterPrompts = parsedChars.map(c => ({
+        prompt: c.prompt,
+        uc: c.uc,
+        center: c.center,
+        enabled: true,
+    }));
+
+    const v4_prompt = {
+        caption: {
+            base_caption: fullBasePrompt,
+            char_captions: parsedChars.map(c => ({
+                char_caption: c.prompt,
+                centers: [c.center],
+            })),
+        },
+        use_coords: hasCoords,
+        use_order: true,
+    };
+
+    const v4_negative_prompt = {
+        caption: {
+            base_caption: baseNegative,
+            char_captions: parsedChars.map(c => ({
+                char_caption: c.uc,
+                centers: [c.center],
+            })),
+        },
+        legacy_uc: false,
+    };
+
+    iigLog('INFO', `NovelAI: model=${model}, size=${width}x${height}, steps=${steps}, scale=${scale}, sampler=${sampler}, scheduler=${scheduler}, chars=${parsedChars.length}, coords=${hasCoords}, anlasGuard=${anlasGuard}`);
+
+    // Primary path when API key is available in SLAY settings AND we have multi-character prompts (or V4/V5):
+    // Call https://image.novelai.net/ai/generate-image directly because SillyTavern's built-in
+    // /api/novelai/generate-image endpoint hardcodes characterPrompts: [] and char_captions: [],
+    // which strips all character descriptions and coordinates.
+    const directKey = String(settings.apiKey || '').trim();
+    if (directKey && isV4 && parsedChars.length > 0 && upscale_ratio <= 1) {
+        const naiParameters = {
+            params_version: isV5 ? 4 : 3,
+            prefer_brownian: true,
+            negative_prompt: baseNegative,
+            height,
+            width,
+            scale,
+            seed: resolvedSeed,
+            sampler,
+            noise_schedule: isV5 ? 'karras' : scheduler,
+            steps,
+            n_samples: 1,
+            ucPreset: 0,
+            qualityToggle: false,
+            add_original_image: false,
+            controlnet_strength: 1,
+            deliberate_euler_ancestral_bug: false,
+            dynamic_thresholding: isV5 ? false : Boolean(settings.novelDecrisper),
+            legacy: false,
+            legacy_v3_extend: false,
+            sm: false,
+            sm_dyn: false,
+            uncond_scale: 1,
+            skip_cfg_above_sigma: (!isV5 && settings.novelVarietyBoost)
+                ? Math.pow((width * height) / 1011712, 0.5) * (model.includes('nai-diffusion-4-5') ? 58 : 19)
+                : null,
+            use_coords: hasCoords,
+            legacy_uc: false,
+            characterPrompts,
+            reference_image_multiple: [],
+            reference_information_extracted_multiple: [],
+            reference_strength_multiple: [],
+            v4_negative_prompt,
+            v4_prompt,
+        };
+        if (isV5) {
+            naiParameters.prompt = fullBasePrompt;
+            naiParameters.extra_noise_seed = resolvedSeed;
+        }
+
+        try {
+            const directResp = await robustFetch('https://image.novelai.net/ai/generate-image', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${directKey}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'generate',
+                    input: fullBasePrompt,
+                    model,
+                    parameters: naiParameters,
+                }),
+            });
+
+            if (directResp.ok) {
+                const buf = await directResp.arrayBuffer();
+                return await extractNovelAIImageFromArrayBuffer(buf);
+            }
+            const errText = await directResp.text().catch(() => '');
+            if (directResp.status === 401 || directResp.status === 402 || directResp.status === 429) {
+                throw new Error(`NovelAI Error (${directResp.status}): ${errText || directResp.statusText}`);
+            }
+            iigLog('WARN', `NovelAI direct API returned ${directResp.status} (${errText.slice(0, 120)}), falling back to ST backend with merged character prompts`);
+        } catch (directErr) {
+            if (/NovelAI Error \((?:401|402|429)\)/.test(String(directErr?.message || ''))) {
+                throw directErr;
+            }
+            iigLog('WARN', `NovelAI direct fetch fallback (${directErr?.message || directErr}) — using ST backend with merged character prompts`);
+        }
+    }
+
+    // Fallback / single-prompt path via SillyTavern's /api/novelai/generate-image:
+    // Merge character prompts into base prompt and character UCs into negative_prompt so
+    // ST's backend never drops character descriptions even when char_captions is hardcoded to [].
+    const mergedFallbackPrompt = [fullBasePrompt, ...parsedChars.map(c => c.prompt)]
+        .filter(Boolean)
+        .join(', ');
+    const mergedFallbackNegative = [baseNegative, ...parsedChars.map(c => c.uc)]
+        .filter(Boolean)
+        .join(', ');
+
+    const body = {
+        prompt: mergedFallbackPrompt,
+        model,
+        sampler,
+        scheduler,
+        steps,
+        scale,
+        width,
+        height,
+        negative_prompt: mergedFallbackNegative,
+        upscale_ratio,
+        decrisper: isV5 ? false : Boolean(settings.novelDecrisper),
+        variety_boost: isV5 ? false : Boolean(settings.novelVarietyBoost),
+        sm,
+        sm_dyn,
+        seed,
+        use_coords: hasCoords,
+        characterPrompts,
+        v4_prompt,
+        v4_negative_prompt,
+    };
+
+    const response = await robustFetch('/api/novelai/generate-image', {
+        method: 'POST',
+        headers: SillyTavern.getContext().getRequestHeaders(),
+        body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        if (response.status === 400 && !settings.apiKey) {
+            throw new Error('NovelAI API Key не найден. Введите Persistent API Token в поле API Key (или в настройках NovelAI самой Таверны).');
+        }
+        throw new Error(`NovelAI Error (${response.status}): ${errText || response.statusText}`);
+    }
+
+    const base64Data = (await response.text()).trim();
+    if (!base64Data) {
+        throw new Error('Пустой ответ от /api/novelai/generate-image');
+    }
+    return base64Data.startsWith('data:') ? base64Data : `data:image/png;base64,${base64Data}`;
+}
+
 // ── Validation ──
 function validateSettings() {
     const settings = getSettings();
     const errors = [];
-    if (!settings.endpoint && settings.apiType !== 'naistera') errors.push('URL эндпоинта не настроен');
-    if (!settings.apiKey) errors.push('API ключ не настроен');
+    if (!settings.endpoint && settings.apiType !== 'naistera' && settings.apiType !== 'novelai') errors.push('URL эндпоинта не настроен');
+    if (!settings.apiKey && settings.apiType !== 'novelai') errors.push('API ключ не настроен');
     // Custom endpoints often pin the model server-side — model is optional there.
-    if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
+    if (settings.apiType !== 'naistera' && settings.apiType !== 'novelai' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
     if (settings.apiType === 'naistera') {
         const m = normalizeNaisteraModel(settings.naisteraModel);
         if (!NAISTERA_MODELS.includes(m)) errors.push('Для Naistera выберите модель: grok / nano banana');
@@ -5055,6 +5530,87 @@ function findLiveImgByInstruction(detachedImg) {
     return null;
 }
 
+function normalizeIigInstructionData(rawData, mediaEl = null) {
+    let d = rawData;
+    if (typeof d === 'string') {
+        try { d = JSON.parse(d); } catch (_) { return { prompt: d, style: '', characters: [], uc: '', bubbles: [] }; }
+    }
+    if (!d || typeof d !== 'object') d = {};
+    let prompt = d.prompt ?? d.Prompt ?? d.PROMPT ?? d.promt ?? d.Promt ?? d.propmt ?? d.promp ?? d.prmpt
+        ?? d['промпт'] ?? d['промт'] ?? d.positive ?? d.positive_prompt ?? d.image_prompt ?? d.imagePrompt
+        ?? d.base ?? d.Base ?? d.BASE ?? d.base_caption ?? d.v4_prompt?.caption?.base_caption
+        ?? d.description ?? d.Description ?? d.tags ?? d.text ?? d.scene ?? d.query ?? d.caption
+        ?? d.parameters?.prompt ?? d.data?.prompt ?? '';
+    if (!prompt) {
+        const metaKeys = new Set(['style', 'aspect_ratio', 'aspectratio', 'image_size', 'imagesize', 'quality', 'preset', 'model', 'seed', 'steps', 'scale', 'sampler', 'negative', 'negative_prompt', 'uc', 'width', 'height']);
+        for (const [k, v] of Object.entries(d)) {
+            if (!metaKeys.has(k.toLowerCase()) && typeof v === 'string' && v.trim()) {
+                prompt = v;
+                break;
+            }
+        }
+    }
+
+    const rawChars = Array.isArray(d.characters) ? d.characters
+        : (Array.isArray(d.characterPrompts) ? d.characterPrompts
+            : (Array.isArray(d.v4_prompt?.caption?.char_captions) ? d.v4_prompt.caption.char_captions : []));
+    const characters = rawChars.map(c => {
+        if (!c) return null;
+        if (typeof c === 'string') {
+            const cp = c.trim();
+            return cp ? { name: '', prompt: cp, uc: '', center: null } : null;
+        }
+        const cp = String(c.prompt ?? c.char_caption ?? c.tags ?? c.description ?? '').trim();
+        if (!cp) return null;
+        const uc = String(c.uc ?? c.negative ?? c.negative_prompt ?? '').trim();
+        const centerRaw = c.center ?? (Array.isArray(c.centers) ? c.centers[0] : null);
+        const cx = Number(centerRaw?.x);
+        const cy = Number(centerRaw?.y);
+        const center = (centerRaw != null && Number.isFinite(cx) && Number.isFinite(cy))
+            ? { x: cx, y: cy }
+            : null;
+        return {
+            name: String(c.name ?? c.char ?? c.character ?? '').trim(),
+            prompt: cp,
+            uc,
+            center,
+        };
+    }).filter(Boolean);
+
+    let style = d.style ?? d.Style ?? d.STYLE ?? '';
+    if (!prompt && mediaEl && typeof mediaEl.getAttribute === 'function') {
+        const attrPrompt = mediaEl.getAttribute('prompt') || mediaEl.getAttribute('data-prompt') || mediaEl.getAttribute('alt') || '';
+        if (attrPrompt.trim()) {
+            prompt = attrPrompt;
+        } else {
+            const titleAttr = mediaEl.getAttribute('title') || '';
+            const m = titleAttr.match(/Prompt:\s*([\s\S]+)$/i);
+            if (m && m[1].trim()) prompt = m[1].trim();
+        }
+    }
+    if (!prompt && style) {
+        prompt = style;
+        style = '';
+    }
+    if (!prompt && characters.length > 0) {
+        prompt = characters.map(c => c.prompt).join(', ');
+    }
+    const uc = String(d.uc ?? d.negative_prompt ?? d.negative ?? '');
+    const bubbles = Array.isArray(d.bubbles) ? d.bubbles : [];
+    return {
+        ...d,
+        prompt: String(prompt ?? ''),
+        style: String(style ?? ''),
+        characters,
+        uc,
+        bubbles,
+        aspect_ratio: d.aspect_ratio || d.aspectRatio || null,
+        image_size: d.image_size || d.imageSize || null,
+        quality: d.quality || null,
+        preset: d.preset || null,
+    };
+}
+
 // Wrap a generated <img> (with data-iig-instruction) in a container and attach a top-left regen button.
 // Idempotent — safe to call multiple times on the same img. Works for newly-generated images AND
 // already-rendered ones (e.g. after page reload, chat swipe).
@@ -5095,6 +5651,7 @@ function attachRegenButton(imgEl) {
                 .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
             try { data = JSON.parse(decoded); }
             catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+            data = normalizeIigInstructionData(data, imgEl);
         } catch (err) {
             toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
             icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
@@ -5148,7 +5705,9 @@ function attachRegenButton(imgEl) {
         try {
             const result = await generateImageWithRetry(data.prompt, data.style, (s) => { if (overlayLabel?.isConnected) overlayLabel.textContent = s; }, {
                 aspectRatio: data.aspect_ratio, imageSize: data.image_size,
-                quality: data.quality, preset: data.preset, messageId,
+                quality: data.quality, preset: data.preset,
+                characters: data.characters, uc: data.uc, bubbles: data.bubbles,
+                messageId,
             });
             if (overlayLabel?.isConnected) overlayLabel.textContent = 'Сохранение...';
             if (overlayTimer?.isConnected) overlayTimer.textContent = '';
@@ -5320,7 +5879,8 @@ function buildPersistedVideoTag(templateHtml, persistedSrc, posterSrc = '') {
 // why only Russian names broke. Only touches &#...; patterns — safe for everything
 // else. Bonus: the model also receives clean Cyrillic instead of entity text.
 function decodeNumericEntities(str) {
-    if (typeof str !== 'string' || str.indexOf('&#') === -1) return str;
+    if (typeof str !== 'string') return String(str ?? '');
+    if (str.indexOf('&#') === -1) return str;
     return str
         .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch (e) { return m; } })
         .replace(/&#(\d+);/g, (m, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch (e) { return m; } });
@@ -5333,9 +5893,27 @@ function decodeNumericEntities(str) {
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
     validateSettings();
     const settings = getSettings();
+    prompt = typeof prompt === 'string' ? prompt : String(prompt ?? '');
+    style = typeof style === 'string' ? style : String(style ?? '');
+    if (!prompt.trim() && style.trim()) {
+        prompt = style;
+        style = '';
+    }
     // Normalize the prompt BEFORE name-matching and before it's sent to the API.
     // This is the single chokepoint where charInPrompt/userInPrompt are computed
     // and where the request body is built, so decoding here fixes both.
+    const rawOptionsChars = Array.isArray(options.characters) ? options.characters : [];
+    const normalizedChars = rawOptionsChars.map(c => {
+        if (!c || typeof c !== 'object') return c;
+        return {
+            ...c,
+            name: decodeNumericEntities(String(c.name || '')),
+            prompt: decodeNumericEntities(String(c.prompt || '')),
+            uc: decodeNumericEntities(String(c.uc || '')),
+        };
+    });
+    options = { ...options, characters: normalizedChars };
+
     {
         const _before = prompt;
         prompt = decodeNumericEntities(prompt);
@@ -5343,6 +5921,12 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             const m = (_before.match(/&#x?[0-9a-fA-F]+;/g) || []).slice(0, 6).join(' ');
             iigLog('INFO', `decoded numeric HTML entities in prompt (sample: ${m}) — Cyrillic names should now match`);
         }
+    }
+    if (!prompt.trim() && normalizedChars.length > 0) {
+        prompt = normalizedChars.map(c => c?.prompt || '').filter(Boolean).join(', ');
+    }
+    if (!prompt.trim()) {
+        throw new Error('В теге картинки пустой промпт — нейросеть (LLM) не записала описание сцены в тег');
     }
     // Override with user-selected SLAY style if configured
     if (settings.slayStyle) {
@@ -5363,7 +5947,11 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     const refs = getCurrentCharacterRefs();
     const charDisplayName = getDefaultCharRefName(refs);
     const userDisplayName = getDefaultUserRefName(refs);
-    const lowerPrompt = prompt.toLowerCase();
+    const fullSearchText = [
+        prompt,
+        ...normalizedChars.map(c => `${c?.name || ''} ${c?.prompt || ''}`),
+    ].join(' ');
+    const lowerPrompt = fullSearchText.toLowerCase();
     const charInPrompt = nameIsInPrompt(charDisplayName, lowerPrompt);
     const userInPrompt = nameIsInPrompt(userDisplayName, lowerPrompt);
     // Refs ship only when their owner is explicitly named in the image prompt. This restores
@@ -5380,7 +5968,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // ── Multimodal refs (base64 + labels) for Gemini AND OpenAI-compatible chat.completions ──
     // Custom + images/generations body has no slot for refs — don't waste time
     // downloading/encoding avatars that generateImageOpenAI would then discard.
-    const _skipRefs = settings.apiType === 'custom' && (settings.customBodyFormat || 'chat') === 'images';
+    const _skipRefs = settings.apiType === 'novelai' || (settings.apiType === 'custom' && (settings.customBodyFormat || 'chat') === 'images');
     if (settings.apiType !== 'naistera' && !_skipRefs) {
         const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
         const pushRef = (image, label, name = '') => {
@@ -5426,7 +6014,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
 
         // 4. Matched NPCs
-        const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
+        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const b64 = npc.imagePath ? await loadRefImageAsBase64(npc.imagePath) : (npc.imageBase64 || npc.imageData);
@@ -5492,7 +6080,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             }
         }
         // 4. NPC faces (matched against prompt)
-        const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
+        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
@@ -5527,11 +6115,43 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         iigLog('INFO', `Wardrobe bot desc (${botDesc.length} chars): ${botDesc.substring(0, 150)}`);
         iigLog('INFO', `Wardrobe user desc (${userDesc.length} chars): ${userDesc.substring(0, 150)}`);
         const wardrobeParts = [];
-        if (botDesc && charInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [Character's current outfit: ${botDesc}]`);
-        if (userDesc && userInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [User's current outfit: ${userDesc}]`);
+        if (settings.apiType === 'novelai') {
+            let botInjectedToChar = false;
+            let userInjectedToChar = false;
+            if (normalizedChars.length > 0) {
+                for (const c of normalizedChars) {
+                    const cText = `${c?.name || ''} ${c?.prompt || ''}`.toLowerCase();
+                    if (botDesc && charInPrompt && !botInjectedToChar && nameIsInPrompt(charDisplayName, cText)) {
+                        c.prompt = `${botDesc}, ${c.prompt}`;
+                        botInjectedToChar = true;
+                    }
+                    if (userDesc && userInPrompt && !userInjectedToChar && nameIsInPrompt(userDisplayName, cText)) {
+                        c.prompt = `${userDesc}, ${c.prompt}`;
+                        userInjectedToChar = true;
+                    }
+                }
+            }
+            if (botDesc && charInPrompt && !botInjectedToChar) wardrobeParts.push(botDesc);
+            if (userDesc && userInPrompt && !userInjectedToChar) wardrobeParts.push(userDesc);
+        } else {
+            if (botDesc && charInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [Character's current outfit: ${botDesc}]`);
+            if (userDesc && userInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [User's current outfit: ${userDesc}]`);
+        }
         if (wardrobeParts.length > 0) {
-            prompt = `${wardrobeParts.join(' ')}\n${prompt}`;
+            prompt = settings.apiType === 'novelai'
+                ? `${wardrobeParts.join(', ')}, ${prompt}`
+                : `${wardrobeParts.join(' ')}\n${prompt}`;
             iigLog('INFO', `Wardrobe v4 descriptions injected: ${wardrobeParts.join(' | ').substring(0, 200)}`);
+        }
+    }
+
+    // For non-NovelAI providers, append structured characters array into prompt text so descriptions aren't lost
+    if (settings.apiType !== 'novelai' && normalizedChars.length > 0) {
+        const charLines = normalizedChars
+            .filter(c => c?.prompt)
+            .map((c, idx) => `${c.name || `Character ${idx + 1}`}: ${c.prompt}`);
+        if (charLines.length > 0) {
+            prompt = `${prompt}\nCharacters:\n${charLines.join('\n')}`;
         }
     }
 
@@ -5542,6 +6162,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             let generated;
             if (settings.apiType === 'naistera') {
                 generated = await generateImageNaistera(prompt, style, { ...options, referenceImages: referenceDataUrls, referenceLabels: naisteraRefLabels, videoTestMode: enableVideoTest, videoEveryN: settings.naisteraVideoEveryN });
+            } else if (settings.apiType === 'novelai') {
+                generated = await generateImageNovelAI(prompt, style, options);
             } else if (settings.apiType === 'gemini') {
                 // Strictly user's choice — don't auto-route via isGeminiModel().
                 // Some OpenAI-compat routers (llmrouter, openrouter) host Gemini
@@ -5645,8 +6267,8 @@ async function parseImageTags(text, options = {}) {
 
         try {
             let normalizedJson = instructionJson.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
-            const data = JSON.parse(normalizedJson);
-            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null });
+            const data = normalizeIigInstructionData(JSON.parse(normalizedJson));
+            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', characters: data.characters || [], uc: data.uc || '', bubbles: data.bubbles || [], aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null });
             iigLog('INFO', `Found NEW tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) { iigLog('WARN', `Parse failed: ${instructionJson.substring(0, 100)}`); }
         searchPos = mediaEnd;
@@ -5672,8 +6294,8 @@ async function parseImageTags(text, options = {}) {
         if (!text.substring(jsonEnd).startsWith(']')) { searchStart = jsonEnd; continue; }
         const tagOnly = text.substring(markerIndex, jsonEnd + 1);
         try {
-            const data = JSON.parse(jsonStr.replace(/'/g, '"'));
-            tags.push({ fullMatch: tagOnly, index: markerIndex, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: false });
+            const data = normalizeIigInstructionData(JSON.parse(jsonStr.replace(/'/g, '"')));
+            tags.push({ fullMatch: tagOnly, index: markerIndex, style: data.style || '', prompt: data.prompt || '', characters: data.characters || [], uc: data.uc || '', bubbles: data.bubbles || [], aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: false });
             iigLog('INFO', `Found LEGACY tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) { iigLog('WARN', `Legacy parse failed: ${jsonStr.substring(0, 100)}`); }
         searchStart = jsonEnd + 1;
@@ -5748,7 +6370,7 @@ function getErrorImagePath() {
     // await import(), which creates no script element — but it costs nothing and
     // covers builds that inject a tag.)
     const matchesUs = (p) => {
-        const s = p.toLowerCase();
+        const s = String(p || '').toLowerCase();
         return s.includes('slay') || s.includes('sillyimages') || s.includes('notsosillynotsoimages') || s.includes('inline_image_gen');
     };
     for (const script of document.querySelectorAll('script[src*="index.js"]')) {
@@ -5851,6 +6473,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
             .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
         try { data = JSON.parse(decoded); }
         catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+        data = normalizeIigInstructionData(data, errorEl);
     } catch (err) {
         toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
         errorEl.dataset.iigRetrying = '0';
@@ -5872,7 +6495,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     try {
         const result = await generateImageWithRetry(data.prompt, data.style,
             (s) => { if (labelEl?.isConnected) labelEl.textContent = s; },
-            { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, messageId });
+            { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, characters: data.characters, uc: data.uc, bubbles: data.bubbles, messageId });
         if (labelEl?.isConnected) labelEl.textContent = 'Сохранение...';
         if (timerEl?.isConnected) timerEl.textContent = '';
         const imagePath = isGeneratedVideoResult(result)
@@ -5980,7 +6603,7 @@ async function processMessageTags(messageId) {
                     const decoded = instruction.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
                     const normalizedSearch = searchPrompt.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
                     if (decoded.includes(normalizedSearch)) { targetElement = img; break; }
-                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (d.prompt?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
+                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if ((d.prompt || d.base || '')?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
                     if (instruction.includes(searchPrompt)) { targetElement = img; break; }
                 }
             }
@@ -6005,7 +6628,7 @@ async function processMessageTags(messageId) {
         const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
         const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
         try {
-            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, characters: tag.characters, uc: tag.uc, bubbles: tag.bubbles, messageId });
 
             labelEl.textContent = 'Сохранение...';
             if (timerEl) timerEl.textContent = '';
@@ -6121,7 +6744,7 @@ async function regenerateMessageImages(messageId) {
                 const statusEl = loadingPlaceholder.querySelector('.iig-status');
                 const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
                 const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
-                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, characters: tag.characters, uc: tag.uc, bubbles: tag.bubbles, messageId });
                 labelEl.textContent = 'Сохранение...';
                 if (timerEl) timerEl.textContent = '';
 
@@ -6304,14 +6927,15 @@ function createSettingsUI() {
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-plug"></i> API</h4>
                     <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
+                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="novelai" ${settings.apiType === 'novelai' ? 'selected' : ''}>NovelAI Diffusion</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
                     <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option></select></div>
                     <p class="hint ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются).</p>
-                    <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
-                    <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
+                    <div class="flex-row ${settings.apiType === 'novelai' ? 'iig-hidden' : ''}" id="slay_endpoint_row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
+                    <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}" placeholder="${settings.apiType === 'novelai' ? 'Persistent API Token (pst-...) или из секретов Таверны' : ''}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
-                    <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
-                    <label class="checkbox_label" id="slay_manual_model_row" style="margin-top:2px;"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
+                    <p id="slay_novel_hint" class="hint ${settings.apiType === 'novelai' ? '' : 'iig-hidden'}">NovelAI: вставьте Persistent API Token (<i>pst-...</i>) — он автоматически сохранится в секреты Таверны, либо оставьте поле пустым, если ключ уже задан в стандартных настройках NovelAI.</p>
+                    <div class="flex-row ${settings.apiType === 'naistera' || settings.apiType === 'novelai' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
+                    <label class="checkbox_label ${settings.apiType === 'naistera' || settings.apiType === 'novelai' ? 'iig-hidden' : ''}" id="slay_manual_model_row" style="margin-top:2px;"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
                     <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>
                 </div>
                 <hr>
@@ -6327,6 +6951,24 @@ function createSettingsUI() {
                     </div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana</option><option value="grok-pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok-pro' ? 'selected' : ''}>Grok Pro</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI</option></select></div>
                     <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
+                    <div id="slay_novel_params" class="${settings.apiType === 'novelai' ? '' : 'iig-hidden'}">
+                        <div class="flex-row"><label>Модель NovelAI</label><select id="slay_novel_model" class="flex1">${NOVELAI_MODELS.map(m => `<option value="${m.value}" ${(isPredefinedNovelModel(settings.novelModel || 'nai-diffusion-5-full') ? (settings.novelModel || 'nai-diffusion-5-full') : 'custom') === m.value ? 'selected' : ''}>${m.label}</option>`).join('')}</select></div>
+                        <div class="flex-row ${isPredefinedNovelModel(settings.novelModel || 'nai-diffusion-5-full') ? 'iig-hidden' : ''}" id="slay_novel_custom_model_row"><label>ID своей модели</label><input type="text" id="slay_novel_custom_model" class="text_pole flex1" value="${sanitizeForHtml(settings.novelCustomModel || (!isPredefinedNovelModel(settings.novelModel || 'nai-diffusion-5-full') && settings.novelModel !== 'custom' ? (settings.novelModel || '') : ''))}" placeholder="например: nai-diffusion-5-curated-medium"></div>
+                        <div class="flex-row"><label>Разрешение</label><select id="slay_novel_resolution" class="flex1">${NOVELAI_RESOLUTIONS.map(r => `<option value="${r.value}" ${(settings.novelResolution || 'auto') === r.value ? 'selected' : ''}>${r.label}</option>`).join('')}</select></div>
+                        <div class="flex-row"><label>Сэмплер</label><select id="slay_novel_sampler" class="flex1">${NOVELAI_SAMPLERS.map(s => `<option value="${s.value}" ${(settings.novelSampler || 'k_euler_ancestral') === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
+                        <div class="flex-row" id="slay_novel_scheduler_row"><label>Планировщик</label><select id="slay_novel_scheduler" class="flex1">${NOVELAI_SCHEDULERS.map(s => `<option value="${s.value}" ${(settings.novelScheduler || 'karras') === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
+                        <div class="flex-row"><label>Шаги (Steps)</label><input type="number" id="slay_novel_steps" class="text_pole flex1" value="${settings.novelSteps ?? 28}" min="1" max="50" step="1"></div>
+                        <div class="flex-row"><label>CFG Scale</label><input type="number" id="slay_novel_scale" class="text_pole flex1" value="${settings.novelScale ?? 5}" min="1" max="10" step="0.1"></div>
+                        <div class="flex-row"><label>Seed (-1 = случ.)</label><input type="number" id="slay_novel_seed" class="text_pole flex1" value="${settings.novelSeed ?? -1}" min="-1" step="1"></div>
+                        <div class="flex-row" id="slay_novel_upscale_row"><label>Апскейл (V2/V3)</label><select id="slay_novel_upscale" class="flex1"><option value="1" ${Number(settings.novelUpscale || 1) === 1 ? 'selected' : ''}>Без апскейла (1x)</option><option value="2" ${Number(settings.novelUpscale) === 2 ? 'selected' : ''}>2x</option><option value="4" ${Number(settings.novelUpscale) === 4 ? 'selected' : ''}>4x</option></select></div>
+                        <div class="flex-row"><label>Префикс промпта</label><input type="text" id="slay_novel_prefix" class="text_pole flex1" value="${sanitizeForHtml(settings.novelPrefix ?? 'best quality, absurdres, aesthetic,')}" placeholder="best quality, absurdres, aesthetic,"></div>
+                        <div class="flex-row" style="align-items:flex-start;"><label style="padding-top:6px;">Негатив. промпт</label><textarea id="slay_novel_negative" class="text_pole flex1" rows="2" placeholder="lowres, bad anatomy, bad hands...">${sanitizeForHtml(settings.novelNegative ?? '')}</textarea></div>
+                        <label class="checkbox_label" style="margin-top:6px;"><input type="checkbox" id="slay_novel_anlas_guard" ${settings.novelAnlasGuard !== false ? 'checked' : ''}><span>🛡️ Anlas Guard (до 28 шагов и 1024×1024 — без траты Anlas с Opus)</span></label>
+                        <label class="checkbox_label" id="slay_novel_variety_row" style="margin-top:4px;"><input type="checkbox" id="slay_novel_variety_boost" ${settings.novelVarietyBoost ? 'checked' : ''}><span>Variety+ (больше разнообразия композиции, V3–V4.5)</span></label>
+                        <label class="checkbox_label" id="slay_novel_decrisper_row" style="margin-top:4px;"><input type="checkbox" id="slay_novel_decrisper" ${settings.novelDecrisper ? 'checked' : ''}><span>Decrisper (динамический порог контраста, V3–V4.5)</span></label>
+                        <label class="checkbox_label" id="slay_novel_sm_row" style="margin-top:4px;"><input type="checkbox" id="slay_novel_sm" ${settings.novelSm ? 'checked' : ''}><span>SMEA (только для V2/V3)</span></label>
+                        <label class="checkbox_label" id="slay_novel_sm_dyn_row" style="margin-top:4px;"><input type="checkbox" id="slay_novel_sm_dyn" ${settings.novelSmDyn ? 'checked' : ''}><span>SMEA DYN (только для V2/V3)</span></label>
+                    </div>
                     <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Не заменять'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
                 </div>
 
@@ -7723,6 +8365,7 @@ function bindSettingsEvents() {
     const updateVisibility = () => {
         const apiType = settings.apiType;
         const isNaistera = apiType === 'naistera';
+        const isNovel = apiType === 'novelai';
         const isGemini = apiType === 'gemini';
         const isOpenAI = apiType === 'openai';
         const isCustom = apiType === 'custom';
@@ -7731,14 +8374,16 @@ function bindSettingsEvents() {
         document.getElementById('slay_settings_body2')?.classList.toggle('iig-hidden', !settings.enabled);
         document.getElementById('slay_custom_format_row')?.classList.toggle('iig-hidden', !isCustom);
         document.getElementById('slay_custom_hint')?.classList.toggle('iig-hidden', !isCustom);
+        document.getElementById('slay_endpoint_row')?.classList.toggle('iig-hidden', isNovel);
 
         const currentNaisModel = normalizeNaisteraModel(settings.naisteraModel);
-        // Custom + images/generations body: no slot for reference images —
+        // Custom + images/generations body or NovelAI: no slot for reference images —
         // hide the refs UI so users don't configure refs that silently vanish.
         const isCustomImages = isCustom && (settings.customBodyFormat || 'chat') === 'images';
-        const supportsRefs = (!isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana') && !isCustomImages;
+        const supportsRefs = (!isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana') && !isCustomImages && !isNovel;
 
-        document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
+        document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera || isNovel);
+        document.getElementById('slay_manual_model_row')?.classList.toggle('iig-hidden', isNaistera || isNovel);
         // size (WxH) is used by openai dall-e style AND custom images/generations
         document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !(isOpenAI || isCustomImages));
         document.getElementById('slay_quality_row')?.classList.toggle('iig-hidden', !isOpenAI);
@@ -7746,6 +8391,24 @@ function bindSettingsEvents() {
         document.getElementById('slay_naistera_aspect_row')?.classList.toggle('iig-hidden', !isNaistera);
         // slay_naistera_preset_row removed — replaced by slay_style_row (always visible)
         document.getElementById('slay_naistera_hint')?.classList.toggle('iig-hidden', !isNaistera);
+        document.getElementById('slay_novel_hint')?.classList.toggle('iig-hidden', !isNovel);
+        document.getElementById('slay_novel_params')?.classList.toggle('iig-hidden', !isNovel);
+        if (isNovel) {
+            const isCustomNovel = !isPredefinedNovelModel(settings.novelModel || 'nai-diffusion-5-full') || settings.novelModel === 'custom';
+            document.getElementById('slay_novel_custom_model_row')?.classList.toggle('iig-hidden', !isCustomNovel);
+            const nModel = String(getEffectiveNovelModel(settings));
+            const isV5 = nModel.startsWith('nai-diffusion-5') || nModel.includes('diffusion-5');
+            const isV4Plus = nModel.includes('nai-diffusion-4') || isV5;
+            const isDdim = (settings.novelSampler || 'k_euler_ancestral') === 'ddim';
+            const canSmea = !isV4Plus && !isDdim;
+            const canUpscale = ['nai-diffusion-2', 'nai-diffusion-3', 'nai-diffusion-furry-3'].includes(nModel) && settings.novelAnlasGuard === false;
+            document.getElementById('slay_novel_scheduler_row')?.classList.toggle('iig-hidden', isV5);
+            document.getElementById('slay_novel_variety_row')?.classList.toggle('iig-hidden', isV5);
+            document.getElementById('slay_novel_decrisper_row')?.classList.toggle('iig-hidden', isV5);
+            document.getElementById('slay_novel_sm_row')?.classList.toggle('iig-hidden', !canSmea);
+            document.getElementById('slay_novel_sm_dyn_row')?.classList.toggle('iig-hidden', !(canSmea && settings.novelSm));
+            document.getElementById('slay_novel_upscale_row')?.classList.toggle('iig-hidden', !canUpscale);
+        }
         // aspect_ratio + image_size live in "gemini params" but generateImageOpenAI
         // injects them into the prompt too ([aspect_ratio: X] [image_size: Y]) —
         // show for gemini, openai, and custom chat-format alike.
@@ -7762,16 +8425,16 @@ function bindSettingsEvents() {
             noRefsHint.className = 'hint';
             noRefsHint.style.color = '#ff9800';
             noRefsHint.style.marginTop = '4px';
-            noRefsHint.textContent = 'Модель не поддерживает референсы';
-            const modelRow = document.getElementById('slay_naistera_model_row');
+            noRefsHint.textContent = 'Модель не поддерживает картинки-референсы (текстовые описания одежды из гардероба работают)';
+            const modelRow = document.getElementById('slay_novel_params') || document.getElementById('slay_naistera_model_row');
             if (modelRow) modelRow.insertAdjacentElement('afterend', noRefsHint);
         }
-        if (noRefsHint) noRefsHint.classList.toggle('iig-hidden', supportsRefs || !isNaistera);
+        if (noRefsHint) noRefsHint.classList.toggle('iig-hidden', supportsRefs || !(isNaistera || isNovel));
 
         const wardrobeHint = document.getElementById('slay_wardrobe_hint');
         if (wardrobeHint) {
-            if (!supportsRefs && isNaistera) {
-                wardrobeHint.textContent = 'Модель не поддерживает референсы. Будут отправляться только текстовые описания.';
+            if (!supportsRefs && (isNaistera || isNovel)) {
+                wardrobeHint.textContent = 'Модель не поддерживает референсы-картинки. Будут отправляться только текстовые описания одежды.';
                 wardrobeHint.style.color = '#ff9800';
             } else {
                 wardrobeHint.textContent = 'Загрузите аутфиты для бота и юзера. Изображение активного аутфита отправится как референс, а словесное описание будет добавлено в промпт.';
@@ -7783,6 +8446,8 @@ function bindSettingsEvents() {
         document.getElementById('slay_naistera_video_frequency_row')?.classList.toggle('iig-hidden', !(isNaistera && settings.naisteraVideoTest));
         const endpointInput = document.getElementById('slay_endpoint');
         if (endpointInput) endpointInput.placeholder = getEndpointPlaceholder(apiType);
+        const keyInput = document.getElementById('slay_api_key');
+        if (keyInput) keyInput.placeholder = isNovel ? 'Persistent API Token (pst-...) или из секретов Таверны' : '';
     };
 
     document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { window.slayWardrobe?.findOrphanImages?.(); });
@@ -7832,6 +8497,8 @@ function bindSettingsEvents() {
         settings.endpoint = p.endpoint || '';
         settings.apiKey = p.apiKey || '';
         settings.model = p.model || '';
+        if (p.novelModel) settings.novelModel = p.novelModel;
+        if (p.novelCustomModel !== undefined) settings.novelCustomModel = p.novelCustomModel;
         settings.customBodyFormat = p.customBodyFormat || 'chat';
         saveSettings();
         // Sync visible inputs to the applied profile
@@ -7843,13 +8510,23 @@ function bindSettingsEvents() {
         if (keyInput) keyInput.value = settings.apiKey;
         const modelInput = document.getElementById('slay_model');
         if (modelInput) modelInput.value = settings.model;
+        const novelModelSel = document.getElementById('slay_novel_model');
+        if (novelModelSel && settings.novelModel) {
+            novelModelSel.value = isPredefinedNovelModel(settings.novelModel) ? settings.novelModel : 'custom';
+        }
+        const novelCustomInput = document.getElementById('slay_novel_custom_model');
+        if (novelCustomInput) {
+            novelCustomInput.value = settings.novelCustomModel || (!isPredefinedNovelModel(settings.novelModel) && settings.novelModel !== 'custom' ? settings.novelModel : '') || '';
+        }
         const fmtSel = document.getElementById('slay_custom_body_format');
         if (fmtSel) fmtSel.value = settings.customBodyFormat;
         updateVisibility();
         toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
     });
     document.getElementById('slay_conn_profile_save')?.addEventListener('click', async () => {
-        const defaultName = settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
+        const defaultName = settings.apiType === 'novelai'
+            ? `NovelAI (${getEffectiveNovelModel(settings)})`
+            : (settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль');
         const raw = await slayPromptInput('Имя профиля подключения:', defaultName);
         const name = (raw || '').trim();
         if (!name) return;
@@ -7860,6 +8537,8 @@ function bindSettingsEvents() {
             endpoint: settings.endpoint,
             apiKey: settings.apiKey,
             model: settings.model,
+            novelModel: settings.novelModel || 'nai-diffusion-5-full',
+            novelCustomModel: settings.novelCustomModel || '',
             customBodyFormat: settings.customBodyFormat || 'chat',
         };
         const existing = profiles.findIndex(x => x.name === name);
@@ -7888,16 +8567,16 @@ function bindSettingsEvents() {
         // Warn, don't clear: reusing one proxy across api types is legitimate, but
         // pasting a new provider's key while the old provider's host is still in the
         // field silently ships that key to the wrong place.
-        if (settings.endpoint && !shouldReplaceEndpointForApiType(next, settings.endpoint) && next !== 'naistera') {
+        if (settings.endpoint && !shouldReplaceEndpointForApiType(next, settings.endpoint) && next !== 'naistera' && next !== 'novelai') {
             try {
                 const host = new URL(settings.endpoint, location.origin).host;
                 toastr.info(`Endpoint остался прежним: ${host}. Если это адрес другого провайдера — поменяйте его перед вводом нового ключа.`, 'SLAY Images', { timeOut: 9000 });
             } catch (e) { /* unparseable endpoint — nothing useful to say */ }
         }
         settings.apiType = next; saveSettings(); updateVisibility();
-        // custom / naistera have no model listing — hand the user the text field.
-        iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' });
-        if (next !== 'custom' && next !== 'naistera' && !settings.manualModel && settings.endpoint && settings.apiKey) {
+        // custom / naistera / novelai have no model listing — hand the user the text field.
+        iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' || next === 'novelai' });
+        if (next !== 'custom' && next !== 'naistera' && next !== 'novelai' && !settings.manualModel && settings.endpoint && settings.apiKey) {
             populateModelDatalist({ silent: true }).catch(() => {});
         }
     });
@@ -7991,8 +8670,8 @@ function bindSettingsEvents() {
     {
         const _s = getSettings();
         const canList = (_s.apiType === 'openai' || _s.apiType === 'gemini') && _s.endpoint && _s.apiKey;
-        // custom / naistera never return a list, so those users must type.
-        iigSyncModelInputMode({ forceManual: _s.apiType === 'custom' || _s.apiType === 'naistera' });
+        // custom / naistera / novelai never return a list, so those users must type.
+        iigSyncModelInputMode({ forceManual: _s.apiType === 'custom' || _s.apiType === 'naistera' || _s.apiType === 'novelai' });
         if (canList && !_s.manualModel) {
             populateModelDatalist({ silent: true })
                 .then(n => { if (!n) iigSyncModelInputMode({ forceManual: true }); })
@@ -8006,6 +8685,23 @@ function bindSettingsEvents() {
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
     document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => { settings.naisteraModel = normalizeNaisteraModel(e.target.value); saveSettings(); updateVisibility(); });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
+    // NovelAI parameter bindings
+    document.getElementById('slay_novel_model')?.addEventListener('change', (e) => { settings.novelModel = e.target.value; saveSettings(); updateVisibility(); });
+    document.getElementById('slay_novel_custom_model')?.addEventListener('input', (e) => { settings.novelCustomModel = e.target.value.trim(); saveSettings(); updateVisibility(); });
+    document.getElementById('slay_novel_resolution')?.addEventListener('change', (e) => { settings.novelResolution = e.target.value; saveSettings(); });
+    document.getElementById('slay_novel_sampler')?.addEventListener('change', (e) => { settings.novelSampler = e.target.value; saveSettings(); updateVisibility(); });
+    document.getElementById('slay_novel_scheduler')?.addEventListener('change', (e) => { settings.novelScheduler = e.target.value; saveSettings(); });
+    document.getElementById('slay_novel_steps')?.addEventListener('input', (e) => { const v = parseInt(e.target.value, 10); settings.novelSteps = Number.isNaN(v) ? 28 : Math.max(1, Math.min(50, v)); saveSettings(); });
+    document.getElementById('slay_novel_scale')?.addEventListener('input', (e) => { const v = parseFloat(e.target.value); settings.novelScale = Number.isNaN(v) ? 5 : Math.max(1, Math.min(10, v)); saveSettings(); });
+    document.getElementById('slay_novel_seed')?.addEventListener('input', (e) => { const v = parseInt(e.target.value, 10); settings.novelSeed = Number.isNaN(v) ? -1 : v; saveSettings(); });
+    document.getElementById('slay_novel_upscale')?.addEventListener('change', (e) => { settings.novelUpscale = parseInt(e.target.value, 10) || 1; saveSettings(); });
+    document.getElementById('slay_novel_prefix')?.addEventListener('input', (e) => { settings.novelPrefix = e.target.value; saveSettings(); });
+    document.getElementById('slay_novel_negative')?.addEventListener('input', (e) => { settings.novelNegative = e.target.value; saveSettings(); });
+    document.getElementById('slay_novel_anlas_guard')?.addEventListener('change', (e) => { settings.novelAnlasGuard = e.target.checked; saveSettings(); updateVisibility(); });
+    document.getElementById('slay_novel_variety_boost')?.addEventListener('change', (e) => { settings.novelVarietyBoost = e.target.checked; saveSettings(); });
+    document.getElementById('slay_novel_decrisper')?.addEventListener('change', (e) => { settings.novelDecrisper = e.target.checked; saveSettings(); });
+    document.getElementById('slay_novel_sm')?.addEventListener('change', (e) => { settings.novelSm = e.target.checked; saveSettings(); updateVisibility(); });
+    document.getElementById('slay_novel_sm_dyn')?.addEventListener('change', (e) => { settings.novelSmDyn = e.target.checked; saveSettings(); });
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
     document.getElementById('slay_image_context_enabled')?.addEventListener('change', (e) => { settings.imageContextEnabled = e.target.checked; saveSettings(); updateVisibility(); });
     document.getElementById('slay_image_context_count')?.addEventListener('input', (e) => { settings.imageContextCount = normalizeImageContextCount(e.target.value); e.target.value = String(settings.imageContextCount); saveSettings(); });
@@ -8036,25 +8732,55 @@ function bindSettingsEvents() {
         const currentSettings = getSettings();
         iigLog('INFO', `Test connection: apiType=${currentSettings.apiType}, endpoint=${currentSettings.endpoint}, apiKey=${currentSettings.apiKey ? 'set' : 'empty'}`);
         try {
-            if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera') throw new Error('Укажите endpoint');
-            if (!currentSettings.apiKey) throw new Error('Укажите API key');
-            if (currentSettings.apiType === 'naistera') {
-                const testUrl = (currentSettings.endpoint || 'https://naistera.org').replace(/\/$/, '');
-                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
-                if (r?.ok) toastr.success('Connection OK', 'SLAY Images');
-                else toastr.warning('Endpoint ответил не-OK', 'SLAY Images');
-            } else if (currentSettings.apiType === 'custom') {
-                // Custom = full URL to a generation endpoint; there is no
-                // /v1/models to probe and a real POST would cost the user a
-                // generation. HEAD tells us at least that the host answers.
-                const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
-                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
-                if (r) toastr.success(`Endpoint отвечает (HTTP ${r.status}). Полная проверка — только реальной генерацией.`, 'SLAY Images', { timeOut: 4000 });
-                else toastr.warning('Endpoint недоступен (сеть/CORS). Проверь URL.', 'SLAY Images');
+            if (currentSettings.apiType === 'novelai') {
+                if (currentSettings.apiKey) {
+                    await syncNovelApiKeyIfNeeded(currentSettings.apiKey);
+                }
+                const r = await fetch('/api/novelai/status', {
+                    method: 'POST',
+                    headers: SillyTavern.getContext().getRequestHeaders(),
+                    body: JSON.stringify({}),
+                });
+                if (r.status === 400) {
+                    throw new Error('NovelAI API Key не задан (введите токен pst-... в поле API Key или в настройках Таверны)');
+                }
+                if (!r.ok) {
+                    throw new Error(`HTTP ${r.status}`);
+                }
+                const data = await r.json();
+                if (data?.error) {
+                    if (currentSettings.apiKey && currentSettings.apiKey.startsWith('pst-')) {
+                        toastr.info('Токен pst-... сохранён в Таверну! (Статус подписки через api.novelai.net недоступен, но генерация через image.novelai.net готова к работе)', 'SLAY Images', { timeOut: 5500 });
+                    } else {
+                        throw new Error('Неверный токен NovelAI (нужен Persistent API Token вида pst-...) или нет связи с NovelAI');
+                    }
+                } else {
+                    const anlas = (data?.trainingStepsLeft?.fixedTrainingStepsLeft ?? 0) + (data?.trainingStepsLeft?.purchasedTrainingSteps ?? 0);
+                    const tierMap = { 0: 'Paper', 1: 'Tablet', 2: 'Scroll', 3: 'Opus' };
+                    const tierName = tierMap[data?.tier] || `Tier ${data?.tier ?? '?'}`;
+                    toastr.success(`NovelAI OK — подписка: ${tierName}, Anlas: ${anlas}`, 'SLAY Images', { timeOut: 4500 });
+                }
             } else {
-                const models = await fetchModels();
-                if (models.length > 0) toastr.success(`Connection OK — ${models.length} моделей`, 'SLAY Images');
-                else toastr.warning('Подключение есть, но моделей для генерации картинок не найдено', 'SLAY Images');
+                if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera') throw new Error('Укажите endpoint');
+                if (!currentSettings.apiKey) throw new Error('Укажите API key');
+                if (currentSettings.apiType === 'naistera') {
+                    const testUrl = (currentSettings.endpoint || 'https://naistera.org').replace(/\/$/, '');
+                    const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
+                    if (r?.ok) toastr.success('Connection OK', 'SLAY Images');
+                    else toastr.warning('Endpoint ответил не-OK', 'SLAY Images');
+                } else if (currentSettings.apiType === 'custom') {
+                    // Custom = full URL to a generation endpoint; there is no
+                    // /v1/models to probe and a real POST would cost the user a
+                    // generation. HEAD tells us at least that the host answers.
+                    const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
+                    const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
+                    if (r) toastr.success(`Endpoint отвечает (HTTP ${r.status}). Полная проверка — только реальной генерацией.`, 'SLAY Images', { timeOut: 4000 });
+                    else toastr.warning('Endpoint недоступен (сеть/CORS). Проверь URL.', 'SLAY Images');
+                } else {
+                    const models = await fetchModels();
+                    if (models.length > 0) toastr.success(`Connection OK — ${models.length} моделей`, 'SLAY Images');
+                    else toastr.warning('Подключение есть, но моделей для генерации картинок не найдено', 'SLAY Images');
+                }
             }
             btn.classList.add('test-success'); setTimeout(() => btn.classList.remove('test-success'), 700);
         } catch (error) {
