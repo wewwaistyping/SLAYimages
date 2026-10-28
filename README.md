@@ -64,8 +64,7 @@ Prompts catalogue to add to your preset: https://wewwaistyping.github.io/slayima
 
 ### Housekeeping
 - **Find unreferenced pictures** — scans both image folders and counts every place a path can be used: saved looks, every wardrobe, reference slots in every chat, the recent ribbon
-- **Choose what to remove** — references only, wardrobe only, or both, with a count for each
-- Tells you how many, not which. For a full sweep of `user/images`, use a dedicated image manager instead
+- **Pick with previews** — every unused file as a thumbnail, grouped by month; untick what to keep, long-press to view it large, then delete the rest
 
 ### Known limitations
 - Gemini starts ignoring clothing past about four reference images — fewer pictures work better
@@ -194,9 +193,7 @@ Max 5 reference images per request. Characters not in the prompt = nothing sent 
 ### Ничьи картинки
 Со временем в папках накапливаются файлы, на которые уже ничего не ссылается — удалённые вещи, заменённые рефы, старые образы.
 
-Кнопка **«Найти ничьи картинки»** проверяет обе папки и считает **все** места, где путь может использоваться: сохранённые образы, любой гардероб, слоты рефов во всех чатах, лента недавних. Потом предлагает выбор: только референсы, только гардероб, или всё сразу — с числом файлов в каждом варианте.
-
-Важно: показывается **сколько**, а не **какие**. Если нужна полноценная уборка всей папки `user/images` — берите отдельный менеджер картинок, здесь такого не будет.
+Кнопка **«Найти ничьи картинки»** проверяет обе папки и считает **все** места, где путь может использоваться: сохранённые образы, любой гардероб, слоты рефов во всех чатах, лента недавних. Потом показывает все лишние файлы маленькими превью по месяцам (вкладки «Референсы» и «Гардероб»). Все отмечены — тапом снимаете то, что хотите оставить, долгим нажатием смотрите картинку крупно. «Удалить отмеченные» — одно подтверждение, и готово.
 
 ### Рекомендации
 - Комбинируйте отправку описания и картинки одежды (настраивается в секции гардероба)
@@ -209,7 +206,6 @@ Max 5 reference images per request. Characters not in the prompt = nothing sent 
 - Gemini может игнорировать одежду при большом количестве рефов (4+). Чем меньше картинок — тем лучше
 - Экспериментальный коллаж (сборка частей в одну картинку) может страдать по качеству — используйте осторожно
 - Автоописание через чат-API отправляет весь контекст чата — рекомендуется прямой API
-- Поиск ничьих картинок говорит, сколько файлов лишние, но не показывает какие именно
 
 ---
 
