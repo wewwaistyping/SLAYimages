@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.1.0';
+const SLAY_VERSION = '5.1.1';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -1906,7 +1906,7 @@ const SLAY_VERSION = '5.1.0';
                         };
                         // robustFetch, not bare fetch: this was the only request in the file with
                         // no timeout at all, so a stalled describe hung the upload with no way out.
-                        const response = await swAbortable(robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }, { gemini: true }), body: JSON.stringify(body), signal }), signal);
+                        const response = await swAbortable(robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }, { gemini: true, url }), body: JSON.stringify(body), signal }), signal);
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
                         try { toastr.clear(_tDescribe); } catch (_) {}
@@ -4781,16 +4781,20 @@ function sanitizeApiKey(raw) {
 
 // Build Authorization headers, failing EARLY with a human-readable error if
 // the key still contains non-ASCII garbage after sanitization.
-// `gemini: true` adds the header Google's own host reads (x-goog-api-key);
-// proxies that speak the Gemini dialect usually take the Bearer form, so both
-// go out. Harmless where unused.
-function buildAuthHeaders(apiKey, extra = {}, { gemini = false } = {}) {
+// `gemini: true` adds the header Google's own host reads (x-goog-api-key) —
+// but only when `url` is Google's. A proxy that does not list that header in
+// its CORS rules makes the browser drop the whole request ("нет связи"),
+// which is what 5.1.0 did to Gemini-compatible proxies. Proxies get Bearer only.
+function slayIsGoogleHost(url) {
+    try { return /(^|\.)googleapis\.com$/i.test(new URL(url).hostname); } catch (_) { return false; }
+}
+function buildAuthHeaders(apiKey, extra = {}, { gemini = false, url = '' } = {}) {
     const key = sanitizeApiKey(apiKey);
     if (!key) throw new Error('API Key не задан');
     if (!/^[\x20-\x7E]+$/.test(key)) {
         throw new Error('API Key содержит недопустимые символы (кириллица или невидимый юникод из буфера обмена). Очистите поле и вставьте ключ заново.');
     }
-    return { 'Authorization': `Bearer ${key}`, ...(gemini ? { 'x-goog-api-key': key } : {}), ...extra };
+    return { 'Authorization': `Bearer ${key}`, ...(gemini && slayIsGoogleHost(url) ? { 'x-goog-api-key': key } : {}), ...extra };
 }
 
 // HTTP failure with the facts the error card needs: the status (so the
@@ -4846,7 +4850,7 @@ async function fetchModels({ throwOnError = false } = {}) {
     const url = slayModelsUrl(settings.apiType, endpoint);
     try {
         iigLog('INFO', `Fetching models: apiType=${settings.apiType} url=${url}`);
-        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey, {}, { gemini: settings.apiType === 'gemini' }) });
+        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey, {}, { gemini: settings.apiType === 'gemini', url }) });
         if (!response.ok) throw slayHttpError(response.status, await response.text().catch(() => ''), url);
         const data = await response.json();
         const all = slayParseModelList(data);
@@ -5246,7 +5250,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const body = { contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } } };
     iigLog('INFO', `Gemini: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${referenceImages.length}`);
 
-    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }, { gemini: true }), body: JSON.stringify(body) });
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }, { gemini: true, url }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw slayHttpError(response.status, text, url); }
     const result = await response.json();
     const candidates = result.candidates || [];
@@ -11828,7 +11832,7 @@ function bindSettingsEvents() {
             const dgem = dfmt === 'gemini'
                 || (dfmt === 'auto' && String(swS.describeModel || '').toLowerCase().includes('gemini'));
             const url = slayModelsUrl(dgem ? 'gemini' : 'openai', ep);
-            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem }) });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem, url }) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status} — проверяли ${url}`);
             const data = await resp.json();
             const models = slayParseModelList(data).sort();
@@ -11876,7 +11880,7 @@ function bindSettingsEvents() {
             const dgem = dfmt === 'gemini'
                 || (dfmt === 'auto' && String(swS.describeModel || '').toLowerCase().includes('gemini'));
             const url = slayModelsUrl(dgem ? 'gemini' : 'openai', ep);
-            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem }) });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key, {}, { gemini: dgem, url }) });
             if (!resp.ok) throw slayHttpError(resp.status, await resp.text().catch(() => ''), url);
             const data = await resp.json();
             const count = slayParseModelList(data).length;
