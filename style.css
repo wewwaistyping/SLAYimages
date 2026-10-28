@@ -1086,12 +1086,12 @@
     color: rgba(255, 255, 255, 0.55); font-size: 0.75em; max-width: 46vw;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.iig-lightbox-dl, .iig-lightbox-share {
+.iig-lightbox-dl, .iig-lightbox-share, .iig-lightbox-asstyle {
     display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px;
     border-radius: 18px; background: rgba(244, 114, 182, 0.2); border: 1px solid rgba(244, 114, 182, 0.3);
     color: #f9a8d4; font-size: 0.85em; line-height: 1; cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
-.iig-lightbox-dl:hover, .iig-lightbox-share:hover { background: rgba(244, 114, 182, 0.35); }
+.iig-lightbox-dl:hover, .iig-lightbox-share:hover, .iig-lightbox-asstyle:hover { background: rgba(244, 114, 182, 0.35); }
 .iig-lightbox-dl:disabled, .iig-lightbox-share:disabled { opacity: 0.6; cursor: wait; }
 
 .iig-lightbox-caption {
@@ -1827,6 +1827,11 @@
 .slay-cs-l { display: flex; flex-direction: column; gap: 4px; font-size: 0.85em; margin-bottom: 8px; text-align: left; }
 .slay-cs-l input, .slay-cs-l textarea { font-size: 16px; width: 100%; box-sizing: border-box; }
 .slay-cs-l textarea { min-height: 90px; resize: vertical; }
+.slay-cs-cover { position: relative; margin: 0 auto 10px; max-width: 220px; }
+.slay-cs-cover img { display: block; width: 100%; max-height: 160px; object-fit: cover; border-radius: 8px; }
+.slay-cs-cover-del { position: absolute; top: 4px; right: 4px; margin: 0; padding: 4px 7px; min-width: 0; }
+.slay-cs-tools { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin: 0 0 10px; }
+.slay-cs-tools .menu_button { display: inline-flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
 /* status line under «Стиль» (S4) */
 .iig-style-status { font-size: 0.75em; opacity: 0.75; line-height: 1.4; margin: -2px 0 6px; }
 @media (max-width: 600px) {
@@ -2108,7 +2113,10 @@
     /* No backdrop-filter: 98% opaque above it. */
     opacity: 0;
     transform: translateY(8px);
-    transition: opacity 0.18s, transform 0.18s;
+    /* Closed popup is also visibility:hidden, so the browser stops painting
+       it (and its pictures) instead of keeping an invisible layer around. */
+    visibility: hidden;
+    transition: opacity 0.18s, transform 0.18s, visibility 0s 0.18s;
     pointer-events: none;
     color: var(--SmartThemeBodyColor, #e2e2e2);
     font-size: 13px;
@@ -2149,6 +2157,8 @@
     border-radius: 3px;
 }
 .sw-preview-popup.sw-pp-open {
+    visibility: visible;
+    transition: opacity 0.18s, transform 0.18s, visibility 0s;
     opacity: 1;
     transform: translateY(0);
     pointer-events: auto;
@@ -2347,6 +2357,9 @@
        caption strip). */
     gap: 14px 12px;
     align-content: start;
+    /* Tiles are empty boxes sized by aspect-ratio; with plain auto rows the
+       grid squeezed them to ~25px so pictures overlapped. */
+    grid-auto-rows: max-content;
 }
 .sw-pp-sub-item {
     aspect-ratio: 3 / 4;
@@ -2384,6 +2397,16 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+.sw-pp-sub-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center top;
+    border-radius: inherit;
+    pointer-events: none;
 }
 .sw-pp-sub-fav {
     position: absolute;
@@ -2591,8 +2614,8 @@
 }
 
 .iig-saved-card {
-    /* Column layout with a reserved text block: names run from "Liam" to
-       "Eva, Eve, Pozhukhla, Ева", and letting each card size to its own text
+    /* Column layout with a reserved text block: names run from "Jo" to
+       "Anna, Ann, Annie, Анна", and letting each card size to its own text
        made every row ragged. Reserve the two lines up front so the grid is
        even whether a card has one word or four. */
     display: flex;
@@ -2674,7 +2697,7 @@
 .iig-saved-btn:hover { background: rgba(0, 0, 0, 0.85); }
 .iig-saved-remove:hover { background: rgba(220, 38, 38, 0.85); }
 
-/* Note line: the human's own scribble ("Имперская АУ") to tell three Danas
+/* Note line: the human's own scribble ("школьная АУ") to tell three Kates
    apart. Never sent anywhere — deliberately quieter than the name it sits
    under, and clamped so a long note can't stretch the tile. */
 .iig-saved-note {
@@ -2819,7 +2842,7 @@
 }
 .iig-look-thumb { aspect-ratio: 3 / 4; }
 .iig-look-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* The label is what separates "Мафия" from "Колдовстворец" — it gets two full
+/* The label is what separates "Школа" from "Средневековье" — it gets two full
    lines here rather than being squeezed onto a portrait. */
 .iig-look-label {
     padding: 4px 5px;
@@ -3133,7 +3156,7 @@
     .iig-person-name { font-size: 10.5px; }
     .iig-person-badge { min-width: 18px; height: 18px; font-size: 10px; }
 
-    /* Look tiles: wider, so a label like "Колдовстворец" is legible instead of
+    /* Look tiles: wider, so a label like "Средневековье" is legible instead of
        clipped to two cramped lines. */
     .iig-look { width: 86px; }
     .iig-look-label { font-size: 10.5px; padding: 5px 6px; min-height: 2.6em; }
@@ -3735,7 +3758,11 @@
 .iig-info-btn[aria-expanded="true"] { background: var(--slay-pink-soft); opacity: 1; }
 .iig-info-btn:focus-visible { outline: 2px solid var(--slay-pink); outline-offset: 2px; }
 .iig-settings .hint.iig-hint-long { margin: 0 0 2px; }
-.iig-settings .iig-credit { text-align: center; opacity: 0.5; margin-top: 6px; line-height: 1.55; font-size: 0.75em; }
+/* Credits sit under every section, not inside «Ещё»: version + author line, then contributors. */
+.iig-settings .iig-credits { margin-top: 12px; margin-bottom: 14px; padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--slay-pink) 18%, transparent); text-align: center; }
+.iig-settings .iig-credits p { margin: 0; }
+.iig-settings .iig-credit-main { font-size: 0.82em; opacity: 0.75; line-height: 1.5; }
+.iig-settings .iig-credit { text-align: center; opacity: 0.45; margin-top: 3px; line-height: 1.55; font-size: 0.72em; }
 .iig-settings .iig-credit a { color: inherit; text-decoration: underline; }
 .iig-own-conn {
     padding: 10px;
@@ -3750,3 +3777,45 @@
     .iig-sec-bd { padding: 8px 10px 10px; }
     .iig-sec-status { font-size: 0.72em; }
 }
+
+/* Group chat: member chips above the ref slots */
+.slay-ref-members { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; align-items: center; }
+.slay-ref-members[hidden] { display: none; }
+.slay-ref-member { padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 0.85em; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.05); }
+.slay-ref-member.active { background: rgba(219, 112, 147, 0.45); border-color: rgba(219, 112, 147, 0.8); color: #fff; }
+.slay-ref-members-note { flex-basis: 100%; font-size: 0.78em; opacity: 0.7; }
+
+/* Quick wardrobe popup: group member chips (group chats only) */
+.sw-pp-members { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 8px; }
+.sw-pp-members .sw-member { font: inherit; font-size: 12px; padding: 4px 12px; border-radius: 16px; cursor: pointer; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #ccc; }
+.sw-pp-members .sw-member.sw-member-active { background: rgba(219,112,147,0.45); color: #fff; border-color: rgba(219,112,147,0.8); }
+
+/* «Ничьи картинки»: previews with checkmarks, grouped by month */
+.slay-orph-box { max-width: 560px; display: flex; flex-direction: column; height: min(720px, calc(100dvh - 32px)); }
+.slay-orph-box .slay-choose-x { margin-bottom: 8px; }
+.slay-orph-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.slay-orph-tabs:empty { display: none; }
+.slay-orph-tabs button { flex: 1; padding: 7px; border-radius: 9px; font: inherit; font-size: 13px; cursor: pointer; color: inherit; background: rgba(255,255,255,0.05); border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.15)); }
+.slay-orph-tabs button.on { border-color: var(--slay-pink); background: color-mix(in srgb, var(--slay-pink) 18%, transparent); }
+.slay-orph-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; opacity: 0.85; margin-bottom: 8px; }
+.slay-orph-tools button { padding: 4px 10px; border-radius: 7px; font: inherit; font-size: 12px; cursor: pointer; color: inherit; background: rgba(255,255,255,0.06); border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.15)); }
+.slay-orph-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; gap: 14px; padding-right: 2px; }
+.slay-orph-mhead { display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.75; margin-bottom: 6px; }
+.slay-orph-mhead button { border: 0; background: none; color: var(--slay-pink); font: inherit; font-size: 11.5px; text-transform: none; letter-spacing: 0; cursor: pointer; }
+.slay-orph-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); grid-auto-rows: max-content; gap: 6px; }
+.slay-orph-th { position: relative; aspect-ratio: 3 / 4; border-radius: 7px; overflow: hidden; cursor: pointer; border: 2px solid transparent; background: rgba(255,255,255,0.05); -webkit-touch-callout: none; user-select: none; }
+.slay-orph-th img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center top; opacity: 0.35; pointer-events: none; }
+.slay-orph-th.on { border-color: #dc2626; }
+.slay-orph-th.on img { opacity: 1; }
+.slay-orph-ck { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 4px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.5); display: grid; place-items: center; font-size: 11px; color: #fff; }
+.slay-orph-th.on .slay-orph-ck { background: #dc2626; border-color: #dc2626; }
+.slay-orph-kind { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 2px 2px; font-size: 9.5px; text-align: center; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.75)); }
+.slay-orph-foot { display: flex; gap: 8px; margin-top: 10px; }
+.slay-orph-foot .slay-choose-b { flex: 1; }
+.slay-orph-lb { position: fixed; inset: 0; z-index: 100002; background: rgba(0,0,0,0.88); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.slay-orph-lb[hidden] { display: none; }
+.slay-orph-lbcard { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 360px; width: 100%; }
+.slay-orph-lbcard img { max-width: 100%; max-height: 60dvh; border-radius: 10px; object-fit: contain; }
+.slay-orph-lbmeta { font-size: 12.5px; opacity: 0.8; text-align: center; line-height: 1.5; word-break: break-all; }
+.slay-orph-lbrow { display: flex; gap: 8px; width: 100%; }
+.slay-orph-lbrow .slay-choose-b { flex: 1; }

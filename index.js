@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.1.0-exp.2';
+const SLAY_VERSION = '5.1.0';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -91,6 +91,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         wardrobeEnabled: true,
         maxDimension: 512,
         showFloatingBtn: false,
+        quickSwapMobile: false,
         autoDescribe: true,
         describeMode: 'direct',
         describeModel: '',
@@ -199,8 +200,34 @@ const SLAY_VERSION = '5.1.0-exp.2';
         };
     }
 
-    function swCharName() {
+    // Group chats keep their own outfits: one per member plus one shared user
+    // outfit, stored under __group:<id> keys so solo chats never see them.
+    // `member` picks whose outfit (image generation passes the post author);
+    // without it the member chosen in the wardrobe is used.
+    const SW_GROUP_PREFIX = '__group:';
+    const _swGroupMember = {};
+    function swGroupId() {
+        try { return SillyTavern.getContext().groupId || null; } catch (_) { return null; }
+    }
+    function swGroupMembers() {
         const ctx = SillyTavern.getContext();
+        const g = ctx.groups?.find?.(x => x.id === ctx.groupId);
+        if (!g) return [];
+        return (g.members || []).map(a => ctx.characters?.find?.(c => c.avatar === a)?.name).filter(Boolean);
+    }
+    function swMemberName(member) {
+        if (member) return member;
+        const list = swGroupMembers();
+        const picked = _swGroupMember[swGroupId()];
+        return picked && list.includes(picked) ? picked : (list[0] || '');
+    }
+    function swCharName(member) {
+        const ctx = SillyTavern.getContext();
+        const gid = ctx.groupId;
+        if (gid) {
+            const m = swMemberName(member);
+            return m ? `${SW_GROUP_PREFIX}${gid}::${m}` : '';
+        }
         return (ctx.characterId !== undefined && ctx.characters?.[ctx.characterId]) ? (ctx.characters[ctx.characterId].name || '') : '';
     }
 
@@ -239,18 +266,32 @@ const SLAY_VERSION = '5.1.0-exp.2';
     }
 
     // ── Per-character active outfit ──
-    function swGetCharOutfit() {
-        const cn = swCharName();
-        if (!cn) return null;
-        const s = swGetSettings();
-        if (!s.activeOutfits[cn]) s.activeOutfits[cn] = swMakeCharOutfit(null, null);
-        const co = s.activeOutfits[cn];
+    function swEnsureOutfit(s, key) {
+        if (!s.activeOutfits[key]) s.activeOutfits[key] = swMakeCharOutfit(null, null);
+        const co = s.activeOutfits[key];
         // Ensure structure
         if (!co.bot) co.bot = { full: null, top: null, bottom: null, shoes: null, accessories: null, hair: null };
         if (!co.user) co.user = { full: null, top: null, bottom: null, shoes: null, accessories: null, hair: null };
         if (!co.botMode) co.botMode = co.mode || 'full';
         if (!co.userMode) co.userMode = co.mode || 'full';
         return co;
+    }
+    function swGetCharOutfit(member) {
+        const cn = swCharName(member);
+        if (!cn) return null;
+        const s = swGetSettings();
+        const co = swEnsureOutfit(s, cn);
+        if (!cn.startsWith(SW_GROUP_PREFIX)) return co;
+        // Group: bot half from the member, user half shared by the whole group.
+        // Slot objects are the stored ones, so edits land in settings as before.
+        const shared = swEnsureOutfit(s, SW_GROUP_PREFIX + swGroupId());
+        return {
+            get mode() { return co.mode; },
+            bot: co.bot,
+            user: shared.user,
+            get botMode() { return co.botMode; }, set botMode(v) { co.botMode = v; },
+            get userMode() { return shared.userMode; }, set userMode(v) { shared.userMode = v; },
+        };
     }
 
     function swGetSlot(type, cat) {
@@ -404,8 +445,8 @@ const SLAY_VERSION = '5.1.0-exp.2';
         return swTab === 'bot' ? (co.botMode || 'full') : (co.userMode || 'full');
     }
 
-    function swGetModeFor(type) {
-        const co = swGetCharOutfit();
+    function swGetModeFor(type, member) {
+        const co = swGetCharOutfit(member);
         if (!co) return 'full';
         return type === 'bot' ? (co.botMode || 'full') : (co.userMode || 'full');
     }
@@ -555,10 +596,10 @@ const SLAY_VERSION = '5.1.0-exp.2';
 
     // ── Collage builder: merge parts into one image ──
     // Get all parts images for a type (bot/user). Returns array of base64 strings.
-    async function swGetPartsImages(type) {
-        const co = swGetCharOutfit();
+    async function swGetPartsImages(type, member) {
+        const co = swGetCharOutfit(member);
         if (!co) return [];
-        const mode = swGetModeFor(type);
+        const mode = swGetModeFor(type, member);
         if (mode !== 'parts') return [];
 
         const slots = ['top', 'bottom', 'shoes', 'accessories', 'hair'];
@@ -576,8 +617,8 @@ const SLAY_VERSION = '5.1.0-exp.2';
         return images;
     }
 
-    async function swBuildCollage(type) {
-        const images = await swGetPartsImages(type);
+    async function swBuildCollage(type, member) {
+        const images = await swGetPartsImages(type, member);
         if (images.length < 2) return null; // 1 item = send as single ref, not collage
         const collageImages = images.slice(0, 6); // max 6
 
@@ -630,6 +671,11 @@ const SLAY_VERSION = '5.1.0-exp.2';
             .sw-mode-btn { padding:5px 14px; border-radius:16px; cursor:pointer; font-size:13px; border:1px solid rgba(255,255,255,0.15); background:rgba(255,255,255,0.05); color:#ccc; transition:all .2s; user-select:none; }
             .sw-mode-btn:hover { background:rgba(255,255,255,0.1); }
             .sw-mode-btn-active { background:rgba(219,112,147,0.25); color:#f0a0c0; border-color:rgba(219,112,147,0.5); }
+            .sw-members { display:flex; flex-wrap:wrap; gap:6px; padding:8px 12px 0; }
+            .sw-members[hidden], .sw-group-note[hidden] { display:none; }
+            .sw-member { padding:5px 14px; border-radius:16px; cursor:pointer; font-size:13px; border:1px solid rgba(255,255,255,0.15); background:rgba(255,255,255,0.05); color:#ccc; user-select:none; }
+            .sw-member-active { background:rgba(219,112,147,0.45); color:#fff; border-color:rgba(219,112,147,0.8); }
+            .sw-group-note { margin:8px 12px 0; font-size:12px; opacity:.7; }
             .sw-mode-btn-active:hover { background:rgba(219,112,147,0.35); }
 
             .sw-cat-tabs { display:flex; gap:4px; padding:4px 12px; flex-wrap:wrap; }
@@ -645,6 +691,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
             .sw-tagfilter-badge { font-size:11px; line-height:1; padding:1px 6px; border-radius:8px; background:rgba(219,112,147,0.35); color:#fbe3ee; max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
             .sw-img-missing { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; cursor:pointer; background:rgba(255,255,255,0.03); border:1px dashed rgba(244,114,182,0.4); border-radius:8px; color:#caa; text-align:center; padding:6px; box-sizing:border-box; }
             .sw-img-missing i { font-size:26px; color:rgba(244,114,182,0.7); }
+            .sw-img-blank { border-style:solid; border-color:rgba(255,255,255,0.12); background:rgba(244,114,182,0.05); }
             .sw-img-missing span { font-size:11px; color:#b89; line-height:1.2; }
             .sw-img-missing .sw-img-missing-hint { font-size:10px; color:rgba(244,114,182,0.85); }
 
@@ -700,7 +747,9 @@ const SLAY_VERSION = '5.1.0-exp.2';
         swApplyModalWidth();
         swOpen = true;
         const cn = swCharName();
-        if (!cn) { toastr.warning('Выберите персонажа', 'Гардероб'); swOpen = false; return; }
+        const gid = swGroupId();
+        if (!cn) { toastr.warning(gid ? 'В группе нет участников' : 'Выберите персонажа', 'Гардероб'); swOpen = false; return; }
+        const members = gid ? swGroupMembers() : [];
 
         const ov = document.createElement('div'); ov.id = 'sw-modal-overlay';
         ov.addEventListener('click', (e) => { if (e.target === ov) swCloseModal(); });
@@ -711,7 +760,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         const m = document.createElement('div'); m.id = 'sw-modal';
         m.innerHTML = `
             <div class="sw-modal-header">
-                <span>\uD83D\uDC85 Гардероб — <b>${esc(cn)}</b>
+                <span>\uD83D\uDC85 Гардероб — <b>${gid ? 'группа' : esc(cn)}</b>
                     <label class="sw-header-toggle ${s.showHidden ? 'sw-header-toggle-active' : ''}" id="sw-show-hidden-toggle" title="Показать скрытые">
                         <i class="fa-solid fa-eye${s.showHidden ? '' : '-slash'}"></i> Скрытые: ${hiddenCount}
                     </label>
@@ -722,6 +771,8 @@ const SLAY_VERSION = '5.1.0-exp.2';
                 <div class="sw-tab ${swTab === 'bot' ? 'sw-tab-active' : ''}" data-tab="bot">Бот</div>
                 <div class="sw-tab ${swTab === 'user' ? 'sw-tab-active' : ''}" data-tab="user">Юзер</div>
             </div>
+            <div class="sw-members" id="sw-members">${members.map(n => `<div class="sw-member${n === swMemberName() ? ' sw-member-active' : ''}" data-member="${esc(n)}">${esc(n)}</div>`).join('')}</div>
+            <div class="sw-group-note" id="sw-group-note"${gid ? '' : ' hidden'}>Наряды этой группы. В соло-чатах у персонажей свои.</div>
             <div class="sw-mode-switch" id="sw-mode-switch"></div>
             <div class="sw-cat-tabs" id="sw-cat-tabs"></div>
             <div class="sw-tag-filter" id="sw-tag-filter"></div>
@@ -748,6 +799,15 @@ const SLAY_VERSION = '5.1.0-exp.2';
             m.querySelectorAll('#sw-type-tabs .sw-tab').forEach(x => x.classList.toggle('sw-tab-active', x.dataset.tab === swTab));
             swRender();
         });
+        // Members row: groups only, Бот tab only (the user outfit is one per group).
+        const syncMembers = () => { const row = m.querySelector('#sw-members'); if (row) row.hidden = !gid || swTab !== 'bot'; };
+        for (const b of m.querySelectorAll('#sw-members .sw-member')) b.addEventListener('click', () => {
+            _swGroupMember[gid] = b.dataset.member;
+            m.querySelectorAll('#sw-members .sw-member').forEach(x => x.classList.toggle('sw-member-active', x === b));
+            swRender();
+        });
+        for (const t of m.querySelectorAll('#sw-type-tabs .sw-tab')) t.addEventListener('click', syncMembers);
+        syncMembers();
         swForWhoFilter = swTab; // Default filter to current tab
         swRender();
         document.addEventListener('keydown', swEsc);
@@ -965,7 +1025,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         });
 
         // ── Grid ──
-        let h = '<div class="sw-outfit-grid"><div class="sw-outfit-card sw-upload-card" id="sw-upload-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-plus"></i></div><span>Загрузить</span></div><div class="sw-outfit-card sw-upload-card" id="sw-import-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-file-import"></i></div><span>Импорт</span></div>';
+        let h = '<div class="sw-outfit-grid"><div class="sw-outfit-card sw-upload-card" id="sw-upload-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-plus"></i></div><span>Загрузить</span></div><div class="sw-outfit-card sw-upload-card" id="sw-import-trigger"><div class="sw-upload-icon"><i class="fa-solid fa-file-import"></i></div><span>Импорт</span></div><div class="sw-outfit-card sw-upload-card" id="sw-blank-trigger" title="Вещь без картинки — описание пишется руками"><div class="sw-upload-icon"><i class="fa-solid fa-pen"></i></div><span>Без картинки</span></div>';
         for (const o of filtered) {
             const a = o.id === equippedId;
             const fav = !!o.favourite;
@@ -977,7 +1037,9 @@ const SLAY_VERSION = '5.1.0-exp.2';
             const _src = swGetOutfitSrc(o);
             const _imgInner = _src
                 ? `<img src="${_src}" alt="${esc(o.name)}" class="sw-outfit-img" loading="lazy" decoding="async">`
-                : `<div class="sw-img-missing"><i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span></div>`;
+                : o.noImage
+                    ? `<div class="sw-img-missing sw-img-blank" title="${esc(o.description || '')}"><i class="fa-solid fa-shirt"></i><span>без картинки</span><span class="sw-img-missing-hint">✏️ добавить</span></div>`
+                    : `<div class="sw-img-missing"><i class="fa-solid fa-image-slash"></i><span>картинка пропала</span><span class="sw-img-missing-hint">✏️ заменить</span></div>`;
             h += `<div class="${classes.join(' ')}" data-id="${o.id}">
                 <div class="sw-outfit-img-wrap">
                     ${_imgInner}
@@ -1013,6 +1075,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
                 // The two upload tiles carry no data-id, so they are matched first.
                 if (t.closest('#sw-upload-trigger')) { stop(); swUpload(); return; }
                 if (t.closest('#sw-import-trigger')) { stop(); swUpload(true); return; }
+                if (t.closest('#sw-blank-trigger')) { stop(); swAddBlank(); return; }
 
                 const card = t.closest('.sw-outfit-card[data-id]');
                 if (!card) return;
@@ -1077,7 +1140,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
             if (item) {
                 const src = swGetOutfitSrc(item);
                 slotsHtml += `<div class="sw-current-slot">
-                    <img src="${src}" class="sw-current-slot-img" alt="${esc(item.name)}" title="${esc(item.name)}" decoding="async">
+                    ${src ? `<img src="${src}" class="sw-current-slot-img" alt="${esc(item.name)}" title="${esc(item.name)}" decoding="async">` : `<div class="sw-current-slot-img" title="${esc(item.name)}" style="display:flex;align-items:center;justify-content:center;color:rgba(244,114,182,0.7);"><i class="fa-solid fa-shirt"></i></div>`}
                     <span class="sw-current-slot-label">${esc(CATEGORIES[cat])}</span>
                 </div>`;
             } else {
@@ -1090,16 +1153,16 @@ const SLAY_VERSION = '5.1.0-exp.2';
 
         const descText = swBuildDescription(type, cn);
         wrap.innerHTML = `
-            <div class="sw-current-title">Сейчас надето (${type === 'bot' ? esc(cn) : '{{user}}'})</div>
+            <div class="sw-current-title">Сейчас надето (${type === 'bot' ? esc(swGroupId() ? swMemberName() : cn) : '{{user}}'})</div>
             <div class="sw-current-slots">${slotsHtml}</div>
             ${descText ? `<div class="sw-current-desc">${esc(descText)}</div>` : ''}`;
     }
 
     // ── Build combined description from all active slots ──
-    function swBuildDescription(type, cn) {
-        const co = swGetCharOutfit();
+    function swBuildDescription(type, cn, member) {
+        const co = swGetCharOutfit(member);
         if (!co) return '';
-        const mode = swGetModeFor(type);
+        const mode = swGetModeFor(type, member);
         const slots = mode === 'full' ? ['full', 'accessories', 'hair'] : ['top', 'bottom', 'shoes', 'accessories', 'hair'];
         const SLOT_LABELS = { full: 'FULL', top: 'TOP', bottom: 'BOTTOM', shoes: 'SHOES', accessories: 'ACCESSORIES', hair: 'HAIR' };
         const parts = [];
@@ -1114,7 +1177,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
     }
 
     // Description choice — inline in #sw-tab-content
-    function swShowDescriptionModal(outfitName) {
+    function swShowDescriptionModal(outfitName, canAi = true) {
         return new Promise((resolve) => {
             const tok = swShowInline(`
                 <div style="padding:10px;">
@@ -1128,6 +1191,8 @@ const SLAY_VERSION = '5.1.0-exp.2';
                 </div>`, () => resolve(null), 'Выбор описания отменён');
             if (!tok) { resolve(null); return; }
             const el = tok.el;
+            // Nothing to look at: the AI describer would only fail.
+            if (!canAi) el.querySelector('.sw-inline-btn[data-choice="ai"]')?.remove();
             for (const btn of el.querySelectorAll('.sw-inline-btn')) {
                 btn.addEventListener('click', () => { swRestoreInline(tok); resolve(btn.dataset.choice); });
             }
@@ -1518,7 +1583,10 @@ const SLAY_VERSION = '5.1.0-exp.2';
                     <div style="display:flex;gap:12px;margin:0 0 6px;align-items:center;">
                         <img id="sw-edit-thumb" src="${esc(swGetOutfitSrc(item) || '')}" alt="" style="width:64px;height:84px;object-fit:cover;object-position:center top;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);flex-shrink:0;">
                         <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
-                            <button id="sw-edit-replace" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(244,114,182,0.3);cursor:pointer;font-size:12px;background:rgba(244,114,182,0.12);color:#f0a0c0;display:inline-flex;align-items:center;gap:6px;"><i class="fa-solid fa-image"></i> Заменить картинку</button>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <button id="sw-edit-replace" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(244,114,182,0.3);cursor:pointer;font-size:12px;background:rgba(244,114,182,0.12);color:#f0a0c0;display:inline-flex;align-items:center;gap:6px;"><i class="fa-solid fa-image"></i> ${swGetOutfitSrc(item) ? 'Заменить картинку' : 'Добавить картинку'}</button>
+                            <button id="sw-edit-crop" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(244,114,182,0.3);cursor:pointer;font-size:12px;background:rgba(244,114,182,0.12);color:#f0a0c0;display:${swGetOutfitSrc(item) ? 'inline-flex' : 'none'};align-items:center;gap:6px;"><i class="fa-solid fa-crop-simple"></i> Обрезать</button>
+                            </div>
                             <span style="font-size:11px;color:#888;">описание и данные останутся</span>
                             <button id="sw-edit-export" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(147,197,219,0.3);cursor:pointer;font-size:12px;background:rgba(147,197,219,0.1);color:#a0d0f0;display:inline-flex;align-items:center;gap:6px;"><i class="fa-solid fa-file-export"></i> Экспорт PNG</button>
                             <span style="font-size:11px;color:#888;">картинка + данные в одном файле — можно делиться</span>
@@ -1561,6 +1629,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
                     const oldPath = item.imagePath;
                     item.imagePath = pendingImagePath;
                     item.base64 = '';
+                    delete item.noImage;
                     if (oldPath && oldPath !== pendingImagePath) swDeleteImageFile(oldPath, { ignoreItemId: item.id });
                 } else {
                     // Nothing ever pointed at it, so it is safe to take back off disk.
@@ -1579,6 +1648,39 @@ const SLAY_VERSION = '5.1.0-exp.2';
             const replaceFile = el.querySelector('#sw-edit-file');
             el.querySelector('#sw-edit-replace')?.addEventListener('click', () => replaceFile?.click());
             el.querySelector('#sw-edit-export')?.addEventListener('click', () => swExportItem(item.id));
+            // ✂ Crop the picture the item already has (or the one just picked and
+            // not saved yet). Same rules as «Заменить»: a new file is held aside and
+            // becomes the item's picture only on «Сохранить»; «Отмена» deletes it.
+            el.querySelector('#sw-edit-crop')?.addEventListener('click', () => {
+                if (replaceInFlight) { toastr.info('Подождите, картинка ещё загружается', 'Гардероб', { timeOut: 2500 }); return; }
+                const src = pendingImagePath || swGetOutfitSrc(item);
+                if (!src) return;
+                replaceInFlight = (async () => {
+                let _tCrop = null;
+                try {
+                    let dataUrl = src;
+                    if (!src.startsWith('data:')) {
+                        const resp = await fetch(src.split('?')[0]);
+                        if (!resp.ok) throw new Error('картинка не открылась (файл удалён?)');
+                        const blob = await resp.blob();
+                        dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onloadend = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+                    }
+                    const cropped = await slayCropImage(dataUrl, { aspect: 0, title: 'Обрезать вещь', subtitle: 'Сохранится после «Сохранить»' });
+                    if (cropped === null || closed) return;
+                    _tCrop = toastr.info('Сохраняю обрезку...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+                    const { base64, format } = await swResize(cropped, swGetSettings().maxDimension);
+                    const path = await swSaveImageToFile(base64, `wardrobe_${item.name}`, format);
+                    if (closed) { swDeleteImageFile(path, { ignoreItemId: item.id }); return; }
+                    if (pendingImagePath && pendingImagePath !== path) swDeleteImageFile(pendingImagePath, { ignoreItemId: item.id });
+                    pendingImagePath = path;
+                    const thumb = el.querySelector('#sw-edit-thumb');
+                    if (thumb) thumb.src = path + '?t=' + Date.now();
+                    try { toastr.clear(_tCrop); } catch (_) {}
+                    toastr.info('Обрезано — нажмите «Сохранить»', 'Гардероб', { timeOut: 3000 });
+                } catch (e) { if (!closed) toastr.error('Не удалось обрезать: ' + (e?.message || e), 'Гардероб'); }
+                finally { try { toastr.clear(_tCrop); } catch (_) {} }
+                })().finally(() => { replaceInFlight = null; });
+            });
             replaceFile?.addEventListener('change', () => {
                 const f = replaceFile.files?.[0];
                 if (!f) return;
@@ -1615,6 +1717,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
                     const thumb = el.querySelector('#sw-edit-thumb');
                     if (thumb) thumb.src = path + '?t=' + Date.now();
                     try { toastr.clear(_tReplace); } catch (_) {}
+                    { const cb = el.querySelector('#sw-edit-crop'); if (cb) cb.style.display = 'inline-flex'; }
                     toastr.info('Новая картинка выбрана — нажмите «Сохранить»', 'Гардероб', { timeOut: 3000 });
                 } catch (e) { if (!closed) toastr.error('Ошибка: ' + (e?.message || e), 'Гардероб'); }
                 finally { replaceFile.value = ''; try { toastr.clear(_tReplace); } catch (_) {} }
@@ -1669,7 +1772,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
 
         // If putting ON and no description — show custom modal (unless user opted out)
         if (!off && o && !o.description?.trim() && !swGetSettings().skipDescriptionWarning) {
-            const choice = await swShowDescriptionModal(nm);
+            const choice = await swShowDescriptionModal(nm, !!swGetOutfitSrc(o));
 
             if (choice === null) return;
 
@@ -2077,6 +2180,33 @@ const SLAY_VERSION = '5.1.0-exp.2';
         setTimeout(() => inp.remove(), 60000);
     }
 
+    // A garment with no picture yet: the description is typed by hand and is
+    // what the model gets. A picture can be added later from ✏️, and then the
+    // AI describer becomes available too.
+    async function swAddBlank() {
+        const result = await swShowUploadModal('', null);
+        if (!result) return;
+        const desc = await swShowDescInput(`✍️ Опишите «${result.name}» словами — это уйдёт в промпт`, '');
+        if (desc === null) { toastr.info(`«${result.name}» не добавлен`, 'Гардероб', { timeOut: 2500 }); return; }
+        swAddItem({
+            id: uid(),
+            name: result.name,
+            description: desc,
+            imagePath: '',
+            base64: '',
+            noImage: true,
+            category: result.category,
+            forWho: result.forWho || 'all',
+            gender: result.gender || 'unisex',
+            tags: result.tags,
+            addedAt: Date.now(),
+        });
+        swCatTab = result.category;
+        swRender();
+        if (!desc) toastr.warning(`«${result.name}» добавлен без описания — без него и без картинки вещь модели ничего не скажет`, 'Гардероб', { timeOut: 6000 });
+        else toastr.success(`«${result.name}» добавлен`, 'Гардероб');
+    }
+
     async function swEdit(id) {
         const o = swFindItem(id); if (!o) return;
         const result = await swShowEditModal(o);
@@ -2119,7 +2249,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         const o = swFindItem(id); if (!o) return;
         if (_describeBusy) { toastr.info('Уже описываю…', 'Гардероб', { timeOut: 2000 }); return; }
         const imgBase64 = o.imagePath ? await swLoadImageAsBase64(o.imagePath) : o.base64;
-        if (!imgBase64) { toastr.error('Картинка не найдена', 'Гардероб'); return; }
+        if (!imgBase64) { toastr.error(o.noImage ? 'У вещи нет картинки — сначала добавьте её (✏️ → «Добавить картинку»)' : 'Картинка не найдена', 'Гардероб'); return; }
         // cancel / timeout / fail: the toasts are already up and the item is
         // untouched — the old text stays until a new one is accepted below.
         const { desc: autoDesc } = await swDescribeWithSpinner(imgBase64, o.category);
@@ -2145,13 +2275,24 @@ const SLAY_VERSION = '5.1.0-exp.2';
             const ctx = SillyTavern.getContext();
             if (typeof ctx.setExtensionPrompt !== 'function') { swLog('WARN', 'setExtensionPrompt not available'); return; }
             if (swGetSettings().wardrobeEnabled === false) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
-            // Group chats get no OUTFIT LOCK. CHAT_CHANGED sees characterId
-            // undefined and clears it, but ST's group wrapper sets characterId to
-            // the member about to speak before GENERATION_STARTED fires — so the
-            // refresh below re-injected that member's single-chat outfit into the
-            // group. Both signals are checked: the live groupId and what the last
-            // CHAT_CHANGED saw (the harness/ST versions without groupId).
-            if (ctx.groupId || _swChatIsGroup) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
+            // Group chats: the GROUP wardrobe goes in — every member's bot outfit
+            // plus the shared user outfit — never a member's single-chat outfit
+            // (ST sets characterId to the speaker before GENERATION_STARTED).
+            // A group seen only via CHAT_CHANGED (no groupId) gets nothing.
+            if (ctx.groupId) {
+                const lines = [];
+                const members = swGroupMembers();
+                for (const m of members) {
+                    const desc = swBuildDescription('bot', '', m);
+                    if (desc) lines.push(`[OUTFIT LOCK — keep unchanged: ${m} is currently wearing: ${desc}. Always use this exact outfit when writing image prompts for ${m}.]`);
+                }
+                const udesc = members.length ? swBuildDescription('user', '', members[0]) : '';
+                if (udesc) lines.push(`[OUTFIT LOCK — keep unchanged: {{user}} is currently wearing: ${udesc}. Always use this exact outfit when writing image prompts for {{user}}.]`);
+                ctx.setExtensionPrompt(SW_PROMPT_KEY, lines.join('\n'), 1, 0);
+                swLog('INFO', `Group prompt injection: ${lines.length} outfit(s)`);
+                return;
+            }
+            if (_swChatIsGroup) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const cn = swCharName();
             if (!cn) { ctx.setExtensionPrompt(SW_PROMPT_KEY, '', 1, 0); return; }
             const co = swGetCharOutfit();
@@ -2216,9 +2357,17 @@ const SLAY_VERSION = '5.1.0-exp.2';
             // linger on top of the modal. No toggle-close through the button:
             //   - "navигated to button, wanted wardrobe" must always work in one click
             //   - popup closes via X / outside click / Escape (enough ways)
+            // Phones (no hover) with «Быстрый свап на телефоне» on: the tap
+            // toggles the quick popup instead; «Открыть гардероб» is inside it.
             btnEl.addEventListener('click', (e) => {
                 e.preventDefault(); e.stopPropagation();
                 clearTimeout(swHoverShowTimer);
+                if (!swCanHover() && swGetSettings().quickSwapMobile === true) {
+                    const pp = document.getElementById('sw-preview-popup');
+                    if (pp?.classList.contains('sw-pp-open')) swClosePreviewPopup();
+                    else swOpenPreviewPopup(btnEl);
+                    return;
+                }
                 swClosePreviewPopup();
                 swOpenModal();
             });
@@ -2301,6 +2450,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
             el.addEventListener('mouseenter', () => clearTimeout(swAutoCloseTimer));
             el.addEventListener('mouseleave', () => {
                 clearTimeout(swAutoCloseTimer);
+                if (!swCanHover()) return;
                 swAutoCloseTimer = setTimeout(swClosePreviewPopup, SW_AUTOCLOSE_MS);
             });
 
@@ -2362,6 +2512,11 @@ const SLAY_VERSION = '5.1.0-exp.2';
 
     // Render preview thumbnails (bot + user) + quick-swap categories for the
     // currently-selected swPreviewTab. Called on every open + after swaps.
+    // Left card caption: {{char}} in a solo chat, the chosen member in a group.
+    function swPpBotLabel() {
+        return swGroupId() ? esc(swMemberName() || '{{char}}') : '{{char}}';
+    }
+
     function swRenderPreviewPopup() {
         // Before the old DOM gets blown away by innerHTML, make sure no peek
         // timers (set by mouseenter on old tiles) can still fire.
@@ -2379,7 +2534,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         // instead of inline CSS to avoid url() escape bugs on paths with spaces,
         // parens, backslashes, unicode.
         const renderSlot = (type, item) => {
-            const label = type === 'bot' ? '{{char}}' : '{{user}}';
+            const label = type === 'bot' ? swPpBotLabel() : '{{user}}';
             if (!item) {
                 return `<div class="sw-pp-slot sw-pp-slot-empty" data-type="${type}">
                     <div class="sw-pp-thumb sw-pp-thumb-empty"><i class="fa-solid fa-shirt"></i></div>
@@ -2424,6 +2579,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
                             ${renderSlot('bot', botItem)}
                             ${renderSlot('user', userItem)}
                         </div>
+                        ${swGroupId() ? `<div class="sw-pp-members">${swGroupMembers().map(n => `<button class="sw-member${n === swMemberName() ? ' sw-member-active' : ''}" data-member="${esc(n)}">${esc(n)}</button>`).join('')}</div>` : ''}
                     </div>
                     <div class="sw-pp-section sw-pp-section-swap">
                         <div class="sw-pp-title">Быстрая смена <span class="sw-pp-title-sub">(${swPreviewTab === 'bot' ? 'Бот' : 'Юзер'})</span></div>
@@ -2468,6 +2624,17 @@ const SLAY_VERSION = '5.1.0-exp.2';
                 swOpenModal();
             });
         });
+        // Group: member chips pick whose bot outfit the left card shows and
+        // the quick swap dresses (same choice as in the big wardrobe).
+        el.querySelectorAll('.sw-pp-members .sw-member').forEach(b => {
+            b.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                _swGroupMember[swGroupId()] = b.dataset.member;
+                swSetPreviewTab('bot');
+                swRenderPreviewPopup();
+                swRepositionPopup();
+            });
+        });
         // Tab switch (bot/user for Quick-Swap target). Persists choice.
         el.querySelectorAll('.sw-pp-tab').forEach(tab => {
             tab.addEventListener('click', (e) => {
@@ -2501,6 +2668,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
     // (preview+categories) out for the sub-picker screen (back-button + items).
     // Popup size stays constant; only the sub-picker's own grid scrolls if the
     // tag has many outfits. Back button returns to the main screen.
+    let swSubgridObserver = null;
     function swShowSubgrid(tagKey, items) {
         // Re-rendering the tiles set → any pending peek timers from previous
         // sub-picker state become stale. Flush them.
@@ -2513,19 +2681,31 @@ const SLAY_VERSION = '5.1.0-exp.2';
         if (!sub || !grid || !main) return;
         titleEl.textContent = `${TAGS[tagKey] || tagKey} — выбери (${items.length})`;
         // Name captions intentionally dropped — thumbnails alone are enough
-        // (per user feedback: "ебало есть, и глаза, и так все увидим").
+        // (the faces say enough).
         // Only the favourite star overlays.
         grid.innerHTML = items.map(item => {
             const fav = item.favourite ? '<span class="sw-pp-sub-fav">★</span>' : '';
-            return `<div class="sw-pp-sub-item" data-id="${item.id}" title="${esc(item.name)}">${fav}</div>`;
+            return `<div class="sw-pp-sub-item" data-id="${item.id}" title="${esc(item.name)}"><img class="sw-pp-sub-img" alt="" loading="lazy" decoding="async">${fav}</div>`;
         }).join('');
-        // Set backgrounds via JS so path escaping doesn't bite us
+        // <img> instead of CSS backgrounds, loaded only when its row scrolls
+        // into the picker: a tag with 25 outfits used to fetch and decode all
+        // 25 full-size pictures at once (heavy on phones). The browser's own
+        // loading="lazy" starts far below the fold, so the grid watches itself.
         const itemById = new Map(items.map(i => [i.id, i]));
+        swSubgridObserver?.disconnect();
+        const load = (img) => { if (img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; } };
+        swSubgridObserver = typeof IntersectionObserver === 'function'
+            ? new IntersectionObserver((entries, obs) => {
+                for (const en of entries) if (en.isIntersecting) { load(en.target); obs.unobserve(en.target); }
+            }, { root: grid, rootMargin: '120px 0px' })
+            : null;
         for (const node of grid.querySelectorAll('.sw-pp-sub-item')) {
             const item = itemById.get(node.dataset.id);
-            if (!item) continue;
-            const src = swGetOutfitSrc(item);
-            if (src) node.style.backgroundImage = `url("${src.replace(/"/g, '\\"')}")`;
+            const src = item ? swGetOutfitSrc(item) : '';
+            const img = node.querySelector('.sw-pp-sub-img');
+            if (!src || !img) continue;
+            img.dataset.src = src;
+            if (swSubgridObserver) swSubgridObserver.observe(img); else load(img);
         }
         main.hidden = true;
         sub.hidden = false;
@@ -2668,7 +2848,7 @@ const SLAY_VERSION = '5.1.0-exp.2';
         if (!grid) return;
         const render = (type) => {
             const item = swGetTopWornItem(type);
-            const label = type === 'bot' ? '{{char}}' : '{{user}}';
+            const label = type === 'bot' ? swPpBotLabel() : '{{user}}';
             if (!item) {
                 return `<div class="sw-pp-slot sw-pp-slot-empty" data-type="${type}">
                     <div class="sw-pp-thumb sw-pp-thumb-empty"><i class="fa-solid fa-shirt"></i></div>
@@ -2756,30 +2936,9 @@ const SLAY_VERSION = '5.1.0-exp.2';
                 return;
             }
 
-            const nWard = found.filter(x => x.folder === 'гардероб').length;
-            const nRefs = found.filter(x => x.folder === 'референсы').length;
-            const byFolder = found.reduce((acc, x) => { acc[x.folder] = (acc[x.folder] || 0) + 1; return acc; }, {});
-            const breakdown = Object.entries(byFolder).map(([k, v]) => `· ${v} в разделе «${k}»`).join('\n');
-            // Three outcomes, not two: someone may well want to clear hundreds of
-            // stale references while keeping every wardrobe picture, or the other
-            // way round. Forcing that into one yes/no was the wrong question.
-            const opts = [];
-            if (nRefs) opts.push({ key: 'refs', label: `Только референсы (${nRefs})` });
-            if (nWard) opts.push({ key: 'ward', label: `Только гардероб (${nWard})` });
-            if (nRefs && nWard) opts.push({ key: 'both', label: `И то и другое (${found.length})`, danger: true });
-            else if (opts.length === 1) opts[0].primary = true;
-
-            const pick = await slayChoose(
-                'Ничьи картинки',
-                `Проверено ${total} картинок во всех папках.@BR@@BR@` +
-                `На ${found.length} не ссылается ничего — ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате.@BR@@BR@` +
-                `Что удалить с диска?`,
-                opts);
-            if (!pick) return;
-            const doomed = pick === 'both' ? found
-                : pick === 'refs' ? found.filter(x => x.folder === 'референсы')
-                : found.filter(x => x.folder === 'гардероб');
-            if (!doomed.length) return;
+            // Every file shown as a preview, picked one by one (or by month).
+            const doomed = await slayPickOrphans(found, total);
+            if (!doomed || !doomed.length) return;
 
             const t2 = toastr.info('Удаляю...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
             // One refusal used to abort the whole run and report nothing — you
@@ -2835,10 +2994,10 @@ const SLAY_VERSION = '5.1.0-exp.2';
         // clears or restores the prompt injection and the chat bar button.
         refresh() { swUpdatePromptInjection(); swInjectFloatingBtn(); },
         findOrphanImages: swFindOrphanImages,
-        async getActiveOutfitBase64(type) {
-            const cn = swCharName(); if (!cn) return null;
-            const co = swGetCharOutfit(); if (!co) return null;
-            const mode = swGetModeFor(type);
+        async getActiveOutfitBase64(type, member) {
+            const cn = swCharName(member); if (!cn) return null;
+            const co = swGetCharOutfit(member); if (!co) return null;
+            const mode = swGetModeFor(type, member);
             // Only return base64 if mode=full and full item equipped
             if (mode !== 'full') return null;
             const fullId = co[type]?.full;
@@ -2848,21 +3007,24 @@ const SLAY_VERSION = '5.1.0-exp.2';
             if (outfit.imagePath) return await swLoadImageAsBase64(outfit.imagePath);
             return outfit.base64 || null;
         },
-        getActiveOutfitDescription(type) {
-            const cn = swCharName(); if (!cn) return '';
-            return swBuildDescription(type, cn);
+        getActiveOutfitDescription(type, member) {
+            const cn = swCharName(member); if (!cn) return '';
+            return swBuildDescription(type, cn, member);
         },
-        async getCollageBase64(type) {
+        async getCollageBase64(type, member) {
             if (!swGetSettings().experimentalCollage) return null;
             // 1 item = return as single ref; 2+ = collage
-            const images = await swGetPartsImages(type);
+            const images = await swGetPartsImages(type, member);
             if (images.length === 1) return images[0]; // single item, no collage needed
-            if (images.length >= 2) return await swBuildCollage(type);
+            if (images.length >= 2) return await swBuildCollage(type, member);
             return null;
         },
-        getActiveOutfitData(type) {
-            const cn = swCharName(); if (!cn) return null;
-            const co = swGetCharOutfit(); if (!co) return null;
+        // The equipped set for the status line (group-aware, unlike reading
+        // activeOutfits by character name).
+        currentOutfit: () => swGetCharOutfit(),
+        getActiveOutfitData(type, member) {
+            const cn = swCharName(member); if (!cn) return null;
+            const co = swGetCharOutfit(member); if (!co) return null;
             const result = {};
             for (const cat of CAT_KEYS) {
                 const itemId = co[type]?.[cat] || null;
@@ -2931,9 +3093,14 @@ function robustFetch(url, options = {}) {
         const xhr = new XMLHttpRequest();
         xhr.open(options.method || 'GET', url);
         xhr.timeout = FETCH_TIMEOUT;
-        xhr.responseType = 'text';
+        // NovelAI answers with a ZIP: the text mode would mangle it.
+        const binary = !!options.binary;
+        xhr.responseType = binary ? 'arraybuffer' : 'text';
         if (options.headers) { for (const [key, value] of Object.entries(options.headers)) { xhr.setRequestHeader(key, value); } }
-        xhr.onload = () => { resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, statusText: xhr.statusText, text: () => Promise.resolve(xhr.responseText), json: () => Promise.resolve(JSON.parse(xhr.responseText)), headers: { get: (name) => xhr.getResponseHeader(name) } }); };
+        xhr.onload = () => {
+            const asText = () => binary ? new TextDecoder().decode(xhr.response || new ArrayBuffer(0)) : xhr.responseText;
+            resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, statusText: xhr.statusText, text: () => Promise.resolve(asText()), json: () => Promise.resolve(JSON.parse(asText())), arrayBuffer: () => Promise.resolve(binary ? xhr.response : new TextEncoder().encode(xhr.responseText).buffer), headers: { get: (name) => xhr.getResponseHeader(name) } });
+        };
         xhr.ontimeout = () => reject(stamp(new Error('Request timed out after 3 minutes (iOS)')));
         xhr.onerror = () => reject(stamp(new Error('Network error (iOS)')));
         xhr.onabort = () => reject(stamp(new Error('Request aborted (iOS)')));
@@ -3051,6 +3218,7 @@ const defaultSettings = Object.freeze({
     naisteraModel: 'grok',
     // Style picker
     slayStyle: '',
+    slayStyleCustomId: '',   // own style picked (lives only in the preset toggle)
     slayStyleName: '',
     // Picker switch «В тогл пресета»: the picked style's full block is written
     // into a prompt-manager toggle of the active Chat Completion preset (S4).
@@ -3059,6 +3227,23 @@ const defaultSettings = Object.freeze({
     naisteraSendUserAvatar: false,
     naisteraVideoTest: false,
     naisteraVideoEveryN: 1,
+    // NovelAI Diffusion (ported from a user's fork, reworked: no writes to the
+    // tavern's key store, no silent second generation).
+    novelModel: 'nai-diffusion-5-full',
+    novelCustomModel: '',
+    novelResolution: 'auto',
+    novelSampler: 'k_euler_ancestral',
+    novelScheduler: 'karras',
+    novelSteps: 28,
+    novelScale: 5,
+    novelSeed: -1,
+    novelPrefix: 'best quality, absurdres, aesthetic,',
+    novelNegative: 'lowres, bad anatomy, bad hands, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+    novelAnlasGuard: true,
+    novelSm: false,
+    novelSmDyn: false,
+    novelDecrisper: false,
+    novelVarietyBoost: false,
     // NPC refs (flat storage)
     charRef: { name: '', imageBase64: '', imagePath: '' },
     userRef: { name: '', imageBase64: '', imagePath: '' },
@@ -3130,7 +3315,7 @@ function slayParseModelList(data) {
 }
 
 function isImageModel(modelId) {
-    const mid = modelId.toLowerCase();
+    const mid = String(modelId || '').toLowerCase();
     for (const kw of VIDEO_MODEL_KEYWORDS) { if (mid.includes(kw)) return false; }
     if (mid.includes('vision') && mid.includes('preview')) return false;
     for (const kw of IMAGE_MODEL_KEYWORDS) { if (mid.includes(kw)) return true; }
@@ -3138,7 +3323,7 @@ function isImageModel(modelId) {
 }
 
 function isGeminiModel(modelId) {
-    return modelId.toLowerCase().includes('nano-banana');
+    return String(modelId || '').toLowerCase().includes('nano-banana');
 }
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
@@ -3151,8 +3336,64 @@ const NAISTERA_MODELS = Object.freeze([
     'nano banana', 'novelai',
 ]);
 const NAISTERA_MANUAL = '__manual__';
+const NOVELAI_MODELS = Object.freeze([
+    { value: 'nai-diffusion-5-full', label: 'V5 Full' },
+    { value: 'nai-diffusion-5-full-medium', label: 'V5 Full Medium' },
+    { value: 'nai-diffusion-5-curated', label: 'V5 Curated' },
+    { value: 'nai-diffusion-4-5-full', label: 'V4.5 Full (аниме)' },
+    { value: 'nai-diffusion-4-5-curated', label: 'V4.5 Curated (аниме)' },
+    { value: 'nai-diffusion-4-full', label: 'V4 Full' },
+    { value: 'nai-diffusion-4-curated-preview', label: 'V4 Curated' },
+    { value: 'nai-diffusion-3', label: 'V3 (аниме)' },
+    { value: 'nai-diffusion-furry-3', label: 'Furry V3' },
+    { value: 'nai-diffusion-2', label: 'V2 (аниме)' },
+    { value: 'custom', label: 'Своя модель (ввести ID)…' },
+]);
+function isPredefinedNovelModel(id) { return !!id && id !== 'custom' && NOVELAI_MODELS.some(m => m.value === id); }
+function getEffectiveNovelModel(s = getSettings()) {
+    const m = s?.novelModel || 'nai-diffusion-5-full';
+    if (isPredefinedNovelModel(m)) return m;
+    return String(s?.novelCustomModel || (m !== 'custom' ? m : '')).trim() || 'nai-diffusion-5-full';
+}
+function novelModelLabel(id) { return (NOVELAI_MODELS.find(m => m.value === id) || {}).label || id; }
+const NOVELAI_RESOLUTIONS = Object.freeze([
+    { value: 'auto', label: 'Из промпта (832×1216 / 1216×832 / 1024×1024)' },
+    { value: '832x1216', label: '832×1216 портрет — бесплатно на Opus' },
+    { value: '1216x832', label: '1216×832 альбом — бесплатно на Opus' },
+    { value: '1024x1024', label: '1024×1024 квадрат — бесплатно на Opus' },
+    { value: '1024x1536', label: '1024×1536 большой портрет' },
+    { value: '1536x1024', label: '1536×1024 большой альбом' },
+    { value: '1472x1472', label: '1472×1472 большой квадрат' },
+    { value: '1088x1920', label: '1088×1920 обои портрет' },
+    { value: '1920x1088', label: '1920×1088 обои альбом' },
+]);
+const NOVELAI_SAMPLERS = Object.freeze(['k_euler_ancestral', 'k_euler', 'k_dpmpp_2m', 'k_dpmpp_sde', 'k_dpmpp_2s_ancestral', 'k_dpm_fast', 'ddim']);
+const NOVELAI_SCHEDULERS = Object.freeze(['karras', 'native', 'exponential', 'polyexponential']);
+const NOVELAI_IMAGE_HOST = 'https://image.novelai.net';
+function novelIsV5(model) { return /diffusion-5/.test(model); }
+function novelIsV4Plus(model) { return /diffusion-4/.test(model) || novelIsV5(model); }
+// Opus generates free at ≤1024×1024 pixels and ≤28 steps — the guard keeps
+// requests inside that box so nobody burns Anlas by accident.
+function resolveNovelDimensions(resolution, promptRatio, guard) {
+    let width = 832, height = 1216;
+    const res = String(resolution || 'auto').trim().toLowerCase();
+    if (res !== 'auto' && /^\d+x\d+$/.test(res)) {
+        const [w, h] = res.split('x').map(Number);
+        if (w >= 64 && h >= 64) { width = w; height = h; }
+    } else {
+        const ar = String(promptRatio || '').trim();
+        if (ar === '1:1') { width = 1024; height = 1024; }
+        else if (['3:2', '4:3', '5:4', '16:9', '21:9'].includes(ar)) { width = 1216; height = 832; }
+    }
+    if (guard && width * height > 1024 * 1024) {
+        const k = Math.sqrt((1024 * 1024) / (width * height));
+        width = Math.max(64, Math.floor((width * k) / 64) * 64);
+        height = Math.max(64, Math.floor((height * k) / 64) * 64);
+    }
+    return { width, height };
+}
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
-const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
+const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', novelai: 'не нужен — запрос идёт прямо в NovelAI', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
 // One spelling for every way people type a Naistera model name: trimmed,
 // lowercase, dashes/underscores as spaces, one space between words. So
@@ -3380,8 +3621,54 @@ const EMPTY_REFS = () => ({
     ],
 });
 
+// Group chats: the refs block edits one member at a time (chips above the
+// slots) plus one user face for the whole group. Faces are the members' own
+// solo sets, so a face set here is the same face in their solo chats.
+const _slayRefGroupMember = {};
+function slayGroupMemberNames() {
+    try {
+        const ctx = SillyTavern.getContext();
+        const g = ctx.groups?.find?.(x => x.id === ctx.groupId);
+        if (!g) return [];
+        return (g.members || []).map(a => ctx.characters?.find?.(c => c.avatar === a)?.name).filter(Boolean);
+    } catch (_) { return []; }
+}
+function slayRefGroupMember() {
+    const gid = SillyTavern.getContext().groupId;
+    const list = slayGroupMemberNames();
+    const picked = _slayRefGroupMember[gid];
+    return picked && list.includes(picked) ? picked : (list[0] || '');
+}
+function slayGroupUserRef(settings, gid, create) {
+    if (!settings.slayGroupRefs || typeof settings.slayGroupRefs !== 'object') {
+        if (!create) return null;
+        settings.slayGroupRefs = {};
+    }
+    if (!settings.slayGroupRefs[gid]) {
+        if (!create) return null;
+        settings.slayGroupRefs[gid] = { userRef: { name: '', imageBase64: '', imagePath: '' } };
+    }
+    return settings.slayGroupRefs[gid];
+}
+
 function getCurrentCharacterRefs() {
     const settings = getSettings();
+    const gid = SillyTavern.getContext().groupId;
+    if (gid) {
+        const member = slayRefGroupMember();
+        if (!settings.perCharacterRefs) settings.perCharacterRefs = {};
+        // No flat-refs migration here: a group member starts empty.
+        const mem = member ? (settings.perCharacterRefs[member] ||= EMPTY_REFS()) : EMPTY_REFS();
+        if (!mem.charRef) mem.charRef = { name: '', imageBase64: '', imagePath: '' };
+        if (!Array.isArray(mem.npcReferences)) mem.npcReferences = [];
+        while (mem.npcReferences.length < 4) mem.npcReferences.push({ name: '', imageBase64: '', imagePath: '' });
+        const grp = slayGroupUserRef(settings, gid, true);
+        return {
+            get charRef() { return mem.charRef; }, set charRef(v) { mem.charRef = v; },
+            get userRef() { return grp.userRef; }, set userRef(v) { grp.userRef = v; },
+            get npcReferences() { return mem.npcReferences; }, set npcReferences(v) { mem.npcReferences = v; },
+        };
+    }
     const charName = getActiveCharacterName();
 
     // Initialize per-character storage if missing
@@ -3419,8 +3706,68 @@ function getCurrentCharacterRefs() {
 }
 function getCurrentCharacterNpcs() { return getCurrentCharacterRefs().npcReferences; }
 
+// Name of the group member who wrote this message; '' outside groups, for the
+// user's own posts, or when the message is gone. '' = take the old path.
+function slayGroupAuthor(messageId) {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (!ctx.groupId) return '';
+        const msg = ctx.chat?.[Number(messageId)];
+        if (!msg || msg.is_user || msg.is_system) return '';
+        return String(msg.name || '').trim();
+    } catch (_) { return ''; }
+}
+
+// Everything a group picture can use, read-only:
+//   charRef — the post author's face (empty for the user's own posts);
+//   userRef — the group's user face, else the author's user slot;
+//   npcReferences — every other member's face (tagged _member, so their outfit
+//   can follow) and every member's NPCs. All still go only when named.
+function slayGroupRefs(author) {
+    const s = getSettings();
+    const gid = SillyTavern.getContext().groupId;
+    const own = author ? slayRefsForCharacter(author) : EMPTY_REFS();
+    const grpUser = slayGroupUserRef(s, gid, false)?.userRef;
+    const npcs = [];
+    const seen = new Set();
+    const add = (ref, extra) => {
+        if (!hasManualReference(ref)) return;
+        const key = (ref.imagePath || '') + '|' + String(ref.name || '').toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        npcs.push({ ...ref, ...extra });
+    };
+    const members = slayGroupMemberNames();
+    for (const m of members) {
+        if (m === author) continue;
+        const r = slayRefsForCharacter(m).charRef;
+        const names = String(r?.name || '').trim();
+        add(r, { name: names && parseNameTokens(names).some(t => t.toLowerCase() === m.toLowerCase()) ? names : [m, names].filter(Boolean).join(', '), _member: m });
+    }
+    for (const m of [author, ...members.filter(x => x !== author)].filter(Boolean)) {
+        for (const npc of slayRefsForCharacter(m).npcReferences || []) add(npc, {});
+    }
+    return {
+        charRef: author && hasManualReference(own.charRef) && !own.charRef.name ? { ...own.charRef, name: author } : own.charRef,
+        userRef: hasManualReference(grpUser) ? grpUser : own.userRef,
+        npcReferences: npcs,
+    };
+}
+
+// Read-only: a member with no saved refs gets an empty set, nothing is created
+// or migrated (getCurrentCharacterRefs would copy the old flat refs into them).
+function slayRefsForCharacter(name) {
+    const refs = getSettings().perCharacterRefs?.[name];
+    if (!refs) return EMPTY_REFS();
+    return {
+        charRef: refs.charRef || EMPTY_REFS().charRef,
+        userRef: refs.userRef || EMPTY_REFS().userRef,
+        npcReferences: Array.isArray(refs.npcReferences) ? refs.npcReferences : [],
+    };
+}
+
 // Parse a name field that may contain multiple aliases separated by comma / semicolon / pipe /
-// slash / whitespace (e.g. "Ева, Eve, Eva, Ivy, Иви"). Returns tokens of length >= 2.
+// slash / whitespace (e.g. "Анна, Anna, Ann, Annie, Аня"). Returns tokens of length >= 2.
 // The >=2 cutoff (was >2) lets 2-letter names like "Ли", "Ян", "Ed", "Jo" pass.
 function parseNameTokens(rawName) {
     return String(rawName || '')
@@ -3440,8 +3787,8 @@ const NAME_GENERIC_FALLBACKS = new Set([
 // Substring check with Unicode-aware word boundary so a real-name alias
 // doesn't trip on a longer word that just happens to contain it. Examples
 // of the false positives this prevents:
-//   Eva → evangelion / evangelist
-//   Ева → евразия / евангелие
+//   Ann → annual / announce
+//   Ян → январь / янтарь
 //   Roxy → proxy / epoxy
 //   Ed → predator / editor
 //   User → user-friendly (also caught by NAME_GENERIC_FALLBACKS above)
@@ -3749,7 +4096,7 @@ function removeRecentRef(path) {
 
 // ── Библиотека сохранённых персонажей ──
 // Recent refs are a rolling window of 10 paths with no names — good for "the
-// picture I used a minute ago", useless for "Ева, the one I use in every chat".
+// picture I used a minute ago", useless for "Anna, the one I use in every chat".
 // This is the permanent half: a named entry keeps BOTH the portrait and the
 // comma-separated name list, so re-using a character in a new chat is one tap
 // instead of hunting for the file and retyping the names.
@@ -3757,7 +4104,7 @@ function removeRecentRef(path) {
 // A CHARACTER owns the names; a LOOK owns a picture and its label.
 //   savedChars: [{ id, names, looks: [{ id, label, path, addedAt }] }]
 // The old shape stored one flat entry per picture, so the same person in four
-// AUs meant four cards with "Ден, Денис, Денчик" retyped into each. Names now
+// AUs meant four cards with "Саша, Саня, Шура" retyped into each. Names now
 // live once per character and pictures hang off them — which is also what the
 // prompt matcher wants, since it has only ever cared about the name list.
 const swUid = (p) => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -3771,7 +4118,7 @@ function getSavedChars() {
 }
 
 // One-way lift of the old flat list. Entries group by ANY shared name rather
-// than an identical list: "Dana" and "Dana, Дана" are one person, and matching
+// than an identical list: "Kate" and "Kate, Катя" are one person, and matching
 // the whole string filed them as two. This is the rule the ref matcher already
 // uses against a prompt, so the library agrees with what generation does.
 // Each old `note` becomes its look's label — what the note always meant anyway.
@@ -3912,6 +4259,11 @@ function slayCountPathUses(path) {
                     if (refs.userRef && refs.userRef.imagePath === path) n++;
                     for (const npc of (refs.npcReferences || [])) if (npc && npc.imagePath === path) n++;
                 }
+            }
+            // Group chats: one user face per group
+            const sgr = val.slayGroupRefs;
+            if (sgr && typeof sgr === 'object') {
+                for (const g of Object.values(sgr)) if (g && g.userRef && g.userRef.imagePath === path) n++;
             }
             if (val.charRef && val.charRef.imagePath === path) n++;
             if (val.userRef && val.userRef.imagePath === path) n++;
@@ -4951,14 +5303,228 @@ async function generateImageNaistera(prompt, style, options = {}) {
     return result.data_url;
 }
 
+// ── NovelAI Diffusion ──
+// With a key in SLAY the request goes straight to image.novelai.net (it allows
+// browser calls): that is the only way characters and their positions survive,
+// because the tavern's own /api/novelai/generate-image throws characterPrompts
+// away. Without a key here we use the tavern's endpoint and the NovelAI key
+// stored in the tavern — characters are then merged into one prompt.
+// We never write into the tavern's key store: doing so on every visit piled up
+// duplicate keys and switched the user's active NovelAI key behind their back.
+let _novelCoordsWarned = false;
+
+// Site styles carry «… Avoid: x, y». NovelAI reads tags: «Avoid» words in the
+// positive prompt get DRAWN, so they go to the negative prompt instead.
+function novelSplitStyle(style) {
+    const s = String(style || '').replace(STYLE_BLOCK_RE, '').trim();
+    if (!s) return { pos: '', neg: '' };
+    const m = s.match(/\b(?:avoid|negative(?: prompt)?|do not (?:include|draw))\s*:/i);
+    if (!m) return { pos: s, neg: '' };
+    const trim = (t) => t.replace(/^[\s,.;:]+|[\s,.;:]+$/g, '');
+    return { pos: trim(s.slice(0, m.index)), neg: trim(s.slice(m.index + m[0].length)) };
+}
+
+function novelParseCharacters(list) {
+    const out = [];
+    for (const c of Array.isArray(list) ? list : []) {
+        if (!c) continue;
+        const prompt = String(typeof c === 'string' ? c : (c.prompt ?? c.char_caption ?? c.tags ?? '')).replace(STYLE_BLOCK_RE, '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+        if (!prompt) continue;
+        const uc = typeof c === 'string' ? '' : String(c.uc ?? c.negative ?? c.negative_prompt ?? '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+        const raw = typeof c === 'string' ? null : (c.center ?? (Array.isArray(c.centers) ? c.centers[0] : null));
+        const cx = Number(raw?.x), cy = Number(raw?.y);
+        const has = raw != null && Number.isFinite(cx) && Number.isFinite(cy);
+        out.push({ prompt, uc, center: has ? { x: Math.max(0, Math.min(1, cx)), y: Math.max(0, Math.min(1, cy)) } : { x: 0.5, y: 0.5 }, hasCoords: has });
+    }
+    return out;
+}
+
+function novelBytesToBase64(u8) {
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return btoa(bin);
+}
+
+function novelPngSlice(bytes) {
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const END = [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+    let start = -1;
+    for (let i = 0; i <= bytes.length - 8; i++) { if (SIG.every((b, j) => bytes[i + j] === b)) { start = i; break; } }
+    if (start === -1) return null;
+    for (let i = start + 8; i <= bytes.length - 8; i++) { if (END.every((b, j) => bytes[i + j] === b)) return bytes.subarray(start, i + 8); }
+    return bytes.subarray(start);
+}
+
+// NovelAI answers with a ZIP holding one PNG (sometimes stored, sometimes
+// deflated). No library: stored entries are sliced, deflated ones go through
+// the browser's DecompressionStream (Chrome 80+, Safari 16.4+).
+async function novelExtractImage(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    if (!bytes.length) throw new Error('NovelAI вернул пустой ответ');
+    if (bytes[0] === 0x7b) {
+        const j = JSON.parse(new TextDecoder().decode(bytes));
+        const b64 = j?.images?.[0]?.image || j?.image || j?.data?.[0]?.b64_json;
+        if (typeof b64 === 'string' && b64.trim()) return b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64.trim()}`;
+        throw new Error('NovelAI вернул ответ без картинки');
+    }
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const method = view.getUint16(8, true);
+        let size = view.getUint32(18, true);
+        const offset = 30 + view.getUint16(26, true) + view.getUint16(28, true);
+        if (!size) {
+            for (let i = bytes.length - 46; i >= offset; i--) {
+                if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x01 && bytes[i + 3] === 0x02) { size = view.getUint32(i + 20, true); break; }
+            }
+        }
+        const entry = size > 0 ? bytes.subarray(offset, offset + size) : bytes.subarray(offset);
+        if (method === 0) return `data:image/png;base64,${novelBytesToBase64(novelPngSlice(entry) || entry)}`;
+        if (method === 8) {
+            if (typeof DecompressionStream === 'undefined') {
+                throw new Error('Браузер слишком старый, чтобы распаковать ответ NovelAI. Обновите iOS до 16.4+ / браузер, или оставьте поле ключа в SLAY пустым и впишите ключ NovelAI в настройках самой таверны.');
+            }
+            const ds = new DecompressionStream('deflate-raw');
+            const writer = ds.writable.getWriter();
+            writer.write(entry).catch(() => {});
+            writer.close().catch(() => {});
+            const out = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+            return `data:image/png;base64,${novelBytesToBase64(novelPngSlice(out) || out)}`;
+        }
+    }
+    const png = novelPngSlice(bytes);
+    if (png) return `data:image/png;base64,${novelBytesToBase64(png)}`;
+    throw new Error(`Не удалось достать картинку из ответа NovelAI (${bytes.length} байт)`);
+}
+
+async function generateImageNovelAI(prompt, style, options = {}) {
+    const settings = getSettings();
+    const key = sanitizeApiKey(settings.apiKey || '');
+    const model = getEffectiveNovelModel(settings);
+    const isV5 = novelIsV5(model);
+    const isV4 = novelIsV4Plus(model);
+    const guard = settings.novelAnlasGuard !== false;
+    const { width, height } = resolveNovelDimensions(settings.novelResolution, options.aspectRatio, guard);
+    const rawSteps = Number(settings.novelSteps) || 28;
+    const steps = guard ? Math.min(28, Math.max(1, rawSteps)) : Math.max(1, Math.min(50, rawSteps));
+    const scale = Number.isFinite(Number(settings.novelScale)) ? Number(settings.novelScale) : 5;
+    const seedSetting = Number(settings.novelSeed);
+    const seed = Number.isInteger(seedSetting) && seedSetting >= 0 ? seedSetting : Math.floor(Math.random() * 4294967295);
+    const sampler = NOVELAI_SAMPLERS.includes(settings.novelSampler) ? settings.novelSampler : 'k_euler_ancestral';
+    const scheduler = isV5 ? 'karras' : (settings.novelScheduler || 'karras');
+    const sm = !isV4 && sampler !== 'ddim' && !!settings.novelSm;
+    const smDyn = sm && !!settings.novelSmDyn;
+
+    const join = (...parts) => parts.map(p => String(p || '').replace(/^[\s,]+|[\s,]+$/g, '')).filter(Boolean).join(', ');
+    const st = novelSplitStyle(style);
+    const chars = novelParseCharacters(options.characters);
+    const basePrompt = join(settings.novelPrefix, st.pos, String(prompt || '').replace(STYLE_BLOCK_RE, ''));
+    const baseNegative = join(settings.novelNegative, st.neg, options.uc);
+    const hasCoords = chars.some(c => c.hasCoords);
+    // V2/V3 know nothing about per-character prompts: fold them into the base.
+    const perChar = isV4 && chars.length > 0;
+    const mergedPrompt = perChar ? basePrompt : join(basePrompt, ...chars.map(c => c.prompt));
+    const mergedNegative = perChar ? baseNegative : join(baseNegative, ...chars.map(c => c.uc));
+
+    iigLog('INFO', `NovelAI: model=${model}, ${width}x${height}, steps=${steps}, scale=${scale}, sampler=${sampler}, chars=${chars.length}, coords=${hasCoords}, guard=${guard}, direct=${!!key}`);
+
+    if (key) {
+        const characterPrompts = perChar ? chars.map(c => ({ prompt: c.prompt, uc: c.uc, center: c.center, enabled: true })) : [];
+        const parameters = {
+            params_version: isV5 ? 4 : 3,
+            prefer_brownian: true,
+            negative_prompt: mergedNegative,
+            height, width, scale, seed, sampler,
+            noise_schedule: scheduler,
+            steps,
+            n_samples: 1,
+            ucPreset: 0,
+            qualityToggle: false,
+            add_original_image: false,
+            controlnet_strength: 1,
+            deliberate_euler_ancestral_bug: false,
+            dynamic_thresholding: isV5 ? false : !!settings.novelDecrisper,
+            legacy: false,
+            legacy_v3_extend: false,
+            sm, sm_dyn: smDyn,
+            uncond_scale: 1,
+            // Same formula as the tavern (Variety+): 19 for V3/V4, 58 for V4.5.
+            skip_cfg_above_sigma: (!isV5 && settings.novelVarietyBoost) ? Math.sqrt((width * height) / 1011712) * (/diffusion-4-5/.test(model) ? 58 : 19) : null,
+            use_coords: perChar && hasCoords,
+            legacy_uc: false,
+            characterPrompts,
+            reference_image_multiple: [],
+            reference_information_extracted_multiple: [],
+            reference_strength_multiple: [],
+            v4_prompt: { caption: { base_caption: mergedPrompt, char_captions: characterPrompts.map(c => ({ char_caption: c.prompt, centers: [c.center] })) }, use_coords: perChar && hasCoords, use_order: true },
+            v4_negative_prompt: { caption: { base_caption: mergedNegative, char_captions: characterPrompts.map(c => ({ char_caption: c.uc, centers: [c.center] })) }, legacy_uc: false },
+        };
+        if (isV5) { parameters.prompt = mergedPrompt; parameters.extra_noise_seed = seed; }
+        const url = `${NOVELAI_IMAGE_HOST}/ai/generate-image`;
+        // One request, no fallback: retrying through the tavern after e.g. a
+        // timeout could pay for the same picture twice.
+        const response = await robustFetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'generate', input: mergedPrompt, model, parameters }),
+            binary: true,
+        });
+        if (!response.ok) throw slayHttpError(response.status, await response.text().catch(() => ''), url);
+        return await novelExtractImage(await response.arrayBuffer());
+    }
+
+    if (chars.length > 0 && hasCoords && !_novelCoordsWarned) {
+        _novelCoordsWarned = true;
+        toastr.info('Расстановка персонажей по координатам работает, только когда ключ NovelAI вписан в SLAY. Сейчас персонажи слиты в один промпт.', 'SLAY Images', { timeOut: 8000 });
+    }
+    const response = await robustFetch('/api/novelai/generate-image', {
+        method: 'POST',
+        headers: SillyTavern.getContext().getRequestHeaders(),
+        body: JSON.stringify({
+            prompt: join(basePrompt, ...chars.map(c => c.prompt)),
+            negative_prompt: join(baseNegative, ...chars.map(c => c.uc)),
+            model, sampler, scheduler, steps, scale, width, height, seed,
+            upscale_ratio: 1,
+            decrisper: isV5 ? false : !!settings.novelDecrisper,
+            variety_boost: isV5 ? false : !!settings.novelVarietyBoost,
+            sm, sm_dyn: smDyn,
+        }),
+    });
+    if (response.status === 400) throw new Error('Нет ключа NovelAI: впишите Persistent API Token (pst-…) в поле API Key в SLAY или в настройках NovelAI самой таверны.');
+    if (!response.ok) throw slayHttpError(response.status, 'NovelAI не нарисовал картинку — подробности в консоли таверны', '/api/novelai/generate-image');
+    const b64 = (await response.text()).trim();
+    if (!b64) throw new Error('NovelAI вернул пустой ответ');
+    return b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+}
+
+// Image instructions may come as {"prompt": …} or in the multi-character
+// preset form {"base": …, "characters": [{name, prompt, uc, center}]}.
+// Everything downstream reads .prompt, so give it one.
+function iigNormalizeInstruction(d) {
+    if (!d || typeof d !== 'object') return { prompt: '', style: '', characters: [], uc: '' };
+    const characters = (Array.isArray(d.characters) ? d.characters : Array.isArray(d.characterPrompts) ? d.characterPrompts : [])
+        .map(c => {
+            if (!c) return null;
+            if (typeof c === 'string') return c.trim() ? { name: '', prompt: c.trim(), uc: '', center: null } : null;
+            const prompt = String(c.prompt ?? c.char_caption ?? c.tags ?? '').trim();
+            if (!prompt) return null;
+            return { name: String(c.name ?? c.character ?? '').trim(), prompt, uc: String(c.uc ?? c.negative ?? '').trim(), center: c.center ?? (Array.isArray(c.centers) ? c.centers[0] : null) };
+        })
+        .filter(Boolean);
+    let prompt = d.prompt ?? d.base ?? d.base_caption ?? d.v4_prompt?.caption?.base_caption ?? '';
+    if (!String(prompt).trim() && characters.length) prompt = characters.map(c => c.prompt).join(', ');
+    return { ...d, prompt: String(prompt ?? ''), style: String(d.style ?? ''), characters, uc: String(d.uc ?? d.negative_prompt ?? d.negative ?? '') };
+}
+
 // ── Validation ──
 function validateSettings() {
     const settings = getSettings();
     const errors = [];
-    if (!settings.endpoint && settings.apiType !== 'naistera') errors.push('URL эндпоинта не настроен');
-    if (!settings.apiKey) errors.push('API ключ не настроен');
+    const isNovel = settings.apiType === 'novelai';
+    if (!settings.endpoint && settings.apiType !== 'naistera' && !isNovel) errors.push('URL эндпоинта не настроен');
+    // NovelAI may use the key stored in the tavern itself.
+    if (!settings.apiKey && !isNovel) errors.push('API ключ не настроен');
     // Custom endpoints often pin the model server-side — model is optional there.
-    if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
+    if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !isNovel && !settings.model) errors.push('Модель не выбрана');
     // Naistera: any name goes (the list lags behind the site), it just must
     // not be empty — an empty field would silently fall back to grok.
     if (settings.apiType === 'naistera' && !canonNaisteraModelName(settings.naisteraModel)) errors.push('Для Naistera укажите модель');
@@ -5308,6 +5874,150 @@ function slayChoose(title, text, options) {
     });
 }
 
+// «Ничьи картинки»: every unused file as a small preview, grouped by month,
+// all ticked. Tap = keep/delete, long press (right click on PC) = big view.
+// Previews load only when scrolled into view — 350 pictures at once would
+// choke a phone. Returns the paths to delete (after one confirm), or null.
+function slayPickOrphans(found, total) {
+    const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+    const KIND = { char: 'лицо бота', user: 'юзер', npc0: 'NPC 1', npc1: 'NPC 2', npc2: 'NPC 3', npc3: 'NPC 4', look: 'образ' };
+    const items = found.map((x, i) => {
+        const name = x.path.split('/').pop();
+        const ts = Number((name.match(/(\d{12,14})(?=\.\w+$)/) || [])[1]) || 0;
+        const d = ts ? new Date(ts) : null;
+        const kindKey = (name.match(/^iig_ref_([a-z]+\d?)_/) || [])[1];
+        return {
+            i, path: x.path, name, on: true,
+            tab: x.folder === 'гардероб' ? 'ward' : 'refs',
+            month: d ? d.getFullYear() * 100 + d.getMonth() : 0,
+            monthLabel: d ? MONTHS[d.getMonth()] + ' ' + d.getFullYear() : 'без даты',
+            day: d ? d.getDate() + ' ' + MONTHS[d.getMonth()] : '',
+            kind: x.folder === 'гардероб' ? 'гардероб' : (KIND[kindKey] || 'реф'),
+        };
+    });
+    const tabs = [['refs', 'Референсы'], ['ward', 'Гардероб']].filter(([k]) => items.some(x => x.tab === k));
+    let tab = tabs[0][0];
+
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-choose-ov slay-orph-ov';
+        ov.innerHTML = `
+            <div class="slay-choose-box slay-orph-box">
+                <div class="slay-choose-t">Ничьи картинки</div>
+                <div class="slay-choose-x">Проверено ${total} картинок. На эти не ссылается ничего: ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате. Отмеченные красным удалятся с диска. Тап — оставить/удалить, долгое нажатие — посмотреть крупно.</div>
+                <div class="slay-orph-tabs"></div>
+                <div class="slay-orph-tools"><button data-all="1">Отметить все</button><button data-all="0">Снять все</button><span class="slay-orph-cnt"></span></div>
+                <div class="slay-orph-body"></div>
+                <div class="slay-orph-foot"><button class="slay-choose-b ghost" data-act="cancel">Отмена</button><button class="slay-choose-b danger" data-act="del"></button></div>
+            </div>
+            <div class="slay-orph-lb" hidden></div>`;
+        document.body.appendChild(ov);
+        const body = ov.querySelector('.slay-orph-body');
+        const lb = ov.querySelector('.slay-orph-lb');
+        let io = null;
+
+        const render = () => {
+            ov.querySelector('.slay-orph-tabs').innerHTML = tabs.length > 1
+                ? tabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-tab="${k}">${l} (${items.filter(x => x.tab === k).length})</button>`).join('')
+                : '';
+            const list = items.filter(x => x.tab === tab).sort((a, b) => b.month - a.month || b.i - a.i);
+            const groups = [];
+            for (const x of list) {
+                const g = groups[groups.length - 1];
+                if (g && g.month === x.month) g.xs.push(x); else groups.push({ month: x.month, label: x.monthLabel, xs: [x] });
+            }
+            const keepTop = body.scrollTop;
+            body.innerHTML = groups.map(g => `
+                <div class="slay-orph-month">
+                    <div class="slay-orph-mhead"><span>${g.label} · ${g.xs.length}</span><button data-month="${g.month}">${g.xs.every(x => x.on) ? 'снять месяц' : 'отметить месяц'}</button></div>
+                    <div class="slay-orph-grid">${g.xs.map(x => `<div class="slay-orph-th${x.on ? ' on' : ''}" data-i="${x.i}"><img alt="" decoding="async" data-src="${sanitizeForHtml(x.path)}"><span class="slay-orph-ck">${x.on ? '✓' : ''}</span><span class="slay-orph-kind">${x.kind}</span></div>`).join('')}</div>
+                </div>`).join('');
+            body.scrollTop = keepTop;
+            io?.disconnect();
+            const load = (img) => { if (img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; } };
+            io = typeof IntersectionObserver === 'function'
+                ? new IntersectionObserver((es, obs) => { for (const e of es) if (e.isIntersecting) { load(e.target); obs.unobserve(e.target); } }, { root: body, rootMargin: '150px 0px' })
+                : null;
+            for (const img of body.querySelectorAll('img[data-src]')) io ? io.observe(img) : load(img);
+            const n = items.filter(x => x.tab === tab && x.on).length;
+            ov.querySelector('.slay-orph-cnt').textContent = `отмечено ${n} из ${list.length}`;
+            ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(x => x.on).length})`;
+        };
+
+        const openBig = (x) => {
+            lb.innerHTML = `<div class="slay-orph-lbcard"><img alt="" src="${sanitizeForHtml(x.path)}"><div class="slay-orph-lbmeta">${x.kind}${x.day ? ' · загружено ' + x.day : ''}<br>${sanitizeForHtml(x.name)}</div><div class="slay-orph-lbrow"><button class="slay-choose-b ${x.on ? 'ghost' : 'danger'}" data-lb="toggle">${x.on ? 'Оставить' : 'Удалить'}</button><button class="slay-choose-b ghost" data-lb="close">Закрыть</button></div></div>`;
+            lb.dataset.i = x.i;
+            lb.hidden = false;
+        };
+
+        let done = false;
+        const finish = (v) => { if (done) return; done = true; io?.disconnect(); ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
+        const onKey = (e) => {
+            if (e.key !== 'Escape') return;
+            e.stopPropagation();
+            if (!lb.hidden) lb.hidden = true; else finish(null);
+        };
+        document.addEventListener('keydown', onKey, true);
+
+        let pressT = null, pressed = false;
+        const onClick = async (e) => {
+            // The click that ends a long press would land on the big view and
+            // close it again at once.
+            if (pressed) { pressed = false; return; }
+            const t = e.target;
+            const lbBtn = t.closest('[data-lb]');
+            if (lbBtn) {
+                const x = items[+lb.dataset.i];
+                if (lbBtn.dataset.lb === 'toggle' && x) x.on = !x.on;
+                lb.hidden = true; render(); return;
+            }
+            if (!lb.hidden) { if (t === lb) lb.hidden = true; return; }
+            const b = t.closest('[data-tab],[data-all],[data-month],[data-act],.slay-orph-th');
+            if (!b) { if (t === ov) finish(null); return; }
+            if (b.dataset.tab) tab = b.dataset.tab;
+            else if (b.dataset.all) items.filter(x => x.tab === tab).forEach(x => { x.on = b.dataset.all === '1'; });
+            else if (b.dataset.month) {
+                const xs = items.filter(x => x.tab === tab && String(x.month) === b.dataset.month);
+                const v = !xs.every(x => x.on); xs.forEach(x => { x.on = v; });
+            } else if (b.dataset.act === 'cancel') { finish(null); return; }
+            else if (b.dataset.act === 'del') {
+                const doomed = items.filter(x => x.on);
+                if (!doomed.length) { toastr.info('Ничего не отмечено', 'Гардероб'); return; }
+                if (await slayConfirm(`Удалить ${doomed.length} файлов с диска? Вернуть их будет нельзя.`)) finish(doomed.map(x => ({ path: x.path })));
+                return;
+            } else if (b.classList.contains('slay-orph-th')) {
+                const x = items[+b.dataset.i]; x.on = !x.on;
+                b.classList.toggle('on', x.on);
+                b.querySelector('.slay-orph-ck').textContent = x.on ? '✓' : '';
+                const list = items.filter(y => y.tab === tab);
+                ov.querySelector('.slay-orph-cnt').textContent = `отмечено ${list.filter(y => y.on).length} из ${list.length}`;
+                ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(y => y.on).length})`;
+                const mBtn = b.closest('.slay-orph-month')?.querySelector('[data-month]');
+                if (mBtn) mBtn.textContent = items.filter(y => y.tab === tab && String(y.month) === mBtn.dataset.month).every(y => y.on) ? 'снять месяц' : 'отметить месяц';
+                return;
+            }
+            render();
+        };
+        // Same isolation as slayChoose: clicks must not reach the document-level
+        // handlers that close the wardrobe and the ref popups.
+        for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend', 'contextmenu']) {
+            ov.addEventListener(type, (e) => {
+                e.stopPropagation();
+                const th = e.target.closest?.('.slay-orph-th');
+                if (type === 'pointerdown') pressed = false;
+                if (type === 'click') onClick(e);
+                else if (type === 'pointerdown' && th) {
+                    clearTimeout(pressT);
+                    pressT = setTimeout(() => { pressed = true; openBig(items[+th.dataset.i]); }, 450);
+                } else if (type === 'pointerup' || type === 'pointercancel') clearTimeout(pressT);
+                else if (type === 'contextmenu' && th) { e.preventDefault(); clearTimeout(pressT); pressed = true; openBig(items[+th.dataset.i]); }
+            });
+        }
+        body.addEventListener('scroll', () => clearTimeout(pressT), { passive: true });
+        render();
+    });
+}
+
 function slayCropEnabled() {
     try { return getSettings().skipCrop !== true; } catch (_) { return true; }
 }
@@ -5471,7 +6181,7 @@ async function slayPromptSaveLook(typedNames, path) {
                 for (const x of wrap.querySelectorAll('#slk_folder_chips .iig-fchip')) x.classList.toggle('on', x === b);
             });
             // Seed the filter with the name already in the slot: saving
-            // "Dana, Дана" opens the list showing only the Danas.
+            // "Kate, Катя" opens the list showing only the Kates.
             const picker = swBuildCharPicker(chars, {
                 selectedId: match ? match.id : null,
                 seed: swNameList(match ? match.names : typedNames)[0] || '',
@@ -5783,6 +6493,7 @@ function attachRegenButton(imgEl) {
                 .replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
             try { data = JSON.parse(decoded); }
             catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+            data = iigNormalizeInstruction(data);
         } catch (err) {
             toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
             icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
@@ -5793,12 +6504,15 @@ function attachRegenButton(imgEl) {
         const ctx = SillyTavern.getContext();
         const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
         const chatIdAtStart = ctx?.chatId;
-        // One job per message at a time, whichever button started it.
+        // Blocked only by a whole-message job (new reply being drawn,
+        // «Регенерировать картинки»). Other pictures of the same post can be
+        // redrawn at the same time; the same picture twice is stopped by the
+        // busy class above.
         if (Number.isInteger(messageId) && processingMessages.has(messageId)) {
-            toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images');
+            toastr.info('Сейчас перерисовывается весь пост — дождитесь, потом жмите ↻', 'SLAY Images');
             icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
         }
-        if (Number.isInteger(messageId)) { processingMessages.add(messageId); if (message) processingMessageObjects.add(message); }
+        iigImageJobStart(messageId);
 
         // Capture original state. Use getAttribute('src') — the relative path as stored in
         // message.mes / display_text / extblocks. imgEl.src would give us an absolute URL
@@ -5846,6 +6560,7 @@ function attachRegenButton(imgEl) {
             const result = await generateImageWithRetry(data.prompt, data.style, (s) => { if (overlayLabel?.isConnected) overlayLabel.textContent = s; }, {
                 aspectRatio: data.aspect_ratio, imageSize: data.image_size,
                 quality: data.quality, preset: data.preset, messageId,
+                characters: data.characters, uc: data.uc,
             });
             if (overlayLabel?.isConnected) overlayLabel.textContent = 'Сохранение...';
             if (overlayTimer?.isConnected) overlayTimer.textContent = '';
@@ -5886,8 +6601,28 @@ function attachRegenButton(imgEl) {
                 // extensions) resurrects the old src on a future re-render, the
                 // heal pass will swap it back to this new one on sight.
                 recordSrcRemap(origSrcAttr, path);
-                if (!origSrcAttr) return false;
-                return replaceImageSrcEverywhere(message, origSrcAttr, path);
+                if (origSrcAttr && replaceImageSrcEverywhere(message, origSrcAttr, path)) return true;
+                // The address on screen is not the one stored in the message (a
+                // fresh picture, a healed or re-encoded src): find the tag by its
+                // instruction instead, like «Попробовать снова» does. Without this
+                // the new file landed in the folder and never in the chat.
+                const instr = imgEl.getAttribute('data-iig-instruction') || '';
+                const mutate = (full) => regenIsVideo ? buildPersistedVideoTag(full, path) : iigSuccessTag(full, path);
+                if (instr && (await iigRewriteTagByInstruction(message, instr, mutate)) > 0) return true;
+                // Last resort: the same picture by position. The N-th picture on
+                // screen in this message is the N-th image tag in its text.
+                try {
+                    const mesText = (liveImg.isConnected ? liveImg : imgEl).closest('.mes_text');
+                    const onScreen = mesText ? [...mesText.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction], .iig-error-placeholder[data-iig-instruction]')] : [];
+                    const pos = onScreen.indexOf(liveImg.isConnected ? liveImg : imgEl);
+                    const tags = pos >= 0 ? await parseImageTags(message.mes || '', { forceAll: true }) : [];
+                    if (pos >= 0 && tags.length === onScreen.length && tags[pos]) {
+                        replaceTagInMessageSource(message, tags[pos], mutate(tags[pos].fullMatch));
+                        iigLog('INFO', `Regen: written by position ${pos + 1}/${tags.length}`);
+                        return true;
+                    }
+                } catch (e) { iigLog('WARN', 'Regen: position fallback failed:', e?.message || e); }
+                return false;
             };
             if (newImagePath) {
                 // Success path — apply new src and persist everywhere
@@ -5900,9 +6635,15 @@ function attachRegenButton(imgEl) {
                     // the OLD src and the previous image silently re-appears.
                     try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
                 } else if (r === false && message) {
-                    iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
+                    iigLog('WARN', `Regen: tag not found in message fields (src "${origSrcAttr.slice(0, 60)}") — src updated in DOM only`);
                 }
-                toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
+                if (r === false && message) {
+                    // Say it: a silent WARN in the console is how a paid picture
+                    // ended up in the folder but not in the chat.
+                    toastr.warning('Картинка перерисована, но в чат не записалась — после перезагрузки вернётся старая. Файл лежит в папке картинок.', 'SLAY Images', { timeOut: 9000 });
+                } else if (r !== 'deferred') {
+                    toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
+                }
             } else if (unsaved) {
                 // Generated and paid for, but ST would not store the file: show it
                 // from the data URL and let the user retry ONLY the upload.
@@ -5935,7 +6676,7 @@ function attachRegenButton(imgEl) {
             } catch (e) { /* never block finalization */ }
             icon.className = origIconClass;
             btn.classList.remove('iig-regen-busy');
-            if (Number.isInteger(messageId)) iigReleaseInFlight(messageId, message);
+            iigImageJobEnd(messageId);
         }
     });
     wrap.appendChild(btn);
@@ -6018,7 +6759,7 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
         for (const el of pending) {
             const mesEl = el.closest('.mes');
             const mid = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : NaN;
-            if (Number.isInteger(mid) && processingMessages.has(mid)) continue;
+            if (Number.isInteger(mid) && iigMessageBusy(mid)) continue;
             const instr = el.getAttribute('data-iig-instruction') || '';
             const errorEl = createErrorPlaceholder(`iig-interrupted-${Date.now()}`, 'Генерация была прервана — вкладка закрылась или связь оборвалась', { fullMatch: `data-iig-instruction='${instr}'` });
             (el.closest('.iig-img-wrap') || el).replaceWith(errorEl);
@@ -6076,6 +6817,13 @@ function decodeNumericEntities(str) {
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
     validateSettings();
     const settings = getSettings();
+    prompt = typeof prompt === 'string' ? prompt : String(prompt ?? '');
+    style = typeof style === 'string' ? style : String(style ?? '');
+    // Multi-character instructions: names count for refs/wardrobe matching too.
+    const tagChars = (Array.isArray(options.characters) ? options.characters : [])
+        .filter(c => c && typeof c === 'object')
+        .map(c => ({ ...c, name: decodeNumericEntities(String(c.name || '')), prompt: decodeNumericEntities(String(c.prompt || '')), uc: decodeNumericEntities(String(c.uc || '')) }));
+    options = { ...options, characters: tagChars };
     // Normalize the prompt BEFORE name-matching and before it's sent to the API.
     // This is the single chokepoint where charInPrompt/userInPrompt are computed
     // and where the request body is built, so decoding here fixes both.
@@ -6087,6 +6835,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             iigLog('INFO', `decoded numeric HTML entities in prompt (sample: ${m}) — Cyrillic names should now match`);
         }
     }
+    if (!prompt.trim() && tagChars.length) prompt = tagChars.map(c => c.prompt).filter(Boolean).join(', ');
+    // Before any request: an empty prompt is a paid picture of nothing.
+    if (!prompt.trim()) throw new Error('В теге картинки пустой промпт — модель не написала описание сцены');
     // Override with user-selected SLAY style if configured — unless the style
     // already sits in the preset toggle (S4): the model then writes the style
     // into the prompt itself, so neither the tag's style field is replaced nor
@@ -6107,11 +6858,16 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── Determine which characters are mentioned in the prompt (used for refs AND descriptions) ──
     // Name field can contain multiple aliases separated by comma/semicolon/pipe/slash/space
-    // (e.g. "Ева, Eve, Eva, Ivy, Иви") — see parseNameTokens(). Matching any alias = mentioned.
-    const refs = getCurrentCharacterRefs();
-    const charDisplayName = getDefaultCharRefName(refs);
+    // (e.g. "Анна, Anna, Ann, Annie, Аня") — see parseNameTokens(). Matching any alias = mentioned.
+    // Group chats: refs and outfit follow the message author, not whoever
+    // ST happens to hold as current (nobody, once the group is done talking).
+    const groupAuthor = slayGroupAuthor(options.messageId);
+    const swMember = groupAuthor || undefined;
+    const refs = SillyTavern.getContext().groupId ? slayGroupRefs(groupAuthor) : getCurrentCharacterRefs();
+    const charDisplayName = groupAuthor ? String(refs?.charRef?.name || groupAuthor).trim() : getDefaultCharRefName(refs);
     const userDisplayName = getDefaultUserRefName(refs);
-    const lowerPrompt = prompt.toLowerCase();
+    const fullSearchText = [prompt, ...tagChars.map(c => `${c.name} ${c.prompt}`)].join(' ');
+    const lowerPrompt = fullSearchText.toLowerCase();
     const charInPrompt = nameIsInPrompt(charDisplayName, lowerPrompt);
     const userInPrompt = nameIsInPrompt(userDisplayName, lowerPrompt);
     // Refs ship only when their owner is explicitly named in the image prompt. This restores
@@ -6130,7 +6886,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // downloading/encoding avatars that generateImageOpenAI would then discard.
     // 'edits' (GPT images/edits) takes references as files — treated like 'chat'.
     const _customFormat = settings.apiType === 'custom' ? (settings.customBodyFormat || 'chat') : 'chat';
-    const _skipRefs = _customFormat === 'images';
+    // NovelAI takes no reference pictures (V5 ignores them by design).
+    const _skipRefs = _customFormat === 'images' || settings.apiType === 'novelai';
     const _isEdits = _customFormat === 'edits';
     if (settings.apiType !== 'naistera' && !_skipRefs) {
         const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
@@ -6158,30 +6915,35 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         if (window.slayWardrobe?.isReady()) {
             if (canPush() && charInPrompt && swS.sendOutfitImageBot !== false) {
                 let pushed = false;
-                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
+                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot', swMember);
                 if (botB64) pushed = pushRef(botB64, 'char_outfit', charDisplayName);
                 if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot', swMember);
                     if (pushRef(collageB64, 'char_outfit', charDisplayName)) iigLog('INFO', 'Collage sent for char');
                 }
             }
             if (canPush() && userInPrompt && swS.sendOutfitImageUser !== false) {
                 let pushed = false;
-                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user', swMember);
                 if (userB64) pushed = pushRef(userB64, 'user_outfit', userDisplayName);
                 if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                    const collageB64 = await window.slayWardrobe.getCollageBase64('user');
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('user', swMember);
                     if (pushRef(collageB64, 'user_outfit', userDisplayName)) iigLog('INFO', 'Collage sent for user');
                 }
             }
         }
 
         // 4. Matched NPCs
-        const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
+        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const b64 = npc.imagePath ? await loadRefImageAsBase64(npc.imagePath) : (npc.imageBase64 || npc.imageData);
             if (pushRef(b64, 'npc_matched', npc.name || 'NPC')) iigLog('INFO', `NPC matched: ${npc.name}`);
+            // Group member in the frame: their group outfit follows their face.
+            if (npc._member && canPush() && swS.sendOutfitImageBot !== false && window.slayWardrobe?.isReady()) {
+                const ob64 = await window.slayWardrobe.getActiveOutfitBase64('bot', npc._member);
+                if (ob64) pushRef(ob64, 'char_outfit', npc._member);
+            }
         }
         // 5. Context images — not for images/edits: there every file is a
         // subject to keep, and a previous scene would be «kept» too.
@@ -6232,29 +6994,33 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         if (window.slayWardrobe?.isReady()) {
             if (canPush() && charInPrompt && swS.sendOutfitImageBot !== false) {
                 let pushed = false;
-                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot');
+                const botB64 = await window.slayWardrobe.getActiveOutfitBase64('bot', swMember);
                 if (botB64) pushed = pushRef(`data:image/png;base64,${botB64}`, `${charDisplayName} outfit`);
                 if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot');
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('bot', swMember);
                     if (pushRef(collageB64 ? `data:image/png;base64,${collageB64}` : null, `${charDisplayName} outfit`)) iigLog('INFO', 'Collage sent for char');
                 }
             }
             if (canPush() && userInPrompt && swS.sendOutfitImageUser !== false) {
                 let pushed = false;
-                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user');
+                const userB64 = await window.slayWardrobe.getActiveOutfitBase64('user', swMember);
                 if (userB64) pushed = pushRef(`data:image/png;base64,${userB64}`, `${userDisplayName} outfit`);
                 if (!pushed && canPush() && swS.experimentalCollage && window.slayWardrobe?.getCollageBase64) {
-                    const collageB64 = await window.slayWardrobe.getCollageBase64('user');
+                    const collageB64 = await window.slayWardrobe.getCollageBase64('user', swMember);
                     if (pushRef(collageB64 ? `data:image/png;base64,${collageB64}` : null, `${userDisplayName} outfit`)) iigLog('INFO', 'Collage sent for user');
                 }
             }
         }
         // 4. NPC faces (matched against prompt)
-        const matchedNpcs = matchNpcReferences(prompt, refs.npcReferences || []);
+        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
             if (url) { pushRef(url, `${npc.name} (NPC)`); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
+            if (npc._member && canPush() && swS.sendOutfitImageBot !== false && window.slayWardrobe?.isReady()) {
+                const ob64 = await window.slayWardrobe.getActiveOutfitBase64('bot', npc._member);
+                if (ob64) pushRef(`data:image/png;base64,${ob64}`, `${npc._member} outfit`);
+            }
         }
         // 5. Context refs (previous images)
         if (settings.imageContextEnabled) {
@@ -6280,17 +7046,35 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     // ── Inject wardrobe outfit descriptions into prompt (only if enabled) ──
     if (swS.sendOutfitDescription !== false && window.slayWardrobe?.isReady()) {
-        const botDesc = window.slayWardrobe.getActiveOutfitDescription('bot');
-        const userDesc = window.slayWardrobe.getActiveOutfitDescription('user');
+        const botDesc = window.slayWardrobe.getActiveOutfitDescription('bot', swMember);
+        const userDesc = window.slayWardrobe.getActiveOutfitDescription('user', swMember);
         iigLog('INFO', `Wardrobe bot desc (${botDesc.length} chars): ${botDesc.substring(0, 150)}`);
         iigLog('INFO', `Wardrobe user desc (${userDesc.length} chars): ${userDesc.substring(0, 150)}`);
         const wardrobeParts = [];
-        if (botDesc && charInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [Character's current outfit: ${botDesc}]`);
-        if (userDesc && userInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [User's current outfit: ${userDesc}]`);
+        if (settings.apiType === 'novelai') {
+            // Tag-based model: the outfit goes into the prompt of the character
+            // who wears it, not into a shared heap where it lands on everyone.
+            let botDone = false, userDone = false;
+            for (const c of tagChars) {
+                const t = `${c.name} ${c.prompt}`.toLowerCase();
+                if (botDesc && charInPrompt && !botDone && nameIsInPrompt(charDisplayName, t)) { c.prompt = `${botDesc}, ${c.prompt}`; botDone = true; }
+                else if (userDesc && userInPrompt && !userDone && nameIsInPrompt(userDisplayName, t)) { c.prompt = `${userDesc}, ${c.prompt}`; userDone = true; }
+            }
+            if (botDesc && charInPrompt && !botDone) wardrobeParts.push(botDesc);
+            if (userDesc && userInPrompt && !userDone) wardrobeParts.push(userDesc);
+        } else {
+            if (botDesc && charInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [Character's current outfit: ${botDesc}]`);
+            if (userDesc && userInPrompt) wardrobeParts.push(`[Clothing reference only, avoid copying the pose] [User's current outfit: ${userDesc}]`);
+        }
         if (wardrobeParts.length > 0) {
-            prompt = `${wardrobeParts.join(' ')}\n${prompt}`;
+            prompt = settings.apiType === 'novelai' ? `${wardrobeParts.join(', ')}, ${prompt}` : `${wardrobeParts.join(' ')}\n${prompt}`;
             iigLog('INFO', `Wardrobe v4 descriptions injected: ${wardrobeParts.join(' | ').substring(0, 200)}`);
         }
+    }
+
+    // Other providers read prose: list the characters so their parts aren't lost.
+    if (settings.apiType !== 'novelai' && tagChars.length) {
+        prompt = `${prompt}\nCharacters:\n${tagChars.map((c, i) => `${c.name || `Character ${i + 1}`}: ${c.prompt}`).join('\n')}`;
     }
 
     let lastError;
@@ -6300,6 +7084,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             let generated;
             if (settings.apiType === 'naistera') {
                 generated = await generateImageNaistera(prompt, style, { ...options, referenceImages: referenceDataUrls, referenceLabels: naisteraRefLabels, videoTestMode: enableVideoTest, videoEveryN: settings.naisteraVideoEveryN });
+            } else if (settings.apiType === 'novelai') {
+                generated = await generateImageNovelAI(prompt, style, options);
             } else if (settings.apiType === 'gemini') {
                 // Strictly user's choice — don't auto-route via isGeminiModel().
                 // Some OpenAI-compat routers (llmrouter, openrouter) host Gemini
@@ -6423,8 +7209,8 @@ async function parseImageTags(text, options = {}) {
 
         try {
             let normalizedJson = instructionJson.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&amp;/g, '&');
-            const data = JSON.parse(normalizedJson);
-            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null, instruction: instructionJson, instructionKey: iigInstructionKey(instructionJson) });
+            const data = iigNormalizeInstruction(JSON.parse(normalizedJson));
+            tags.push({ fullMatch: fullImgTag, index: mediaStart, style: data.style || '', prompt: data.prompt || '', characters: data.characters, uc: data.uc, aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: true, mediaTagName: tagName, existingSrc: hasPath ? srcValue : null, instruction: instructionJson, instructionKey: iigInstructionKey(instructionJson) });
             iigLog('INFO', `Found NEW tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) { iigLog('WARN', `Parse failed: ${instructionJson.substring(0, 100)}`); }
         searchPos = mediaEnd;
@@ -6450,8 +7236,8 @@ async function parseImageTags(text, options = {}) {
         if (!text.substring(jsonEnd).startsWith(']')) { searchStart = jsonEnd; continue; }
         const tagOnly = text.substring(markerIndex, jsonEnd + 1);
         try {
-            const data = JSON.parse(jsonStr.replace(/'/g, '"'));
-            tags.push({ fullMatch: tagOnly, index: markerIndex, style: data.style || '', prompt: data.prompt || '', aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: false });
+            const data = iigNormalizeInstruction(JSON.parse(jsonStr.replace(/'/g, '"')));
+            tags.push({ fullMatch: tagOnly, index: markerIndex, style: data.style || '', prompt: data.prompt || '', characters: data.characters, uc: data.uc, aspectRatio: data.aspect_ratio || data.aspectRatio || null, preset: data.preset || null, imageSize: data.image_size || data.imageSize || null, quality: data.quality || null, isNewFormat: false });
             iigLog('INFO', `Found LEGACY tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) { iigLog('WARN', `Legacy parse failed: ${jsonStr.substring(0, 100)}`); }
         searchStart = jsonEnd + 1;
@@ -6501,7 +7287,7 @@ function iigIsLiveImagePath(src) {
 // ── Tag-string helpers: src, the error stamp, lazy attributes, instruction keys ──
 // Quote-aware src. The old readers (`[^'"]*`, `[^"'\s>]+`) stopped at the first
 // quote of either kind or at a space, so a path with an apostrophe
-// («Roman 'Ro' Thorne») or a double space in the folder name was cut in half —
+// («Anna 'Ann' Smith») or a double space in the folder name was cut in half —
 // and the half was then checked for existence, found missing and regenerated.
 const IIG_TAG_SRC_RE = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
 function iigGetTagSrc(tagHtml) {
@@ -6663,6 +7449,21 @@ function iigStillSameChat(chatIdAtStart, messageId, message) {
         return ctx.chatId === chatIdAtStart && ctx.chat?.[messageId] === message;
     } catch (_) { return false; }
 }
+// ↻ on a picture and «Попробовать снова» on a card are IMAGE jobs: several may
+// run in one message at once (each rewrites only its own tag). They must not
+// take the whole-message lock, or tapping ↻ on picture 2 while picture 1 is
+// redrawing said «уже генерируются». Only whole-message jobs (a new reply,
+// «Регенерировать картинки») wait for them, and they wait for those.
+const imageJobs = new Map();   // messageId -> image jobs in flight
+function iigImageJobsIn(messageId) { return imageJobs.get(messageId) || 0; }
+function iigImageJobStart(messageId) { if (Number.isInteger(messageId)) imageJobs.set(messageId, iigImageJobsIn(messageId) + 1); }
+function iigImageJobEnd(messageId) {
+    if (!Number.isInteger(messageId)) return;
+    const n = iigImageJobsIn(messageId) - 1;
+    if (n > 0) imageJobs.set(messageId, n); else imageJobs.delete(messageId);
+}
+function iigMessageBusy(messageId) { return processingMessages.has(messageId) || iigImageJobsIn(messageId) > 0; }
+
 function iigReleaseInFlight(messageId, messageObj) {
     if (messageObj) processingMessageObjects.delete(messageObj);
     let live = null;
@@ -7069,6 +7870,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         const decoded = iigDecodeInstruction(instructionJsonStr);
         try { data = JSON.parse(decoded); }
         catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
+        data = iigNormalizeInstruction(data);
     } catch (err) {
         toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
         errorEl.dataset.iigRetrying = '0';
@@ -7082,12 +7884,11 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     const chatIdAtStart = ctx?.chatId;
     if (Number.isInteger(messageId)) {
         if (processingMessages.has(messageId)) {
-            toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images');
+            toastr.info('Сейчас перерисовывается весь пост — дождитесь, потом жмите «Попробовать снова»', 'SLAY Images');
             errorEl.dataset.iigRetrying = '0';
             return;
         }
-        processingMessages.add(messageId);
-        if (message) processingMessageObjects.add(message);
+        iigImageJobStart(messageId);
     }
 
     // Swap error placeholder for loading placeholder
@@ -7100,7 +7901,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     try {
         const result = await generateImageWithRetry(data.prompt, data.style,
             (s) => { if (labelEl?.isConnected) labelEl.textContent = s; },
-            { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, messageId });
+            { aspectRatio: data.aspect_ratio, imageSize: data.image_size, quality: data.quality, preset: data.preset, messageId, characters: data.characters, uc: data.uc });
         if (labelEl?.isConnected) labelEl.textContent = 'Сохранение...';
         if (timerEl?.isConnected) timerEl.textContent = '';
         const isVideo = isGeneratedVideoResult(result);
@@ -7183,7 +7984,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
     } finally {
         // Retry is the third path that fills the context-ref memo; only the
         // automatic one ever emptied it.
-        if (Number.isInteger(messageId)) { clearContextRefCache(messageId); iigReleaseInFlight(messageId, message); }
+        if (Number.isInteger(messageId)) { clearContextRefCache(messageId); iigImageJobEnd(messageId); }
     }
 }
 
@@ -7231,7 +8032,7 @@ async function processMessageTags(messageId) {
                     const decoded = iigDecodeInstruction(instruction);
                     const normalizedSearch = iigDecodeInstruction(searchPrompt);
                     if (decoded.includes(normalizedSearch)) { targetElement = img; break; }
-                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (d.prompt?.substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
+                    try { const d = JSON.parse(decoded.replace(/'/g, '"')); if (String(d.prompt || d.base || '').substring(0, 30) === tag.prompt.substring(0, 30)) { targetElement = img; break; } } catch (e) { }
                     if (instruction.includes(searchPrompt)) { targetElement = img; break; }
                 }
             }
@@ -7256,7 +8057,7 @@ async function processMessageTags(messageId) {
         const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
         const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
         try {
-            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+            const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, characters: tag.characters, uc: tag.uc, messageId });
 
             labelEl.textContent = 'Сохранение...';
             if (timerEl) timerEl.textContent = '';
@@ -7362,6 +8163,7 @@ async function processMessageTags(messageId) {
 async function regenerateMessageImages(messageId) {
     if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
     if (processingMessages.has(messageId)) { toastr.info('Картинки этого сообщения уже генерируются', 'SLAY Images'); return; }
+    if (iigImageJobsIn(messageId) > 0) { toastr.info('Ещё перерисовываются отдельные картинки этого поста — дождитесь их', 'SLAY Images'); return; }
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
     if (!message) { toastr.error('Сообщение не найдено', 'SLAY Images'); return; }
@@ -7409,7 +8211,7 @@ async function regenerateMessageImages(messageId) {
                 const statusEl = loadingPlaceholder.querySelector('.iig-status');
                 const labelEl = loadingPlaceholder.querySelector('.iig-status-label') || statusEl;
                 const timerEl = loadingPlaceholder.querySelector('.iig-status-timer');
-                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, messageId });
+                const result = await generateImageWithRetry(tag.prompt, tag.style, (s) => { labelEl.textContent = s; }, { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality, preset: tag.preset, characters: tag.characters, uc: tag.uc, messageId });
                 labelEl.textContent = 'Сохранение...';
                 if (timerEl) timerEl.textContent = '';
 
@@ -7534,7 +8336,31 @@ async function onMessageReceived(messageId) {
 
 function renderRefSlots() {
     const settings = getCurrentCharacterRefs();
-    const charDisplayName = getActiveCharacterName() || 'Character';
+    const groupId = SillyTavern.getContext().groupId;
+    const charDisplayName = (groupId ? slayRefGroupMember() : getActiveCharacterName()) || 'Character';
+    // Group: member chips above the slots; the user slot is the group's.
+    const grid = document.querySelector('.iig-refs-grid');
+    if (grid) {
+        let row = document.getElementById('slay_ref_members');
+        if (!row) {
+            row = document.createElement('div');
+            row.id = 'slay_ref_members';
+            row.className = 'slay-ref-members';
+            grid.parentNode.insertBefore(row, grid);
+            row.addEventListener('click', (e) => {
+                const b = e.target.closest('[data-member]');
+                if (!b) return;
+                _slayRefGroupMember[SillyTavern.getContext().groupId] = b.dataset.member;
+                renderRefSlots();
+            });
+        }
+        row.hidden = !groupId;
+        if (groupId) {
+            const cur = slayRefGroupMember();
+            row.innerHTML = slayGroupMemberNames().map(n => `<div class="slay-ref-member${n === cur ? ' active' : ''}" data-member="${sanitizeForHtml(n)}">${sanitizeForHtml(n)}</div>`).join('')
+                + '<div class="slay-ref-members-note">Лицо и NPC — того, кого выбрала (общие с его соло-чатом). Юзер — один на группу.</div>';
+        }
+    }
     const userDisplayName = getActiveUserName() || 'User';
     const setThumb = (slot, ref) => {
         const thumb = slot?.querySelector('.iig-ref-thumb');
@@ -7610,7 +8436,8 @@ function slaySwOwnConnection(s) {
 function slayCountEquipped(swS) {
     let cn = '';
     try { cn = getActiveCharacterName() || ''; } catch (e) { /* no chat */ }
-    const co = cn && swS?.activeOutfits ? swS.activeOutfits[cn] : null;
+    let co = cn && swS?.activeOutfits ? swS.activeOutfits[cn] : null;
+    try { if (SillyTavern.getContext().groupId) co = window.slayWardrobe?.currentOutfit?.() || null; } catch (e) { /* no chat */ }
     if (!co) return 0;
     const items = Array.isArray(swS.items) ? swS.items : [];
     let n = 0;
@@ -7634,10 +8461,10 @@ function updateSectionStatuses() {
     const fmt = isCustom ? (settings.customBodyFormat || 'chat') : 'chat';
     // Подключение: «OpenAI · gpt-image-1 · ✓»
     {
-        const typeLabel = { openai: 'OpenAI', gemini: 'Gemini', naistera: 'Naistera', custom: 'Custom' }[apiType] || apiType;
-        const model = isNaistera ? (normalizeNaisteraModel(settings.naisteraModel) || '—') : (settings.model || '—');
+        const typeLabel = { openai: 'OpenAI', gemini: 'Gemini', naistera: 'Naistera', custom: 'Custom', novelai: 'NovelAI' }[apiType] || apiType;
+        const model = apiType === 'novelai' ? novelModelLabel(getEffectiveNovelModel(settings)) : isNaistera ? (normalizeNaisteraModel(settings.naisteraModel) || '—') : (settings.model || '—');
         const parts = [typeLabel, model];
-        if (!settings.apiKey) parts.push('нет ключа');
+        if (!settings.apiKey) parts.push(apiType === 'novelai' ? 'ключ из таверны' : 'нет ключа');
         else if (_slayTestOk) parts.push('✓');
         set('api', parts.join(' · '));
     }
@@ -7646,10 +8473,16 @@ function updateSectionStatuses() {
         const parts = [settings.slayStyleName || 'Как в пресете'];
         if (isCustom && fmt === 'images') parts.push(settings.size || '1024x1024');
         else {
-            const ratio = isNaistera ? (settings.naisteraAspectRatio || 'auto') : (settings.aspectRatio || 'auto');
-            parts.push(ratio === 'auto' ? 'из промпта' : ratio);
-            // edits takes its size from the ratio; Naistera has no 1K/2K/4K at all.
-            if (!isNaistera && fmt !== 'edits') parts.push(settings.imageSize || '1K');
+            if (apiType === 'novelai') {
+                const r = settings.novelResolution || 'auto';
+                parts.push(r === 'auto' ? 'из промпта' : r.replace('x', '×'));
+                if (settings.novelAnlasGuard !== false) parts.push('без Anlas');
+            } else {
+                const ratio = isNaistera ? (settings.naisteraAspectRatio || 'auto') : (settings.aspectRatio || 'auto');
+                parts.push(ratio === 'auto' ? 'из промпта' : ratio);
+                // edits takes its size from the ratio; Naistera has no 1K/2K/4K at all.
+                if (!isNaistera && fmt !== 'edits') parts.push(settings.imageSize || '1K');
+            }
         }
         set('img', parts.join(' · '));
     }
@@ -7700,7 +8533,7 @@ function createSettingsUI() {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
             <div class="iig-ref-thumb-wrap"><img src="" alt="NPC" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user-plus"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
             <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
-            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div>
+            <div class="iig-ref-info"><div class="iig-ref-label">NPC ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Anna, Анна)" value=""></div>
             <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
         </div>`;
     }
@@ -7724,12 +8557,13 @@ function createSettingsUI() {
 
     const apiBody = `
                         <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                        <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
+                        <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="novelai" ${settings.apiType === 'novelai' ? 'selected' : ''}>NovelAI Diffusion</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
                         <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option><option value="edits" ${settings.customBodyFormat === 'edits' ? 'selected' : ''}>images/edits (GPT, с рефами)</option></select>${info('slay_custom_hint')}</div>
                         <p class="hint iig-hint-long iig-hidden" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются). Формат «images/edits» (GPT) отправляет рефы файлами — нужен хотя бы один реф, модель обязательна (например gpt-image-1).</p>
-                        <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
-                        <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
+                        <div class="flex-row ${settings.apiType === 'novelai' ? 'iig-hidden' : ''}" id="slay_endpoint_row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
+                        <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}" placeholder="${settings.apiType === 'novelai' ? 'pst-… или пусто, если ключ в таверне' : ''}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                         <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
+                        <p id="slay_novel_hint" class="hint ${settings.apiType === 'novelai' ? '' : 'iig-hidden'}">NovelAI: вставьте Persistent API Token (<i>pst-…</i>, NovelAI → Account Settings → Get Persistent API Token). Можно оставить пустым, если ключ уже вписан в настройках NovelAI самой таверны — но тогда несколько персонажей сливаются в один промпт.</p>
                         <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                         <label class="checkbox_label" id="slay_manual_model_row"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
                         <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="nano banana 2" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2' ? 'selected' : ''}>Nano Banana 2</option><option value="nano banana 2 lite" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2 lite' ? 'selected' : ''}>Nano Banana 2 Lite</option><option value="nano banana pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana pro' ? 'selected' : ''}>Nano Banana Pro</option><option value="novelai v4.5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v4.5' ? 'selected' : ''}>NovelAI V4.5</option><option value="novelai v5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v5' ? 'selected' : ''}>NovelAI V5</option><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana (старая)</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI (старая)</option><option value="${NAISTERA_MANUAL}" ${!naisteraModelIsListed(settings.naisteraModel) ? 'selected' : ''}>— вписать вручную —</option></select></div>
@@ -7749,7 +8583,25 @@ function createSettingsUI() {
                         <p class="hint">Размер берётся из соотношения сторон: квадрат 1024×1024, горизонталь 1536×1024, вертикаль 1024×1536</p>
                         </div>
                         <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_aspect_row"><label>Соотношение</label><select id="slay_naistera_aspect_ratio" class="flex1"><option value="auto" ${(settings.naisteraAspectRatio || 'auto') === 'auto' ? 'selected' : ''}>Из промпта</option><option value="1:1" ${settings.naisteraAspectRatio === '1:1' ? 'selected' : ''}>1:1</option><option value="3:2" ${settings.naisteraAspectRatio === '3:2' ? 'selected' : ''}>3:2</option><option value="2:3" ${settings.naisteraAspectRatio === '2:3' ? 'selected' : ''}>2:3</option></select></div>
-                        <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${settings.slayStyleName || 'Как в пресете'}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div></div></div>
+                        <div id="slay_novel_params" class="iig-col ${settings.apiType === 'novelai' ? '' : 'iig-hidden'}">
+                        <div class="flex-row"><label>Модель NovelAI</label><select id="slay_novel_model" class="flex1">${NOVELAI_MODELS.map(m => `<option value="${m.value}" ${(isPredefinedNovelModel(settings.novelModel) ? settings.novelModel : 'custom') === m.value ? 'selected' : ''}>${m.label}</option>`).join('')}</select></div>
+                        <div class="flex-row ${isPredefinedNovelModel(settings.novelModel) ? 'iig-hidden' : ''}" id="slay_novel_custom_model_row"><label>ID модели</label><input type="text" id="slay_novel_custom_model" class="text_pole flex1" value="${sanitizeForHtml(settings.novelCustomModel || '')}" placeholder="например nai-diffusion-5-curated" autocomplete="off" spellcheck="false"></div>
+                        <div class="flex-row"><label>Размер</label><select id="slay_novel_resolution" class="flex1">${NOVELAI_RESOLUTIONS.map(r => `<option value="${r.value}" ${(settings.novelResolution || 'auto') === r.value ? 'selected' : ''}>${r.label}</option>`).join('')}</select></div>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_novel_anlas_guard" ${settings.novelAnlasGuard !== false ? 'checked' : ''}><span>Не тратить Anlas (Opus): до 1024×1024 и 28 шагов</span></label>
+                        <div class="flex-row"><label>Сэмплер</label><select id="slay_novel_sampler" class="flex1">${NOVELAI_SAMPLERS.map(s => `<option value="${s}" ${(settings.novelSampler || 'k_euler_ancestral') === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+                        <div class="flex-row" id="slay_novel_scheduler_row"><label>Планировщик</label><select id="slay_novel_scheduler" class="flex1">${NOVELAI_SCHEDULERS.map(s => `<option value="${s}" ${(settings.novelScheduler || 'karras') === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+                        <div class="flex-row"><label>Шаги</label><input type="number" id="slay_novel_steps" class="text_pole flex1" value="${Number(settings.novelSteps) || 28}" min="1" max="50" step="1"></div>
+                        <div class="flex-row"><label>CFG</label><input type="number" id="slay_novel_scale" class="text_pole flex1" value="${Number.isFinite(Number(settings.novelScale)) ? Number(settings.novelScale) : 5}" min="1" max="10" step="0.1"></div>
+                        <div class="flex-row"><label>Seed (-1 = случайный)</label><input type="number" id="slay_novel_seed" class="text_pole flex1" value="${Number.isFinite(Number(settings.novelSeed)) ? Number(settings.novelSeed) : -1}" min="-1" step="1"></div>
+                        <div class="flex-row"><label>Префикс</label><input type="text" id="slay_novel_prefix" class="text_pole flex1" value="${sanitizeForHtml(settings.novelPrefix ?? '')}" placeholder="best quality, absurdres, aesthetic,"></div>
+                        <div class="flex-row" style="align-items:flex-start;"><label>Негатив</label><textarea id="slay_novel_negative" class="text_pole flex1" rows="2" placeholder="lowres, bad anatomy, bad hands…">${sanitizeForHtml(settings.novelNegative ?? '')}</textarea></div>
+                        <label class="checkbox_label" id="slay_novel_variety_row"><input type="checkbox" id="slay_novel_variety_boost" ${settings.novelVarietyBoost ? 'checked' : ''}><span>Variety+ (разнообразнее композиция, V3–V4.5)</span></label>
+                        <label class="checkbox_label" id="slay_novel_decrisper_row"><input type="checkbox" id="slay_novel_decrisper" ${settings.novelDecrisper ? 'checked' : ''}><span>Decrisper (мягче контраст, V3–V4.5)</span></label>
+                        <label class="checkbox_label" id="slay_novel_sm_row"><input type="checkbox" id="slay_novel_sm" ${settings.novelSm ? 'checked' : ''}><span>SMEA (только V2/V3)</span></label>
+                        <label class="checkbox_label" id="slay_novel_sm_dyn_row"><input type="checkbox" id="slay_novel_sm_dyn" ${settings.novelSmDyn ? 'checked' : ''}><span>SMEA DYN (только V2/V3)</span></label>
+                        <p class="hint">Стиль из пикера уходит в промпт, а его «Avoid: …» — в негатив: NovelAI рисует всё, что написано в промпте.</p>
+                        </div>
+                        <div class="flex-row" id="slay_style_row"><label>Стиль</label><div class="flex1" style="display:flex;gap:6px;align-items:center;min-width:0;"><span id="slay_style_name" style="flex:1;min-width:30px;font-size:0.8em;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${sanitizeForHtml(settings.slayStyleName || 'Как в пресете')}</span><div id="slay_style_pick_btn" class="menu_button" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-palette"></i><span>Выбрать</span></div><div id="slay_style_reset_btn" class="menu_button" title="Снять стиль и вернуть тогл пресета" style="white-space:nowrap;flex-shrink:0;display:inline-flex;align-items:center;gap:7px;"><i class="fa-solid fa-rotate-left"></i><span>Сбросить</span></div></div></div>
                         <label class="checkbox_label" for="slay_style_to_preset" id="slay_style_preset_row"><input type="checkbox" id="slay_style_to_preset" ${settings.slayStyleToPreset ? 'checked' : ''}><span>Стиль в тогл пресета</span></label>
                         <div class="flex-row iig-hidden" id="slay_style_target_row"><label>Тогл в пресете «<span id="slay_style_preset_name"></span>»</label><select id="slay_style_target" class="flex1"></select></div>
                         <div id="slay_style_status" class="iig-style-status"></div>
@@ -7769,11 +8621,11 @@ function createSettingsUI() {
                             </button>
                             ${info('slay_refs_hint')}
                         </div>
-                        <p class="hint iig-hint-long iig-hidden" id="slay_refs_hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Ева, Eve, Eva, Ivy, Иви</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
+                        <p class="hint iig-hint-long iig-hidden" id="slay_refs_hint">Рефы (char / user / NPC) и картинки одежды отправляются <b>только</b> когда в промпте картинки упомянуто имя. В поле «Имя» можно указать несколько вариантов через запятую (например, <i>Анна, Anna, Ann, Annie, Аня</i>) — реф подтянется если встретится любой. Пишите имена с большой буквы (!). Чтобы полностью отключить реф для слота — удалите картинку из него.</p>
                         <div class="iig-refs-grid">
                         <div class="iig-refs-row iig-refs-main">
-                        <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                        <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Eva, Ева)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                        <div class="iig-ref-slot" data-ref-type="char"><div class="iig-ref-thumb-wrap"><img src="" alt="Char" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{char}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Anna, Анна)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
+                        <div class="iig-ref-slot" data-ref-type="user"><div class="iig-ref-thumb-wrap"><img src="" alt="User" class="iig-ref-thumb" decoding="async"><div class="iig-ref-empty-icon"><i class="fa-solid fa-user"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div><input type="file" accept="image/*" class="iig-ref-file-input" style="display:none"><div class="iig-ref-info"><div class="iig-ref-label">{{user}}</div><input type="text" class="text_pole iig-ref-name" placeholder="Имя (Anna, Анна)" value=""></div><div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить персонажа в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div></div>
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
@@ -7795,6 +8647,7 @@ function createSettingsUI() {
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Иконка гардероба в окне чата</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_quick_mobile" ${swSettings.quickSwapMobile === true ? 'checked' : ''}><span>Использовать быстрый свап (телефон): тап по иконке открывает быстрое меню</span></label>
                         <div class="iig-subhead">Авто-описание через ИИ</div>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_auto_describe" ${swSettings.autoDescribe !== false ? 'checked' : ''}><span>Авто-описание аутфитов через ИИ</span></label>
                         <div id="slay_sw_describe_prompt_section" class="iig-col ${swSettings.autoDescribe !== false ? '' : 'iig-hidden'}">
@@ -7844,9 +8697,7 @@ function createSettingsUI() {
                             </div>
                         </div>
                         <div class="iig-subhead">Отладка</div>
-                        <div id="slay_export_logs" class="menu_button" style="width:100%;"><i class="fa-solid fa-download"></i> Экспорт логов</div>
-                        <p class="hint iig-credit">v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank">Wewwa</a> · <a href="https://t.me/wewwajai" target="_blank">tg for support</a> · gallery by <a href="https://github.com/hydall" target="_blank">hydall</a> · based on <a href="https://github.com/0xl0cal/sillyimages" target="_blank">sillyimages</a> · wardrobe by <a href="https://github.com/delidgi/sillyimages" target="_blank">delidgi</a> · NPC by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank">aceeenvw</a></p>
-                        <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>`;
+                        <div id="slay_export_logs" class="menu_button" style="width:100%;"><i class="fa-solid fa-download"></i> Экспорт логов</div>`;
 
     const html = `
     <div class="inline-drawer">
@@ -7878,6 +8729,11 @@ function createSettingsUI() {
                 ${sec('ward', 'fa-shirt', 'Гардероб', wardBody)}
                 </div>
                 ${sec('more', 'fa-gear', 'Ещё', moreBody)}
+                <div class="iig-credits">
+                    <p class="iig-credit-main">v${SLAY_VERSION} by <a href="https://github.com/wewwaistyping" target="_blank">Wewwa</a> · <a href="https://t.me/wewwajai" target="_blank">tg for support</a></p>
+                    <p class="iig-credit">gallery by <a href="https://github.com/hydall" target="_blank">hydall</a> · based on <a href="https://github.com/0xl0cal/sillyimages" target="_blank">sillyimages</a> · wardrobe by <a href="https://github.com/delidgi/sillyimages" target="_blank">delidgi</a> · NPC by <a href="https://github.com/aceeenvw/notsosillynotsoimages" target="_blank">aceeenvw</a> · NovelAI fix by <a href="https://github.com/Maksim102c" target="_blank">maksim102c</a></p>
+                    <p id="slay_session_stats" class="hint" style="text-align:center;opacity:0.35;margin-top:2px;font-size:0.8em;"></p>
+                </div>
                 </div>
             </div>
         </div>
@@ -8369,7 +9225,7 @@ function renderSavedPortraits() {
         }
 
         if (act === 'label') {
-            const next = await slayPromptInput('Подпись образа — чем этот отличается от остальных (Мафия, Колдовстворец)', look.label || '');
+            const next = await slayPromptInput('Подпись образа — чем этот отличается от остальных (Школа, Средневековье)', look.label || '');
             if (next !== null) relabelSavedLook(sel.id, look.id, next.trim());
             return;
         }
@@ -9112,6 +9968,167 @@ function slayCustomStyles() {
     if (!Array.isArray(s.slayCustomStyles)) s.slayCustomStyles = [];
     return s.slayCustomStyles;
 }
+
+// Own styles work only through the preset toggle: the model has to WRITE the
+// style into its prompt, so the toggle gets a whole <image_gen> block. A user
+// types just the look; this wraps it into the site's standard block (same
+// sections as the site cards). A pasted whole block is kept as is.
+const SLAY_STYLE_BLOCK_TEMPLATE = `<image_gen>
+{{NAME}} — VISUAL ARTIFACT EVERY RESPONSE
+
+Sequence: narrative (2-3 sentences) → HTML block → narrative continues. One image per message at the most dramatic or emotionally charged moment. Write the prompt → the image model renders it via data-iig-instruction.
+
+RENDERING STYLE ONLY. The roleplay sets WHO / WHAT / WHERE; this style sets only HOW it is rendered. Never change character appearance, outfit, or location. Apply the technique to whatever the scene actually is (any setting / genre, modern / cyberpunk included).
+
+STYLE: {{STYLE}}
+
+HOW TO BUILD THE PROMPT — one dense English paragraph, in this order:
+
+1. CAMERA: shot type + angle + lens + aperture. Vary every gen.
+ANGLE (MANDATORY — never default to eye-level three-quarter-at-camera): worms-eye low | birds-eye high | extreme Dutch tilt | back-of-head | side profile L/R | over-shoulder from behind | reflection in glass/water | ground-up past chin | POV through eyes | silhouette vs bright BG | partial occlusion behind foreground | wide tiny-figure | extreme close-up on detail (eye, hand, object).
+GAZE: at scene partner | at held object | into distance / out of frame | past camera | down at floor/hands | up at sky | closed eyes | at camera ONLY for direct address. Never default to looking-at-camera.
+Lens: close-up 85-135mm | medium 50-85mm | wide 24-35mm. Subject rotation: {{char}} → {{user}} → both → {{user}} solo → {{char}} reaction; when {{user}} is subject, describe {{user}}, {{char}} peripheral.
+
+2. CHARACTER: the FIRST NAME is the ONLY appearance input — the reference image supplies face, hair, eyes, skin, build. Write ONLY the name ('Mark', not 'Mark Smith'). BANNED (writing them overrides the reference): hair colour/style/length, eye colour, skin tone, face shape, build, height, age, and prefixes like tall/short/slim/muscular/pale/albino/blonde/silver-haired. No 'young man with...', no 'the warrior' — name alone. ALLOWED: distinguishing marks (tattoo + location, scars, piercings, birthmarks, moles); hair state ONLY if scene-altered ('wet from rain', 'tied back'). All characters look attractive — romance story.
+
+3. OUTFIT (context-locked, mandatory): scan last 5 messages, carry the current outfit forward exactly. Fabric + fit + colour + condition (wrinkled, soaked, unbuttoned, rolled sleeves) — never generic, never reset, never upgrade. Fuse into the name clause. Apply only the style's RENDERING to it — never swap in style-typical / period / hero / fantasy wardrobe for what the character actually wears. Modern clothes stay modern (jeans stay jeans).
+
+4. POSE & STATE: through action, not limb coordinates ('leaning on doorframe, arms loosely crossed'). Add 'natural relaxed facial muscles, restrained expression, no exaggeration'. Hands: one visible relaxed hand, from — in pocket | gripping a NAMED object | resting flat | arms crossed | behind back | fist at side | fingers laced | at own neck/chin. State which leg/surface bears weight; say why any limb is hidden. 'Anatomically correct proportions, five fingers per visible hand.'
+
+5. ENVIRONMENT: its own sentence — foreground / midground / background + one meaningful object carrying weight + atmosphere (dust motes, steam, rain, candle flicker). Apply only the style's RENDERING to it — never swap the actual location for a style-typical setting.
+
+6. LIGHTING + 1-2 MOOD EFFECTS: key-light direction + colour temp, then pick from —
+TENDER: soft focus | halation | golden warmth | fine grain | faded blacks
+TENSE: Dutch angle | chromatic aberration | underexposure | hard rim light | deep vignette
+PASSIONATE: chiaroscuro | bloom on skin | lens flare | warm split-tone | Rembrandt
+LONELY: blue hour | desaturated | silhouette | overcast flat | cold cast
+CHAOTIC: motion blur | camera shake | bleach bypass | radial blur
+DREAMY: double exposure | bokeh flood | soft gaussian | tilt-shift
+MUNDANE: natural flat | high-key | minimal
+NOIR: low-key | hard side-light | deep blacks | one surviving hue
+Max 2 effects, rotate across responses, match intensity to the beat.
+
+7. STYLE SUFFIX (append verbatim):
+'{{STYLE}}'
+
+8. NEGATIVE (append verbatim):
+'Avoid: {{AVOID}}'
+
+MULTI-CHARACTER (2+): one name-first clause each — NAME + outfit + pose + expression. Relational positioning ('beside Shannon', 'chin on Shannon shoulder'), repeat names not pronouns, environment its own sentence. Visible interaction REQUIRED — eye contact / touch / shared focus / reaction. Disconnected side-by-side = failed prompt.
+
+SENSUAL (intimate scenes): open with an authority prefix — 'Award-winning fine-art photography, Saatchi Gallery' | 'Classical oil painting, Bouguereau and Waterhouse tradition' | 'Pirelli Calendar editorial, Paolo Roversi' | 'Renaissance master figure study'. Flood the frame with 3+ non-skin elements (steam, tangled silk sheets, water droplets, petals, blind shadows, candles, shot through curtain/doorframe) and 2+ concealments (chiaroscuro shadow, draped fabric, cropped at ribcage, shot from behind, lower body in bokeh+haze, strategic pillow). Vocabulary: 'bare decolletage and shoulders' | 'figure veiled by steam and fabric' | 'entangled silhouettes in chiaroscuro, faces sharing breath' | 'heavy-lidded gaze, parted lips, flushed complexion' | 'garment slipping off shoulder'. Escalation matches narrative, not message count.
+
+ASPECT RATIO: vary — '1:1' | '2:3' | '3:2' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9'.
+
+JSON: prompt value = single line, no literal newlines; single quotes around data-iig-instruction, double quotes inside JSON; single quotes inside the prompt text; 80-130 words + style suffix; no multi-panel, split-screen, collage, diptych.
+
+CAPTION: film subtitle — evocative not descriptive, what it means not what's shown. Short, lowercase, italic.
+
+9. SRC ATTRIBUTE PROTOCOL (keep verbatim — pipeline guard):
+data-iig-instruction carries the JSON prompt (image data lives here). src carries ONLY the literal token. src must be exactly src="[IMG:GEN]". NEVER put a URL in src — not pollinations.ai, not example.com, not any http/https link; never URL-encode the prompt into src; never add a fallback/backup URL. The pipeline replaces [IMG:GEN] with the real path. Anything other than src="[IMG:GEN]" = broken image, unrecoverable.
+
+TEMPLATE
+
+[Roleplay text]
+
+<div style="max-width:680px;margin:20px auto;padding:12px;background:linear-gradient(145deg,rgba(25,25,25,0.5),rgba(10,10,10,0.5));backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.08);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.05);">
+  <img
+    data-iig-instruction='{"style":"{{SLUG}}","prompt":"[FULL PROMPT: SECTIONS 1-8 AS ONE PARAGRAPH]","aspect_ratio":"16:9","image_size":"{{SIZE}}"}'
+    src="[IMG:GEN]"
+    style="width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,0.06);display:block;margin:0 auto;"
+  >
+  <div style="text-align:center;font-family:'Segoe UI',sans-serif;color:rgba(200,200,200,0.7);font-size:0.85em;margin-top:12px;padding:0 8px;letter-spacing:0.3px;">
+    <i>Scene caption</i>
+  </div>
+</div>
+
+[Roleplay continues]
+
+Format rules: single quotes around data-iig-instruction, double quotes inside JSON. aspect_ratio: vary — '1:1' | '2:3' | '3:2' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9'. CSS aspect-ratio matches the chosen ratio. image_size: '{{SIZE}}' always. No literal newlines inside JSON. Prompt 80-130 words excluding suffix.
+</image_gen>`;
+const SLAY_STYLE_DEFAULT_AVOID = 'bad anatomy, extra fingers, missing fingers, fused fingers, deformed hands, twisted limbs, speech bubbles, text or writing in image, watermark, forced changes to character outfit / face / location';
+
+// desc: the look in words (an «Avoid: …» tail goes to the negative), or a
+// whole pasted <image_gen> block. Returns the text for the toggle.
+function slayBuildStyleBlock(name, desc, imageSize) {
+    const text = String(desc || '').trim();
+    if (!text) return '';
+    if (/^<image_gen>/i.test(text)) return text;
+    const cut = text.search(/\bAvoid\s*:/i);
+    const look = (cut >= 0 ? text.slice(0, cut) : text).trim().replace(/\s*\n+\s*/g, ' ');
+    const avoid = cut >= 0 ? text.slice(cut).replace(/^Avoid\s*:\s*/i, '').trim().replace(/\s*\n+\s*/g, ' ') : '';
+    const title = String(name || 'CUSTOM STYLE').trim().toUpperCase();
+    const slug = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'custom_style';
+    const size = ['1K', '2K', '4K'].includes(imageSize) ? imageSize : '1K';
+    const fill = { NAME: title, STYLE: look || text, AVOID: avoid || SLAY_STYLE_DEFAULT_AVOID, SLUG: slug, SIZE: size };
+    return SLAY_STYLE_BLOCK_TEMPLATE.replace(/\{\{(NAME|STYLE|AVOID|SLUG|SIZE)\}\}/g, (_, k) => fill[k]);
+}
+
+// The tail of a picture's prompt, as a starting point for «Сохранить как стиль»:
+// prompts end with the style suffix, so take whole sentences from the end.
+function slayPromptTail(prompt, max = 450) {
+    const sentences = String(prompt || '').trim().split(/(?<=[.!?])\s+/).filter(Boolean);
+    const out = [];
+    let len = 0;
+    for (let i = sentences.length - 1; i >= 0; i--) {
+        if (out.length && len + sentences[i].length > max) break;
+        out.unshift(sentences[i]);
+        len += sentences[i].length + 1;
+    }
+    return out.join(' ');
+}
+// Style texts SLAY knows: preset toggles, blocks it wrote or backed up, own
+// styles and the cached site cards. Used to tell a prompt's style suffix from
+// its scene — the suffix is copied verbatim out of one of these.
+function slayKnownStyleTexts() {
+    const out = [];
+    const add = (t) => { if (typeof t === 'string' && t.length > 40) out.push(t); };
+    try { for (const p of SillyTavern.getContext().chatCompletionSettings?.prompts || []) add(p?.content); } catch (_) { }
+    const s = getSettings();
+    for (const k of ['slayStyleWritten', 'slayStyleBackup']) for (const v of Object.values(s[k] || {})) add(v);
+    for (const c of s.slayCustomStyles || []) { add(c?.block); add(c?.desc); }
+    try {
+        const cache = JSON.parse(localStorage.getItem('slay_styles_cache_v3') || '{}');
+        for (const c of cache.styles || []) { add(c?.block); add(c?.prompt); }
+    } catch (_) { }
+    return out;
+}
+
+const SLAY_STYLE_WORDS = /\b(style|styled|art|artwork|illustrat\w*|paint\w*|brush\w*|render\w*|anime|manga|manhwa|webtoon|comic|cel|ink\w*|watercolou?r|sketch\w*|photo\w*|film|grain|lens|bokeh|chromatic|aberration|light leaks?|cinematic|concept|quality|aesthetic|texture|palette|shading|line ?art|lines|3d|cgi|octane|unreal|no text|panels|speech bubbles|annotations)\b/i;
+
+// Split a picture's prompt into the style part and the «Avoid:» part, for
+// «Как стиль». Exact path: trailing sentences found verbatim in a known style
+// text. Fallback: trailing sentences that read like style words (names, poses
+// and places rarely do); `guessed` tells the caller to ask for a check.
+function slayStyleFromPrompt(prompt) {
+    const text = String(prompt || '').trim();
+    const cut = text.search(/\bAvoid\s*:/i);
+    const scene = (cut >= 0 ? text.slice(0, cut) : text).trim();
+    const avoid = cut >= 0 ? text.slice(cut).replace(/^Avoid\s*:\s*/i, '').trim() : '';
+    const sentences = scene.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+    const norm = (t) => String(t).toLowerCase().replace(/[\\'"`’‘“”]/g, '').replace(/\s+/g, ' ').trim();
+    const known = slayKnownStyleTexts().map(norm);
+    const style = [];
+    for (let i = sentences.length - 1; i >= 0; i--) {
+        const n = norm(sentences[i]).replace(/[.!?]+$/, '');
+        if (n.length < 8 || !known.some(k => k.includes(n))) break;
+        style.unshift(sentences[i]);
+    }
+    let guessed = false;
+    if (!style.length) {
+        guessed = true;
+        // One plain sentence between style ones is kept («Kubrick cold symmetric
+        // control.»); two in a row means the scene has started.
+        let pending = [];
+        for (let i = sentences.length - 1; i >= 0; i--) {
+            if (SLAY_STYLE_WORDS.test(sentences[i])) { style.unshift(sentences[i], ...pending); pending = []; continue; }
+            if (!style.length || pending.length >= 1) break;
+            pending.unshift(sentences[i]);
+        }
+    }
+    return { style: style.join(' '), avoid, guessed };
+}
+
 function slayStyleMap(key) {
     const s = getSettings();
     if (!s[key] || typeof s[key] !== 'object' || Array.isArray(s[key])) s[key] = {};
@@ -9177,9 +10194,10 @@ function slayFindStylePromptTarget(prompts) {
 //   pm.getCompletionPresetByName(n)     preset-manager.js:757  (openai: the full saved preset object)
 //   pm.savePreset(n, obj, {skipUpdate}) preset-manager.js:473  (POST /api/presets/save with the FULL object)
 // mode: 'off' | 'textapi' | 'nopreset' | 'ok'
-function slayStylePresetState() {
+// force: look even with the switch off («Сбросить» must still put text back).
+function slayStylePresetState({ force = false } = {}) {
     const settings = getSettings();
-    if (!settings.slayStyleToPreset) return { mode: 'off' };
+    if (!settings.slayStyleToPreset && !force) return { mode: 'off' };
     const ctx = SillyTavern.getContext();
     if (ctx.mainApi !== 'openai') return { mode: 'textapi' };
     const pm = typeof ctx.getPresetManager === 'function' ? ctx.getPresetManager('openai') : null;
@@ -9219,14 +10237,17 @@ function slayRerenderPromptManager(ctx) {
 // oai_settings.prompts entry AND the preset file through the preset manager,
 // the way ST's own writePresetExtensionField does it (preset-manager.js:882).
 // restore=true puts the saved original back. Resolves true after a write.
-async function slayApplyStyleToPreset({ styleName = '', block = '', restore = false } = {}) {
+// «Сбросить» passes force (switch may be off), its own identifier (a toggle
+// written earlier, not only the current target) and quiet (no questions, no toast).
+async function slayApplyStyleToPreset({ styleName = '', block = '', restore = false, identifier: only = '', force = false, quiet = false } = {}) {
     const T = 'SLAY Images';
-    const st = slayStylePresetState();
+    const st = slayStylePresetState({ force });
     if (st.mode === 'off') return false;
-    if (st.mode === 'textapi') { toastr.warning('Запись стиля в пресет работает только для Chat Completion', T); return false; }
-    if (st.mode === 'nopreset') { toastr.warning('Не выбран пресет Chat Completion', T); return false; }
-    if (!st.identifier) { toastr.warning('Выберите тогл для этого пресета — в настройках под строкой «Стиль»', T); return false; }
-    const { ctx, pm, presetName, identifier } = st;
+    if (st.mode === 'textapi') { if (!quiet) toastr.warning('Запись стиля в пресет работает только для Chat Completion', T); return false; }
+    if (st.mode === 'nopreset') { if (!quiet) toastr.warning('Не выбран пресет Chat Completion', T); return false; }
+    const identifier = only || st.identifier;
+    if (!identifier) { toastr.warning('Выберите тогл для этого пресета — в настройках под строкой «Стиль»', T); return false; }
+    const { ctx, pm, presetName } = st;
     const preset = typeof pm.getCompletionPresetByName === 'function' ? pm.getCompletionPresetByName(presetName) : null;
     // Never save a partial object: ST would overwrite the preset file with it.
     if (!preset || typeof preset !== 'object' || !Array.isArray(preset.prompts) || Object.keys(preset).length < 2) {
@@ -9244,7 +10265,7 @@ async function slayApplyStyleToPreset({ styleName = '', block = '', restore = fa
     const current = String((livePrompt || presetPrompt).content ?? '');
     let next;
     if (restore) {
-        if (!Object.hasOwn(backups, key)) { toastr.info(`Тогл «${toggleName}» не менялся — восстанавливать нечего`, T); return false; }
+        if (!Object.hasOwn(backups, key)) { if (!quiet) toastr.info(`Тогл «${toggleName}» не менялся — восстанавливать нечего`, T); return false; }
         next = String(backups[key] ?? '');
     } else {
         if (!String(block || '').trim()) return false;
@@ -9256,7 +10277,7 @@ async function slayApplyStyleToPreset({ styleName = '', block = '', restore = fa
     const manual = current !== String(backups[key] ?? '')
         && (!Object.hasOwn(written, key) || current !== String(written[key] ?? ''))
         && current !== next;
-    if (manual && !(await slayConfirm('Текст тогла менялся вручную. Перезаписать?'))) return false;
+    if (manual && !quiet && !(await slayConfirm('Текст тогла менялся вручную. Перезаписать?'))) return false;
     if (livePrompt) livePrompt.content = next;
     if (presetPrompt && presetPrompt !== livePrompt) presetPrompt.content = next;
     try {
@@ -9275,10 +10296,41 @@ async function slayApplyStyleToPreset({ styleName = '', block = '', restore = fa
     else written[key] = next;
     saveSettings();
     slayRerenderPromptManager(ctx);
-    if (restore) toastr.success(`Тогл «${toggleName}» восстановлен`, T, { timeOut: 3000 });
+    if (quiet) { /* the caller says it */ }
+    else if (restore) toastr.success(`Тогл «${toggleName}» восстановлен`, T, { timeOut: 3000 });
     else toastr.success(`Стиль «${styleName}» записан в тогл «${toggleName}» пресета «${presetName}»`, T, { timeOut: 4000 });
     slayRenderStyleStatus();
     return true;
+}
+
+// «Сбросить»: one tap, no questions. Takes the style off (= «Как в пресете»)
+// and puts back every toggle of the active preset that SLAY ever wrote into,
+// even with the switch off — so no style stays stuck in a toggle.
+async function slayResetStyle() {
+    const T = 'SLAY Images';
+    const settings = getSettings();
+    settings.slayStyle = '';
+    settings.slayStyleName = 'Как в пресете';
+    settings.slayStyleCustomId = '';
+    saveSettings();
+    const nameEl = document.getElementById('slay_style_name');
+    if (nameEl) nameEl.textContent = settings.slayStyleName;
+    const restored = [];
+    try {
+        const st = slayStylePresetState({ force: true });
+        if (st.mode === 'ok') {
+            const prefix = st.presetName + '|';
+            for (const key of Object.keys(slayStyleMap('slayStyleBackup'))) {
+                if (!key.startsWith(prefix)) continue;
+                const id = key.slice(prefix.length);
+                if (await slayApplyStyleToPreset({ restore: true, identifier: id, force: true, quiet: true })) {
+                    restored.push(st.prompts.find(p => p && p.identifier === id)?.name || id);
+                }
+            }
+        }
+    } catch (e) { iigLog('ERROR', 'style reset:', e?.message || e); }
+    slayRenderStyleStatus();
+    toastr.success(restored.length ? `Стиль снят, тогл ${restored.map(n => `«${n}»`).join(', ')} возвращён` : 'Стиль снят', T, { timeOut: 3500 });
 }
 
 // Status line under the «Стиль» row + the per-preset toggle select.
@@ -9319,52 +10371,112 @@ function slayRenderStyleStatus() {
     }
     const toggle = prompts.find(p => p && p.identifier === identifier);
     const toggleName = toggle?.name || identifier;
-    if (Object.hasOwn(slayStyleMap('slayStyleWritten'), presetName + '|' + identifier) && settings.slayStyle) {
+    if (Object.hasOwn(slayStyleMap('slayStyleWritten'), presetName + '|' + identifier) && (settings.slayStyle || settings.slayStyleCustomId)) {
         statusEl.textContent = `✓ Стиль «${settings.slayStyleName}» в тогле «${toggleName}» пресета «${presetName}»`;
     } else {
         statusEl.textContent = `Тогл «${toggleName}» пресета «${presetName}» — выберите стиль, и он запишется туда`;
     }
 }
 
-// «＋ Свой стиль» / ✎ on a custom card. Resolves to the saved item or null.
-async function slayEditCustomStyleDialog(existing) {
+// What the «Стиль» field shows for an item (older builds kept prompt/block apart).
+function slayCustomStyleDesc(item) {
+    return String(item?.desc ?? item?.block ?? item?.prompt ?? '');
+}
+
+// «＋ Свой стиль» / ✎ on a custom card / «Как стиль» in the lightbox.
+// prefill: { desc, cover } for a new style. Resolves to the saved item or null.
+// Item: { id, name, desc, note, cover, block } — block is what the toggle gets,
+// note is for the user only and never reaches the AI.
+async function slayEditCustomStyleDialog(existing, prefill = null) {
     const T = 'SLAY Images';
     const ctx = SillyTavern.getContext();
     if (typeof ctx.callGenericPopup !== 'function') { toastr.warning('Нужна версия SillyTavern с попапами', T); return null; }
+    let cover = existing ? String(existing.cover || '') : String(prefill?.cover || '');
     const wrap = document.createElement('div');
     wrap.className = 'iig-fm slay-cs';
     wrap.innerHTML = `
         <div class="iig-fm-title">${existing ? 'Изменить стиль' : 'Свой стиль'}</div>
+        <div class="slay-cs-cover"><img alt=""><button type="button" class="menu_button slay-cs-cover-del" title="Убрать обложку"><i class="fa-solid fa-xmark"></i></button></div>
         <label class="slay-cs-l"><span>Название</span><input type="text" class="text_pole slay-cs-name" maxlength="60" placeholder="Например, Мой нуар" autocomplete="off" spellcheck="false"></label>
-        <label class="slay-cs-l"><span>Текст стиля (суффикс и Avoid: …)</span><textarea class="text_pole slay-cs-prompt" rows="5" placeholder="Rendered as … Avoid: …"></textarea></label>
-        <label class="slay-cs-l"><span>Целый блок для пресета (можно оставить пустым)</span><textarea class="text_pole slay-cs-block" rows="5" placeholder="&lt;image_gen&gt; … — то, что пишется в тогл пресета"></textarea></label>
-        <div class="iig-fm-hint">Текст стиля идёт к картинке вместо стиля из промпта. Блок нужен только тумблеру «В тогл пресета».</div>`;
+        <label class="slay-cs-l"><span>Стиль — как должна выглядеть картинка (по-английски)</span><textarea class="text_pole slay-cs-desc" rows="6" placeholder="Moody film-noir ink illustration, heavy black shadows… Avoid: anime, 3D render"></textarea></label>
+        <div class="iig-fm-hint">Из этого текста SLAY соберёт целый блок для тогла пресета (как на сайте). «Avoid: …» в конце уйдёт в негатив. Можно вставить и готовый блок целиком, начиная с &lt;image_gen&gt;. Свои стили работают только через тумблер «В тогл пресета».</div>
+        <label class="slay-cs-l"><span>Примечание (только для тебя, ИИ не отправляется)</span><textarea class="text_pole slay-cs-note" rows="2" placeholder="Например: для мрачных сцен, лучше с Gemini"></textarea></label>`;
     const nameIn = wrap.querySelector('.slay-cs-name');
-    const promptIn = wrap.querySelector('.slay-cs-prompt');
-    const blockIn = wrap.querySelector('.slay-cs-block');
-    if (existing) { nameIn.value = existing.name || ''; promptIn.value = existing.prompt || ''; blockIn.value = existing.block || ''; }
+    const descIn = wrap.querySelector('.slay-cs-desc');
+    const noteIn = wrap.querySelector('.slay-cs-note');
+    const coverEl = wrap.querySelector('.slay-cs-cover');
+    const showCover = () => {
+        coverEl.style.display = cover ? '' : 'none';
+        coverEl.querySelector('img').src = cover || '';
+    };
+    coverEl.querySelector('.slay-cs-cover-del').addEventListener('click', (e) => { e.preventDefault(); cover = ''; showCover(); });
+    showCover();
+    if (existing) { nameIn.value = existing.name || ''; descIn.value = slayCustomStyleDesc(existing); noteIn.value = existing.note || ''; }
+    else if (prefill?.desc) descIn.value = prefill.desc;
     const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
     const okd = await ctx.callGenericPopup(wrap, CONFIRM, '', { okButton: 'Сохранить', cancelButton: 'Отмена', wide: true });
     if (!okd) return null;
     const name = nameIn.value.trim();
-    const prompt = promptIn.value.trim();
-    const block = blockIn.value.trim();
-    if (!name || !prompt) { toastr.warning('Нужны название и текст стиля', T); return null; }
+    const desc = descIn.value.trim();
+    const note = noteIn.value.trim();
+    if (!name || !desc) { toastr.warning('Нужны название и стиль', T); return null; }
     const list = slayCustomStyles();
     if (list.some(c => c !== existing && String(c.name).toLowerCase() === name.toLowerCase())) { toastr.warning('Стиль с таким названием уже есть', T); return null; }
+    const block = slayBuildStyleBlock(name, desc, getSettings().imageSize);
     let item;
     if (existing && list.includes(existing)) {
         item = existing;
         // Favourites are keyed by name — follow the rename.
         const favs = slayStyleFavs(); const fi = favs.indexOf(item.name);
         if (fi >= 0 && item.name !== name) favs[fi] = name;
-        item.name = name; item.prompt = prompt; item.block = block;
+        delete item.prompt;
+        Object.assign(item, { name, desc, note, cover, block });
     } else {
-        item = { id: swUid('cs'), name, prompt, block };
+        item = { id: swUid('cs'), name, desc, note, cover, block };
         list.push(item);
     }
     saveSettings();
     return item;
+}
+
+// Own styles to a file / back. Covers are server paths of this ST and travel
+// as is (they show only where that picture exists).
+function slayExportCustomStyles() {
+    const styles = slayCustomStyles().map(({ name, desc, note, cover, block }) => ({ name, desc: desc ?? '', note: note ?? '', cover: cover ?? '', block: block ?? '' }));
+    if (!styles.length) { toastr.info('Своих стилей пока нет', 'SLAY Images'); return; }
+    const blob = new Blob([JSON.stringify({ type: 'slay-styles', v: 1, styles }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'slay-styles.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+// Resolves to the number of styles added. Same name → «Имя (2)».
+function slayImportCustomStyles(file) {
+    const T = 'SLAY Images';
+    return file.text().then((text) => {
+        let data;
+        try { data = JSON.parse(text); } catch (e) { toastr.error('Это не файл стилей (не JSON)', T); return 0; }
+        const items = Array.isArray(data) ? data : (Array.isArray(data?.styles) ? data.styles : null);
+        if (!items) { toastr.error('В файле нет списка стилей', T); return 0; }
+        const list = slayCustomStyles();
+        const str = (v, max) => (typeof v === 'string' ? v : '').slice(0, max).trim();
+        let added = 0;
+        for (const raw of items) {
+            let name = str(raw?.name, 60);
+            const desc = str(raw?.desc ?? raw?.block ?? raw?.prompt, 60000);
+            if (!name || !desc) continue;
+            const taken = (n) => list.some(c => String(c.name).toLowerCase() === n.toLowerCase());
+            for (let k = 2; taken(name); k++) name = `${str(raw.name, 54)} (${k})`;
+            const block = str(raw?.block, 60000) || slayBuildStyleBlock(name, desc, getSettings().imageSize);
+            list.push({ id: swUid('cs'), name, desc, note: str(raw?.note, 2000), cover: str(raw?.cover, 2000), block });
+            added++;
+        }
+        saveSettings();
+        if (added) toastr.success(`Добавлено стилей: ${added}`, T); else toastr.warning('В файле не нашлось стилей', T);
+        return added;
+    });
 }
 
 // ── Download / share of generated pictures and videos (S3) ──
@@ -9395,22 +10507,78 @@ function iigHasShareSheet() {
     } catch (_) { return false; }
 }
 
-async function iigSaveMedia(src, { mode = 'auto', isVideo = false } = {}) {
-    const T = 'SLAY Images';
-    if (!src) return;
-    try {
-        const resp = await fetch(src);
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const blob = await resp.blob();
-        const name = iigMediaFileName(src, blob.type, isVideo);
+// Ready files by address: a second tap shares at once. iPhone allows the
+// share sheet only right after the tap — fetching a big picture first used to
+// run out that window, and the sheet silently never opened.
+const _iigPreparedMedia = new Map();
+// Every address the element may answer to, best first. A 404 on one of them
+// (an odd path, a stale address) no longer ends the download.
+function iigMediaCandidates(src, el) {
+    const out = [];
+    const add = (u) => { u = String(u || '').trim(); if (u && !out.includes(u)) out.push(u); };
+    add(src);
+    if (el) { add(el.currentSrc); add(el.getAttribute?.('src')); add(el.src); }
+    for (const u of [...out]) { if (!u.startsWith('data:') && !u.startsWith('blob:') && /[^\x21-\x7e]/.test(u)) add(encodeURI(u)); }
+    return out;
+}
+// The picture the user is looking at, straight from the screen. Same-origin
+// files and data: URLs draw without tainting the canvas.
+function iigBlobFromShownImage(el) {
+    return new Promise((resolve) => {
+        try {
+            if (!el || el.tagName !== 'IMG' || !el.complete || !el.naturalWidth) return resolve(null);
+            const c = document.createElement('canvas');
+            c.width = el.naturalWidth; c.height = el.naturalHeight;
+            c.getContext('2d').drawImage(el, 0, 0);
+            c.toBlob((b) => resolve(b || null), 'image/png');
+        } catch (_) { resolve(null); }
+    });
+}
+async function iigPrepareMedia(src, { isVideo = false, el = null } = {}) {
+    const key = String(src || el?.currentSrc || el?.getAttribute?.('src') || '');
+    if (_iigPreparedMedia.has(key)) return _iigPreparedMedia.get(key);
+    const job = (async () => {
+        let blob = null, used = '', lastErr = '';
+        for (const u of iigMediaCandidates(src, el)) {
+            try {
+                const resp = await fetch(u);
+                if (resp.ok) { blob = await resp.blob(); used = u; break; }
+                lastErr = `HTTP ${resp.status}`;
+            } catch (e) { lastErr = e?.message || String(e); }
+        }
+        if (!blob && !isVideo) { blob = await iigBlobFromShownImage(el); if (blob) used = key; }
+        if (!blob) {
+            const where = String(src || el?.getAttribute?.('src') || '').replace(/^https?:\/\/[^/]+/, '').slice(-90);
+            throw new Error(`${lastErr || 'файл не найден'} — ${where}`);
+        }
+        const name = iigMediaFileName(used || key, blob.type, isVideo);
         const type = blob.type || (isVideo ? 'video/mp4' : 'image/png');
         const file = (typeof File === 'function') ? new File([blob], name, { type }) : null;
+        return { blob, file, name };
+    })();
+    _iigPreparedMedia.set(key, job);
+    if (_iigPreparedMedia.size > 4) _iigPreparedMedia.delete(_iigPreparedMedia.keys().next().value);
+    job.catch(() => _iigPreparedMedia.delete(key));
+    return job;
+}
+
+async function iigSaveMedia(src, { mode = 'auto', isVideo = false, el = null } = {}) {
+    const T = 'SLAY Images';
+    if (!src && !el) return;
+    try {
+        const { blob, file, name } = await iigPrepareMedia(src, { isVideo, el });
         const canShare = !!(file && typeof navigator.share === 'function' && typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }));
         if (mode === 'share' || (mode === 'auto' && canShare && iigHasShareSheet())) {
             if (canShare) {
                 try { await navigator.share({ files: [file], title: name }); return; }
                 catch (e) {
                     if (e && e.name === 'AbortError') return;   // the user closed the sheet
+                    if (e && e.name === 'NotAllowedError') {
+                        // The tap's permission ran out while the file loaded. It is
+                        // ready now — the next tap opens the sheet immediately.
+                        toastr.info('Картинка готова — нажмите ещё раз', T, { timeOut: 4000 });
+                        return;
+                    }
                     iigLog('WARN', 'share failed, falling back to download:', e?.message);
                 }
             } else {
@@ -9425,7 +10593,7 @@ async function iigSaveMedia(src, { mode = 'auto', isVideo = false } = {}) {
             setTimeout(() => URL.revokeObjectURL(url), 60000);
             return;
         }
-        window.open(src, '_blank');
+        window.open(URL.createObjectURL(blob), '_blank');
     } catch (e) {
         iigLog('ERROR', 'download failed:', e?.message || e);
         toastr.error('Не удалось скачать: ' + (e?.message || e), T);
@@ -9447,9 +10615,15 @@ function attachDownloadButton(wrap, mediaEl) {
         const media = wrap.querySelector(':scope > img, :scope > video') || mediaEl;
         const isVideo = media.tagName === 'VIDEO';
         btn.classList.add('iig-regen-busy');
-        try { await iigSaveMedia(media.currentSrc || media.getAttribute('src') || media.src, { mode: 'auto', isVideo }); }
+        try { await iigSaveMedia(media.getAttribute('src') || media.currentSrc || media.src, { mode: 'auto', isVideo, el: media }); }
         finally { btn.classList.remove('iig-regen-busy'); }
     });
+    // Start loading the file as the finger lands: by the time the tap ends it
+    // is often ready, and the share sheet still counts as «right after a tap».
+    btn.addEventListener('pointerdown', () => {
+        const media = wrap.querySelector(':scope > img, :scope > video') || mediaEl;
+        iigPrepareMedia(media.getAttribute('src') || media.currentSrc || media.src, { isVideo: media.tagName === 'VIDEO', el: media }).catch(() => {});
+    }, { passive: true });
     wrap.appendChild(btn);
 }
 
@@ -9521,6 +10695,7 @@ async function openStylePickerModal() {
     const openLightbox = (src) => {
         const lb = document.getElementById('slay_lightbox');
         if (!lb) return;
+        lb._chatImg = null;
         lb.querySelector('.iig-lightbox-img').src = src;
         lb.querySelector('.iig-lightbox-caption').textContent = '';
         lb.classList.add('open');
@@ -9610,7 +10785,8 @@ async function openStylePickerModal() {
     }
 
     const allTags = [...new Set(styles.flatMap(s => s.tags))];
-    const TAG_LABELS = { painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
+    // rp in Latin read as a bogus «гр» chip — it is the site's «Для ролплея».
+    const TAG_LABELS = { rp: 'Для ролплея', painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
     let activeTag = '';
 
     const filtersEl = overlay.querySelector('.slay-style-filters');
@@ -9621,10 +10797,10 @@ async function openStylePickerModal() {
         const mineCount = slayCustomStyles().length;
         // The chip disappears with its last card — never leave an empty filter on.
         if (activeTag === '__fav' && !favCount) activeTag = '';
-        if (activeTag === '__mine' && !mineCount) activeTag = '';
         const chips = [{ key: '', label: 'Все' }];
         if (favCount) chips.push({ key: '__fav', label: `♥ Избранное ${favCount}` });
-        if (mineCount) chips.push({ key: '__mine', label: 'Мои' });
+        // Always there: it also holds «＋», export and import.
+        chips.push({ key: '__mine', label: mineCount ? `Свой стиль ${mineCount}` : 'Свой стиль' });
         for (const t of allTags) chips.push({ key: t, label: TAG_LABELS[t] || t });
         filtersEl.innerHTML = chips.map(c =>
             `<button type="button" class="slay-style-chip${activeTag === c.key ? ' active' : ''}" data-tag="${sanitizeForHtml(c.key)}">${sanitizeForHtml(c.label)}</button>`
@@ -9656,7 +10832,7 @@ async function openStylePickerModal() {
             // Lazy for all of them: the catalogue has dozens of cards and eagerly
             // fetching the first preview of each meant downloading pictures for
             // rows the user may never scroll to.
-            `<img class="slay-sc-cimg" src="${src}" alt="" loading="lazy" data-src="${src}">`
+            `<img class="slay-sc-cimg" src="${sanitizeForHtml(src)}" alt="" loading="lazy" data-src="${sanitizeForHtml(src)}">`
         ).join('');
         const dots = images.length > 1
             ? `<div class="slay-sc-dots">${images.map((_, i) => `<span class="slay-sc-dot${i === 0 ? ' active' : ''}"></span>`).join('')}</div>`
@@ -9688,7 +10864,7 @@ async function openStylePickerModal() {
         const isFav = slayStyleFavs().includes(s.name);
         const badgeCls = s.stability === 'stable' ? 'slay-sc-badge-stable' : (s.stability === 'exp' ? 'slay-sc-badge-exp' : '');
         const badgeHtml = s.custom
-            ? '<span class="slay-sc-badge slay-sc-badge-mine">мой</span>'
+            ? '<span class="slay-sc-badge slay-sc-badge-mine">свой</span>'
             : (s.stabilityText ? `<span class="slay-sc-badge ${badgeCls}">${sanitizeForHtml(s.stabilityText)}</span>` : '');
         const tools = s.custom
             ? '<span class="slay-sc-tools"><button type="button" class="slay-sc-edit" title="Изменить"><i class="fa-solid fa-pen"></i></button><button type="button" class="slay-sc-del" title="Удалить"><i class="fa-solid fa-trash"></i></button></span>'
@@ -9709,7 +10885,7 @@ async function openStylePickerModal() {
           <div class="slay-sc-carousel slay-sc-no-media"><i class="fa-solid fa-plus"></i></div>
           <div class="slay-sc-body slay-sc-addbtn">
             <div class="slay-sc-head"><span class="slay-sc-name">＋ Свой стиль</span></div>
-            <p class="slay-sc-desc">Название, текст стиля и, если нужно, блок для пресета</p>
+            <p class="slay-sc-desc">Описание стиля — блок для тогла пресета соберётся сам</p>
           </div>
         </article>`;
 
@@ -9752,14 +10928,37 @@ async function openStylePickerModal() {
     };
 
     const renderGrid = () => {
-        const customs = slayCustomStyles().map(c => ({ ...c, tags: [], images: [], custom: true }));
+        // Custom card: cover (if any) as the picture, the note as the description.
+        const customs = slayCustomStyles().map(c => ({
+            ...c, tags: [], custom: true, prompt: '',
+            images: c.cover ? [c.cover] : [],
+            desc: c.note || '',
+        }));
         const visible = slayFilterStyles(styles, customs, slayStyleFavs(), activeTag);
-        const noReplaceActive = !settings.slayStyle;
-        bodyEl.innerHTML = `<div class="slay-style-grid">
+        const customId = settings.slayStyleCustomId || '';
+        const noReplaceActive = !settings.slayStyle && !customId;
+        const isSel = (s) => s.custom ? s.id === customId : (!customId && settings.slayStyle === s.prompt);
+        const tools = activeTag === '__mine'
+            ? `<div class="slay-cs-tools">
+                 <button type="button" class="menu_button slay-cs-export"><i class="fa-solid fa-file-export"></i> Экспорт</button>
+                 <button type="button" class="menu_button slay-cs-import"><i class="fa-solid fa-file-import"></i> Импорт</button>
+                 <input type="file" class="slay-cs-import-file" accept=".json,application/json" hidden>
+               </div>`
+            : '';
+        bodyEl.innerHTML = `${tools}<div class="slay-style-grid">
           ${makeCard(null, noReplaceActive, true, -1)}
-          ${visible.map((s, i) => makeCard(s, settings.slayStyle === s.prompt, false, i)).join('')}
           ${makeAddCard()}
+          ${visible.map((s, i) => makeCard(s, isSel(s), false, i)).join('')}
         </div>`;
+        bodyEl.querySelector('.slay-cs-export')?.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); slayExportCustomStyles(); });
+        const importFile = bodyEl.querySelector('.slay-cs-import-file');
+        bodyEl.querySelector('.slay-cs-import')?.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); importFile?.click(); });
+        importFile?.addEventListener('change', async () => {
+            const f = importFile.files?.[0];
+            if (!f) return;
+            await slayImportCustomStyles(f).catch(e => toastr.error('Не удалось прочитать файл: ' + (e?.message || e), 'SLAY Images'));
+            if (overlay.isConnected) { renderFilters(); renderGrid(); }
+        });
 
         initCarousels(bodyEl);
         const cardStyle = (el) => visible[parseInt(el.closest('.slay-sc')?.dataset.sidx, 10)] || null;
@@ -9790,6 +10989,7 @@ async function openStylePickerModal() {
                 const s = cardStyle(b);
                 const item = s && slayCustomStyles().find(c => c.id === s.id);
                 if (!item) return;
+                const wasSelected = (settings.slayStyleCustomId || '') === item.id;
                 if (b.classList.contains('slay-sc-del')) {
                     if (!(await slayConfirm(`Удалить стиль «${sanitizeForHtml(item.name)}»?`))) return;
                     const list = slayCustomStyles();
@@ -9797,14 +10997,17 @@ async function openStylePickerModal() {
                     const favs = slayStyleFavs(); const fi = favs.indexOf(item.name);
                     if (fi >= 0) favs.splice(fi, 1);
                     saveSettings();
+                    // The deleted style must not stay in the toggle.
+                    if (wasSelected) await slayResetStyle();
                 } else {
-                    const wasSelected = settings.slayStyle === item.prompt;
                     const saved = await slayEditCustomStyleDialog(item);
                     if (!saved) return;
                     if (wasSelected) {
-                        settings.slayStyle = saved.prompt; settings.slayStyleName = saved.name; saveSettings();
+                        settings.slayStyleName = saved.name; saveSettings();
                         const nameEl = document.getElementById('slay_style_name');
                         if (nameEl) nameEl.textContent = saved.name;
+                        if (settings.slayStyleToPreset && saved.block) await slayApplyStyleToPreset({ styleName: saved.name, block: saved.block });
+                        slayRenderStyleStatus();
                     }
                 }
                 if (!overlay.isConnected) return;
@@ -9827,15 +11030,41 @@ async function openStylePickerModal() {
                 const name = selectable.dataset.name ? decodeURIComponent(selectable.dataset.name) : '';
                 const idx = parseInt(selectable.dataset.sidx, 10);
                 const picked = idx >= 0 ? visible[idx] : null;
+                const swallow = (e) => iigLog('ERROR', 'style → preset failed:', e?.message || e);
+                const nameEl = document.getElementById('slay_style_name');
+                if (picked?.custom) {
+                    // Own styles live only in the preset toggle — nothing goes to the picture.
+                    if (!settings.slayStyleToPreset) {
+                        toastr.warning('Свои стили работают только через тогл пресета — включите «В тогл пресета» вверху', 'SLAY Images', { timeOut: 6000 });
+                        return;
+                    }
+                    const block = picked.block || slayBuildStyleBlock(picked.name, slayCustomStyleDesc(picked), settings.imageSize);
+                    const prev = { slayStyle: settings.slayStyle, slayStyleName: settings.slayStyleName, slayStyleCustomId: settings.slayStyleCustomId };
+                    settings.slayStyle = '';
+                    settings.slayStyleName = picked.name;
+                    settings.slayStyleCustomId = picked.id;
+                    saveSettings();
+                    if (nameEl) nameEl.textContent = settings.slayStyleName;
+                    slayApplyStyleToPreset({ styleName: picked.name, block }).then((ok) => {
+                        if (ok) return;
+                        // Not written (no toggle, cancelled…) — the choice must not pretend it is on.
+                        Object.assign(settings, prev); saveSettings();
+                        const el = document.getElementById('slay_style_name');
+                        if (el) el.textContent = settings.slayStyleName || 'Как в пресете';
+                        slayRenderStyleStatus();
+                    }).catch(swallow);
+                    slayRenderStyleStatus();
+                    setTimeout(() => closeOverlay(), 0);
+                    return;
+                }
                 settings.slayStyle = prompt;
                 settings.slayStyleName = name || 'Как в пресете';
+                settings.slayStyleCustomId = '';
                 saveSettings();
-                const nameEl = document.getElementById('slay_style_name');
                 if (nameEl) nameEl.textContent = settings.slayStyleName;
                 // S4: with the switch on the full block goes into the preset toggle;
                 // «Как в пресете» puts the original toggle text back.
                 if (settings.slayStyleToPreset) {
-                    const swallow = (e) => iigLog('ERROR', 'style → preset failed:', e?.message || e);
                     if (!picked) slayApplyStyleToPreset({ restore: true }).catch(swallow);
                     else if (!String(picked.block || '').trim()) toastr.warning('У этого стиля нет блока для пресета, стиль пойдёт только к картинке', 'SLAY Images', { timeOut: 5000 });
                     else slayApplyStyleToPreset({ styleName: picked.name, block: picked.block }).catch(swallow);
@@ -9925,6 +11154,7 @@ function bindSettingsEvents() {
         const isGemini = apiType === 'gemini';
         const isOpenAI = apiType === 'openai';
         const isCustom = apiType === 'custom';
+        const isNovel = apiType === 'novelai';
 
         document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
         document.getElementById('slay_settings_body2')?.classList.toggle('iig-hidden', !settings.enabled);
@@ -9939,9 +11169,24 @@ function bindSettingsEvents() {
         const customFormat = isCustom ? (settings.customBodyFormat || 'chat') : 'chat';
         const isCustomImages = isCustom && customFormat === 'images';
         const isCustomEdits = isCustom && customFormat === 'edits';
-        const supportsRefs = (!isNaistera || naisteraModelSupportsRefs(currentNaisModel)) && !isCustomImages;
+        const supportsRefs = (!isNaistera || naisteraModelSupportsRefs(currentNaisModel)) && !isCustomImages && !isNovel;
 
-        document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera);
+        document.getElementById('slay_model_row')?.classList.toggle('iig-hidden', isNaistera || isNovel);
+        document.getElementById('slay_endpoint_row')?.classList.toggle('iig-hidden', isNovel);
+        document.getElementById('slay_novel_hint')?.classList.toggle('iig-hidden', !isNovel);
+        document.getElementById('slay_novel_params')?.classList.toggle('iig-hidden', !isNovel);
+        if (isNovel) {
+            const nm = getEffectiveNovelModel(settings);
+            const v5 = novelIsV5(nm), v4 = novelIsV4Plus(nm);
+            const canSmea = !v4 && (settings.novelSampler || 'k_euler_ancestral') !== 'ddim';
+            document.getElementById('slay_novel_custom_model_row')?.classList.toggle('iig-hidden', isPredefinedNovelModel(settings.novelModel));
+            document.getElementById('slay_novel_scheduler_row')?.classList.toggle('iig-hidden', v5);
+            document.getElementById('slay_novel_variety_row')?.classList.toggle('iig-hidden', v5);
+            document.getElementById('slay_novel_decrisper_row')?.classList.toggle('iig-hidden', v5);
+            document.getElementById('slay_novel_sm_row')?.classList.toggle('iig-hidden', !canSmea);
+            document.getElementById('slay_novel_sm_dyn_row')?.classList.toggle('iig-hidden', !(canSmea && settings.novelSm));
+        }
+        { const ki = document.getElementById('slay_api_key'); if (ki) ki.placeholder = isNovel ? 'pst-… или пусто, если ключ в таверне' : ''; }
         // size (WxH) and quality are read only by custom images/generations;
         // openai mode sends ratio/resolution inside the prompt instead.
         document.getElementById('slay_size_row')?.classList.toggle('iig-hidden', !isCustomImages);
@@ -9957,7 +11202,7 @@ function bindSettingsEvents() {
         // aspect_ratio + image_size live in "gemini params" but generateImageOpenAI
         // injects them into the prompt too ([aspect_ratio: X] [image_size: Y]) —
         // show for gemini, openai, and custom chat-format alike.
-        document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !(isGemini || isOpenAI || (isCustom && !isCustomImages)));
+        document.getElementById('slay_gemini_params')?.classList.toggle('iig-hidden', !(isGemini || isOpenAI || (isCustom && !isCustomImages)) || isNovel);
         // edits: the ratio picks the size; 1K/2K/4K means nothing there.
         document.getElementById('slay_image_size_row')?.classList.toggle('iig-hidden', isCustomEdits);
         document.getElementById('slay_edits_params')?.classList.toggle('iig-hidden', !isCustomEdits);
@@ -9977,11 +11222,19 @@ function bindSettingsEvents() {
             const modelRow = document.getElementById('slay_naistera_model_row');
             if (modelRow) modelRow.insertAdjacentElement('afterend', noRefsHint);
         }
-        if (noRefsHint) noRefsHint.classList.toggle('iig-hidden', supportsRefs || !isNaistera);
+        if (noRefsHint && isNovel) {
+            // NovelAI's block lives in «Картинка»: move the hint next to it.
+            const np = document.getElementById('slay_novel_params');
+            if (np && noRefsHint.previousElementSibling !== np) np.insertAdjacentElement('afterend', noRefsHint);
+        } else if (noRefsHint && isNaistera) {
+            const nr = document.getElementById('slay_naistera_model_row');
+            if (nr && noRefsHint.previousElementSibling !== nr) nr.insertAdjacentElement('afterend', noRefsHint);
+        }
+        if (noRefsHint) noRefsHint.classList.toggle('iig-hidden', supportsRefs || !(isNaistera || isNovel));
 
         const wardrobeHint = document.getElementById('slay_wardrobe_hint');
         if (wardrobeHint) {
-            if (!supportsRefs && isNaistera) {
+            if (!supportsRefs && (isNaistera || isNovel)) {
                 wardrobeHint.textContent = 'Модель не поддерживает референсы. Будут отправляться только текстовые описания.';
                 wardrobeHint.style.color = '#ff9800';
                 wardrobeHint.classList.remove('iig-hidden');   // a warning is not a hint: always visible
@@ -10085,6 +11338,7 @@ function bindSettingsEvents() {
         // Older profiles have no Naistera fields — leave the live ones alone then.
         if (p.naisteraModel) settings.naisteraModel = normalizeNaisteraModel(p.naisteraModel);
         if (p.naisteraAspectRatio) settings.naisteraAspectRatio = p.naisteraAspectRatio;
+        if (p.novelModel) { settings.novelModel = p.novelModel; settings.novelCustomModel = p.novelCustomModel || ''; }
         saveSettings();
         // Sync visible inputs to the applied profile
         const typeSel = document.getElementById('slay_api_type');
@@ -10103,12 +11357,16 @@ function bindSettingsEvents() {
         if (nmInp) nmInp.value = naisteraModelIsListed(settings.naisteraModel) ? '' : (settings.naisteraModel || '');
         const naSel = document.getElementById('slay_naistera_aspect_ratio');
         if (naSel) naSel.value = settings.naisteraAspectRatio || 'auto';
+        const nvSel = document.getElementById('slay_novel_model');
+        if (nvSel) nvSel.value = isPredefinedNovelModel(settings.novelModel) ? settings.novelModel : 'custom';
+        const nvInp = document.getElementById('slay_novel_custom_model');
+        if (nvInp) nvInp.value = settings.novelCustomModel || '';
         updateVisibility();
         iigSyncModelInputMode({ forceManual: settings.apiType === 'custom' || settings.apiType === 'naistera' });
         toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
     });
     document.getElementById('slay_conn_profile_save')?.addEventListener('click', async () => {
-        const defaultName = settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
+        const defaultName = settings.apiType === 'novelai' ? `NovelAI ${novelModelLabel(getEffectiveNovelModel(settings))}` : settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
         const raw = await slayPromptInput('Имя профиля подключения:', defaultName);
         const name = (raw || '').trim();
         if (!name) return;
@@ -10122,6 +11380,8 @@ function bindSettingsEvents() {
             customBodyFormat: settings.customBodyFormat || 'chat',
             naisteraModel: settings.naisteraModel,
             naisteraAspectRatio: settings.naisteraAspectRatio,
+            novelModel: settings.novelModel,
+            novelCustomModel: settings.novelCustomModel || '',
         };
         const existing = profiles.findIndex(x => x.name === name);
         if (existing >= 0) profiles[existing] = snapshot;
@@ -10152,7 +11412,7 @@ function bindSettingsEvents() {
         // Warn, don't clear: reusing one proxy across api types is legitimate, but
         // pasting a new provider's key while the old provider's host is still in the
         // field silently ships that key to the wrong place.
-        if (settings.endpoint && !shouldReplaceEndpointForApiType(next, settings.endpoint) && next !== 'naistera') {
+        if (settings.endpoint && !shouldReplaceEndpointForApiType(next, settings.endpoint) && next !== 'naistera' && next !== 'novelai') {
             try {
                 const host = new URL(settings.endpoint, location.origin).host;
                 toastr.info(`Endpoint остался прежним: ${host}. Если это адрес другого провайдера — поменяйте его перед вводом нового ключа.`, 'SLAY Images', { timeOut: 9000 });
@@ -10161,7 +11421,7 @@ function bindSettingsEvents() {
         settings.apiType = next; _slayTestOk = false; saveSettings(); updateVisibility();
         // custom / naistera have no model listing — hand the user the text field.
         iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' });
-        if (next !== 'custom' && next !== 'naistera' && !settings.manualModel && settings.endpoint && settings.apiKey) {
+        if (next !== 'custom' && next !== 'naistera' && next !== 'novelai' && !settings.manualModel && settings.endpoint && settings.apiKey) {
             populateModelDatalist({ silent: true }).catch(() => {});
         }
     });
@@ -10258,7 +11518,7 @@ function bindSettingsEvents() {
         const manual = isCustom || !!st.manualModel;
         const cb = document.getElementById('slay_manual_model');
         if (cb) cb.checked = manual;
-        document.getElementById('slay_manual_model_row')?.classList.toggle('iig-hidden', isCustom);
+        document.getElementById('slay_manual_model_row')?.classList.toggle('iig-hidden', isCustom || st.apiType === 'novelai' || st.apiType === 'naistera');
         const mi = document.getElementById('slay_model');
         if (mi) {
             if (mi.dataset.ph === undefined) mi.dataset.ph = mi.placeholder || '';
@@ -10322,7 +11582,28 @@ function bindSettingsEvents() {
         updateVisibility();
     });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
+    // NovelAI
+    {
+        const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
+        const num = (v, d, lo, hi, f = parseInt) => { const n = f(v, 10); return Number.isNaN(n) ? d : Math.max(lo, Math.min(hi, n)); };
+        on('slay_novel_model', 'change', (e) => { settings.novelModel = e.target.value; saveSettings(); updateVisibility(); updateSectionStatusesSoon(); });
+        on('slay_novel_custom_model', 'input', (e) => { settings.novelCustomModel = e.target.value.trim(); saveSettings(); updateSectionStatusesSoon(); });
+        on('slay_novel_resolution', 'change', (e) => { settings.novelResolution = e.target.value; saveSettings(); updateSectionStatusesSoon(); });
+        on('slay_novel_anlas_guard', 'change', (e) => { settings.novelAnlasGuard = e.target.checked; saveSettings(); });
+        on('slay_novel_sampler', 'change', (e) => { settings.novelSampler = e.target.value; saveSettings(); updateVisibility(); });
+        on('slay_novel_scheduler', 'change', (e) => { settings.novelScheduler = e.target.value; saveSettings(); });
+        on('slay_novel_steps', 'input', (e) => { settings.novelSteps = num(e.target.value, 28, 1, 50); saveSettings(); });
+        on('slay_novel_scale', 'input', (e) => { settings.novelScale = num(e.target.value, 5, 1, 10, parseFloat); saveSettings(); });
+        on('slay_novel_seed', 'input', (e) => { const n = parseInt(e.target.value, 10); settings.novelSeed = Number.isNaN(n) ? -1 : n; saveSettings(); });
+        on('slay_novel_prefix', 'input', (e) => { settings.novelPrefix = e.target.value; saveSettings(); });
+        on('slay_novel_negative', 'input', (e) => { settings.novelNegative = e.target.value; saveSettings(); });
+        on('slay_novel_variety_boost', 'change', (e) => { settings.novelVarietyBoost = e.target.checked; saveSettings(); });
+        on('slay_novel_decrisper', 'change', (e) => { settings.novelDecrisper = e.target.checked; saveSettings(); });
+        on('slay_novel_sm', 'change', (e) => { settings.novelSm = e.target.checked; saveSettings(); updateVisibility(); });
+        on('slay_novel_sm_dyn', 'change', (e) => { settings.novelSmDyn = e.target.checked; saveSettings(); });
+    }
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
+    document.getElementById('slay_style_reset_btn')?.addEventListener('click', () => { slayResetStyle().catch(e => iigLog('ERROR', 'style reset failed:', e?.message || e)); });
     document.getElementById('slay_style_to_preset')?.addEventListener('change', (e) => { settings.slayStyleToPreset = !!e.target.checked; saveSettings(); slayRenderStyleStatus(); });
     document.getElementById('slay_style_target')?.addEventListener('change', (e) => {
         const st = slayStylePresetState();
@@ -10362,8 +11643,9 @@ function bindSettingsEvents() {
         // Green flash only when the probe really proved something.
         let ok = false;
         try {
-            if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera') throw new Error('Укажите endpoint');
-            if (!currentSettings.apiKey) throw new Error('Укажите API key');
+            const isNovelTest = currentSettings.apiType === 'novelai';
+            if (!currentSettings.endpoint && currentSettings.apiType !== 'naistera' && !isNovelTest) throw new Error('Укажите endpoint');
+            if (!currentSettings.apiKey && !isNovelTest) throw new Error('Укажите API key');
             // A bare HEAD carries no key, so 401/403/404/405 from it prove nothing
             // either way — neutral, not red. Red is for silence only.
             const headProbe = async (u) => {
@@ -10377,7 +11659,36 @@ function bindSettingsEvents() {
                 toastr.warning(`Адрес ответил ${r.status}. Проверить можно только генерацией.`, 'SLAY Images', { timeOut: 7000 });
                 return false;
             };
-            if (currentSettings.apiType === 'naistera') {
+            if (isNovelTest) {
+                // Free: the subscription endpoint answers with tier and Anlas.
+                // With a key in SLAY we ask NovelAI directly; without one, the
+                // tavern asks with the key stored there. Nothing is written anywhere.
+                const tiers = { 0: 'Paper', 1: 'Tablet', 2: 'Scroll', 3: 'Opus' };
+                const report = (d, src) => {
+                    const anlas = (d?.trainingStepsLeft?.fixedTrainingStepsLeft ?? 0) + (d?.trainingStepsLeft?.purchasedTrainingSteps ?? 0);
+                    const tier = tiers[d?.tier] || `уровень ${d?.tier ?? '?'}`;
+                    toastr.success(`NovelAI работает${src} — подписка ${tier}, Anlas: ${anlas}`, 'SLAY Images', { timeOut: 6000 });
+                    if (d?.tier !== 3 && currentSettings.novelAnlasGuard !== false) toastr.info('Бесплатная генерация (без Anlas) есть только на Opus — на других подписках каждая картинка тратит Anlas.', 'SLAY Images', { timeOut: 8000 });
+                };
+                const key = sanitizeApiKey(currentSettings.apiKey || '');
+                if (key) {
+                    const url = `${NOVELAI_IMAGE_HOST}/user/subscription`;
+                    let r;
+                    try { r = await fetch(url, { headers: { 'Authorization': `Bearer ${key}` } }); }
+                    catch (_) { const e2 = new Error('Failed to fetch'); e2.slayUrl = url; throw e2; }
+                    if (r.status === 401 || r.status === 403) throw new Error('Ключ NovelAI не подошёл — нужен Persistent API Token вида pst-…');
+                    if (!r.ok) throw slayHttpError(r.status, await r.text().catch(() => ''), url);
+                    report(await r.json(), '');
+                } else {
+                    const r = await fetch('/api/novelai/status', { method: 'POST', headers: SillyTavern.getContext().getRequestHeaders(), body: '{}' });
+                    if (r.status === 400) throw new Error('Нет ключа NovelAI — впишите pst-… в поле API Key или в настройках NovelAI самой таверны');
+                    if (!r.ok) throw slayHttpError(r.status, '', '/api/novelai/status');
+                    const d = await r.json();
+                    if (d?.error) throw new Error('Ключ NovelAI в настройках таверны не подошёл');
+                    report(d, ' (ключ из таверны)');
+                }
+                ok = true;
+            } else if (currentSettings.apiType === 'naistera') {
                 // Probing the site ROOT reported OK while generation was dead: the
                 // address generation uses is /api/generate. Only a POST there truly
                 // proves anything, and that would cost a picture — so check the path
@@ -10603,6 +11914,10 @@ function bindSettingsEvents() {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.skipDescriptionWarning = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
     });
+    document.getElementById('slay_sw_quick_mobile')?.addEventListener('change', (e) => {
+        const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
+        if (s) { s.quickSwapMobile = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
+    });
     document.getElementById('slay_sw_show_float')?.addEventListener('change', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (s) { s.showFloatingBtn = e.target.checked; SillyTavern.getContext().saveSettingsDebounced(); }
@@ -10635,7 +11950,7 @@ function bindSettingsEvents() {
 function initLightbox() {
     if (document.getElementById('slay_lightbox')) return;
     const overlay = document.createElement('div'); overlay.id = 'slay_lightbox'; overlay.className = 'iig-lightbox';
-    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><div class="iig-lightbox-bar"><span class="iig-lightbox-file"></span><button type="button" class="iig-lightbox-dl" title="Скачать файл"><i class="fa-solid fa-download"></i> Скачать</button><button type="button" class="iig-lightbox-share" title="Поделиться"><i class="fa-solid fa-share-nodes"></i> Поделиться</button></div></div>`;
+    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><div class="iig-lightbox-bar"><span class="iig-lightbox-file"></span><button type="button" class="iig-lightbox-dl" title="Скачать файл"><i class="fa-solid fa-download"></i> Скачать</button><button type="button" class="iig-lightbox-share" title="Поделиться"><i class="fa-solid fa-share-nodes"></i> Поделиться</button><button type="button" class="iig-lightbox-asstyle" title="Сохранить как свой стиль"><i class="fa-solid fa-palette"></i> Как стиль</button></div></div>`;
     document.body.appendChild(overlay);
     const close = (e) => {
         // CRITICAL: stop the event from bubbling to document. Otherwise ST's extensions
@@ -10654,6 +11969,20 @@ function initLightbox() {
     const fileEl = overlay.querySelector('.iig-lightbox-file');
     const dlBtn = overlay.querySelector('.iig-lightbox-dl');
     const shareBtn = overlay.querySelector('.iig-lightbox-share');
+    const asStyleBtn = overlay.querySelector('.iig-lightbox-asstyle');
+    asStyleBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const img = overlay._chatImg;
+        let prompt = '';
+        try { prompt = JSON.parse(img?.getAttribute('data-iig-instruction') || '{}')?.prompt || ''; } catch (_) { }
+        const src = img?.getAttribute('src') || '';
+        close();
+        const found = slayStyleFromPrompt(prompt);
+        const desc = [found.style || slayPromptTail(prompt.replace(/\bAvoid\s*:[\s\S]*$/i, '')), found.avoid ? 'Avoid: ' + found.avoid : ''].filter(Boolean).join('\n');
+        if (found.guessed) toastr.info('Стиль найден по ключевым словам — проверь, что в описание не попала сцена', 'SLAY Images', { timeOut: 6000 });
+        const saved = await slayEditCustomStyleDialog(null, { desc, cover: src.startsWith('data:') ? '' : src });
+        if (saved) toastr.success(`Стиль «${saved.name}» сохранён — он в «Выбрать стиль» → «Свой стиль»`, 'SLAY Images', { timeOut: 5000 });
+    });
     const lbSrc = () => overlay.querySelector('.iig-lightbox-img').getAttribute('src') || '';
     overlay.addEventListener('slay-lightbox-open', () => {
         const src = lbSrc();
@@ -10664,11 +11993,14 @@ function initLightbox() {
         fileEl.title = name;
         // No share sheet on this device (desktop browsers) → only «Скачать».
         shareBtn.style.display = iigHasShareSheet() ? '' : 'none';
+        // «Как стиль» only for a chat picture that carries its prompt.
+        asStyleBtn.style.display = overlay._chatImg?.getAttribute?.('data-iig-instruction') ? '' : 'none';
+        if (iigHasShareSheet() && src) iigPrepareMedia(src, { el: overlay.querySelector('.iig-lightbox-img') }).catch(() => {});
     });
     const lbSave = async (btn, mode) => {
         if (btn.disabled) return;
         btn.disabled = true;
-        try { await iigSaveMedia(lbSrc(), { mode }); } finally { btn.disabled = false; }
+        try { await iigSaveMedia(lbSrc(), { mode, el: overlay.querySelector('.iig-lightbox-img') }); } finally { btn.disabled = false; }
     };
     dlBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); lbSave(dlBtn, 'download'); });
     shareBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); lbSave(shareBtn, 'share'); });
@@ -10790,6 +12122,7 @@ function initLightbox() {
         if (!img.closest('#chat')) return; // only chat images
         console.log('[IIG-LB] OPEN', (img.getAttribute('src') || '').slice(-60));
         e.preventDefault(); e.stopPropagation();
+        overlay._chatImg = img;
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
         overlay.classList.add('open');
@@ -10833,6 +12166,15 @@ function updateHeaderStatusDot() {
     }
 
     getSettings();
+
+    // Leftovers of old SLAY test builds: nothing reads them, but other
+    // extensions that look for image settings by shape (Phone-ST) may pick
+    // them instead of the live ones.
+    let dropped = false;
+    for (const key of ['slay_image_gen_llm', 'slay_image_gen_preview']) {
+        if (Object.hasOwn(context.extensionSettings, key)) { delete context.extensionSettings[key]; dropped = true; }
+    }
+    if (dropped) { iigLog('INFO', 'Removed leftover settings of old SLAY test builds'); saveSettings(); }
 
     context.eventSource.on(context.event_types.APP_READY, () => {
         restoreRefsFromLocalStorage();
