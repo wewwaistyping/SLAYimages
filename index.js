@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.21';
+const SLAY_VERSION = '5.2.0-exp.22';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -13083,18 +13083,48 @@ function slayStudioWhoToOption(opts, picked) {
 }
 
 // The preset's image rules: the toggle carrying <image_gen> / our tag format.
+// «Правила из пресета»: one toggle picked by hand, remembered per preset.
+// Empty = the automatic guess below.
+function slayStudioPresetName() {
+    try {
+        const pm = SillyTavern.getContext().getPresetManager?.('openai');
+        return String(pm?.getSelectedPresetName?.() || '');
+    } catch (_) { return ''; }
+}
+function slayStudioPickedToggle() {
+    const map = getSettings().studioRuleToggle;
+    return (map && typeof map === 'object') ? String(map[slayStudioPresetName()] || '') : '';
+}
+
 function slayStudioPresetRules() {
     try {
         const ctx = SillyTavern.getContext();
         if (ctx.mainApi !== 'openai') return '';
         const prompts = Array.isArray(ctx.chatCompletionSettings?.prompts) ? ctx.chatCompletionSettings.prompts : [];
+        const picked = slayStudioPickedToggle();
+        const own = picked ? prompts.find(p => p && !p.marker && p.identifier === picked) : null;
+        if (own) return ctx.substituteParams ? ctx.substituteParams(String(own.content || '')) : String(own.content || '');
         const cands = prompts.filter(p => p && !p.marker && /data-iig-instruction|<image_gen>/i.test(String(p.content || '')));
         if (!cands.length) return '';
+        // Only the order ST actually uses (global strategy, dummy id 100001 —
+        // openai.js promptOrder.dummyId). Old presets also carry a stale order
+        // for id 100000; reading «enabled» from every order picked a toggle
+        // that was on there, so switching toggles changed nothing here.
         const orders = Array.isArray(ctx.chatCompletionSettings?.prompt_order) ? ctx.chatCompletionSettings.prompt_order : [];
-        const on = new Set();
-        for (const o of orders) for (const e of (o?.order || [])) if (e?.enabled) on.add(e.identifier);
-        const pick = cands.find(p => on.has(p.identifier)) || cands[0];
-        return ctx.substituteParams ? ctx.substituteParams(String(pick.content)) : String(pick.content);
+        const active = orders.find(o => String(o?.character_id) === '100001') || orders[orders.length - 1];
+        const on = new Set((active?.order || []).filter(e => e?.enabled).map(e => e.identifier));
+        const sub = (t) => ctx.substituteParams ? ctx.substituteParams(String(t)) : String(t);
+        // Every enabled toggle that carries image rules, the <image_gen> block
+        // first. Styles kept as separate toggles («по старинке») ride along when
+        // the toggle is named as a style and its text is about pictures.
+        const live = cands.filter(p => on.has(p.identifier)).sort((a, b) => (/<image_gen>/i.test(b.content) ? 1 : 0) - (/<image_gen>/i.test(a.content) ? 1 : 0));
+        const styleToggles = prompts.filter(p => p && !p.marker && on.has(p.identifier) && !cands.includes(p)
+            && String(p.content || '').length < 6000
+            && /(style|стиль)/i.test(String(p.name || ''))
+            && /(image|picture|prompt|art|render|illustration|картин)/i.test(String(p.content || '')));
+        const parts = (live.length ? live : [cands[0]]).map(p => sub(p.content));
+        for (const p of styleToggles) parts.push(`Image style toggle «${String(p.name || '').trim()}»:\n${sub(p.content)}`);
+        return parts.join('\n\n');
     } catch (e) { iigLog('WARN', 'studio preset rules:', e?.message); return ''; }
 }
 
@@ -13161,7 +13191,7 @@ function slayStudioCleanRewrite(raw) {
     return { text: out, hadImage };
 }
 
-async function slayStudioRewrite(idea, mode, whoNames, givenContext = '') {
+async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false } = {}) {
     const ctx = SillyTavern.getContext();
     if (typeof ctx.generateRaw !== 'function') throw new Error('эта версия таверны не умеет тихую генерацию');
     const rules = slayStudioPresetRules();
@@ -13173,6 +13203,10 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '') {
         + (rules
             ? 'Use these image rules from the roleplay preset for the CONTENT of the prompt (camera, style, avoid list) — but output only the prompt text itself, never the tag or block they describe:\n\n' + rules
             : 'The prompt covers: camera and shot, characters by FIRST NAME only (reference pictures supply their looks), what they do, environment, light, style, and an Avoid list.')
+        // A SLAY style goes on top at generation. A second style written into
+        // the prompt from the preset wins over it (the model obeys the prompt),
+        // so with a SLAY style the rewrite writes none.
+        + (styleAdded ? '\n\nIMPORTANT: the art style is added separately by the image tool. Do NOT write any art style, medium, rendering technique, artist or studio names, or a style suffix — even if the rules above ask for one. Describe only camera, characters, action, place, light and composition, plus the Avoid list if the rules have one.' : '')
         + '\n\nReturn ONLY the final prompt text in English, one paragraph. No tags, no JSON, no comments.';
     const prompt = [
         context ? 'Context:\n' + context : '',
@@ -13516,6 +13550,8 @@ function openSlayStudio() {
               <div class="slay-studio-lbl">Контекст для переделки</div>
               <div class="slay-studio-seg" data-zone="ctx"></div>
               <div class="slay-studio-note" data-zone="ctxnote"></div>
+              <div class="slay-studio-lbl">Тогл из пресета с правилами картинок</div>
+              <select class="text_pole slay-studio-ruletog" data-zone="ruletog"></select>
               <button type="button" class="slay-studio-btn ai" data-act="rewrite">✨ Переделать по пресету</button>
               <div class="slay-studio-lbl">Готовый промпт (можно поправить)</div>
               <textarea class="text_pole slay-studio-prompt" rows="6" placeholder="Нажми «Переделать по пресету» — здесь появится промпт для генерации"></textarea>
@@ -13556,6 +13592,17 @@ function openSlayStudio() {
         $z('ctx').innerHTML = Object.entries(SLAY_STUDIO_CTX).map(([k, [l]]) => `<button type="button" class="${_studio.ctx === k ? 'on' : ''}" data-ctx="${k}">${l}</button>`).join('');
         $z('ctxnote').textContent = SLAY_STUDIO_CTX[_studio.ctx][1] + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
         $z('rw').hidden = _studio.raw;
+        {
+            const sel = $z('ruletog');
+            const ctx2 = SillyTavern.getContext();
+            const list = ctx2.mainApi === 'openai' && Array.isArray(ctx2.chatCompletionSettings?.prompts) ? ctx2.chatCompletionSettings.prompts.filter(p => p && !p.marker && p.identifier && String(p.content || '').trim()) : [];
+            const orders = Array.isArray(ctx2.chatCompletionSettings?.prompt_order) ? ctx2.chatCompletionSettings.prompt_order : [];
+            const active = orders.find(o => String(o?.character_id) === '100001') || orders[orders.length - 1];
+            const on = new Set((active?.order || []).filter(e => e?.enabled).map(e => e.identifier));
+            const picked = slayStudioPickedToggle();
+            sel.innerHTML = '<option value="">Авто — SLAY найдёт сам</option>' + list.map(p => `<option value="${esc(p.identifier)}"${p.identifier === picked ? ' selected' : ''}>${on.has(p.identifier) ? '● ' : '○ '}${esc(String(p.name || p.identifier).replace(/^[\s·]+/, '').slice(0, 60))}</option>`).join('');
+            sel.disabled = !list.length;
+        }
         if ($z('rawnote')) $z('rawnote').hidden = !_studio.raw;
         $z('cost').textContent = slayStudioCostText();
     };
@@ -13644,7 +13691,8 @@ function openSlayStudio() {
             t.disabled = true; const was = t.textContent; t.textContent = 'Переделываю…';
             try {
                 const names = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
-                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names);
+                const st = getSettings();
+                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset() });
             } catch (err) { toastr.error('Переделка не вышла: ' + (err?.message || err), 'Студия'); }
             finally { t.disabled = false; t.textContent = was; }
             return;
@@ -13704,6 +13752,14 @@ function openSlayStudio() {
         else if (z === 'n') { _studio.n = parseInt(e.target.value, 10) || 1; drawLeft(); }
         else if (z === 'ar') _studio.ar = e.target.value;
         else if (z === 'style') _studio.noStyle = e.target.value === 'none';
+        else if (z === 'ruletog') {
+            const st = getSettings();
+            if (!st.studioRuleToggle || typeof st.studioRuleToggle !== 'object') st.studioRuleToggle = {};
+            const pn = slayStudioPresetName();
+            if (e.target.value) st.studioRuleToggle[pn] = e.target.value; else delete st.studioRuleToggle[pn];
+            saveSettings();
+            drawLeft();
+        }
     });
     drawLeft();
     drawResults();

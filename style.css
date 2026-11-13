@@ -4017,3 +4017,6 @@ button.slay-card-look { cursor: pointer; }
 /* Studio: what «Без переделки» skips */
 .slay-studio-rawnote { margin: 4px 0 2px; padding: 6px 9px; font-size: 12px; line-height: 1.4; border: 1px solid rgba(251, 191, 36, .45); border-radius: 8px; background: rgba(251, 191, 36, .08); }
 .slay-studio-rawnote[hidden] { display: none; }
+
+/* Studio: which preset toggle holds the image rules */
+.slay-studio-ruletog { width: 100%; box-sizing: border-box; margin: 2px 0 8px; }
