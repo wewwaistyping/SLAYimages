@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.22';
+const SLAY_VERSION = '5.2.0-exp.23';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -7167,7 +7167,8 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     const charInPrompt = studio ? !!studio.char : nameIsInPrompt(charDisplayName, lowerPrompt);
     const userInPrompt = studio ? !!studio.user : nameIsInPrompt(userDisplayName, lowerPrompt);
     const studioNpcs = studio ? (refs.npcReferences || []).filter(n => hasManualReference(n) && (studio.npcNames || []).includes(n.name)).map(n => ({ name: n.name, imageBase64: n.imageBase64, imagePath: n.imagePath, _member: n._member })) : null;
-    const studioLoc = studio && studio.locName ? ((refs.locReferences || []).find(l => l && l.name === studio.locName && hasManualReference(l)) || null) : null;
+    const studioLocs = studio && studio.locName ? (refs.locReferences || []).filter(l => l && l.name === studio.locName && slayLocUsable(l)) : [];
+    const studioLoc = (studio?.locKey && studioLocs.find(l => slayLocKey(l) === studio.locKey)) || studioLocs[0] || null;
     // The scene's place: the one pinned as «Сейчас здесь», else the one named in the prompt.
     // The pin wins: names are plain words («beach»), and the pinned place's own
     // description («a beach shack») used to name another slot and push it aside.
@@ -9421,7 +9422,9 @@ function applyNameToSlot(slotEl, refType, npcIndex, name) {
     else if (refType === 'npc' || refType === 'loc') {
         const list = slayRefList(s, refType);
         if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        const wasHere = refType === 'loc' && slayIsHere(list[npcIndex]);
         list[npcIndex].name = name;
+        if (wasHere) slaySetHere(name ? list[npcIndex] : null);
     }
     saveSettings();
     const input = slotEl?.querySelector('.iig-ref-name');
@@ -13032,7 +13035,29 @@ const SLAY_STUDIO_CTX = {
 };
 const SLAY_STUDIO_RATIOS = ['1:1', '3:4', '4:3', '2:3', '9:16', '16:9'];
 // Window state, memory only: which chips, task, ratio. Reset per chat.
-const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busy: 0 };
+const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busy: 0, busyChat: null };
+// The open window's own close (listeners and observers go with it).
+let _studioClose = null;
+// Pictures that finished after their chat was left: kept until that chat is
+// open again (in memory, so until the page reloads).
+const _studioLate = {};
+function slayStudioChatKey() {
+    const ctx = SillyTavern.getContext();
+    return ctx.chatId || ctx.groupId || '';
+}
+function slayStudioTakeLate() {
+    const key = slayStudioChatKey();
+    const late = key && _studioLate[key];
+    if (!late || !late.length) return;
+    delete _studioLate[key];
+    slayStudioItems().push(...late);
+    slayStudioSave();
+}
+// Chat switched: the window showed the old chat's chips and results.
+function slayStudioOnChatChanged() {
+    try { _studioClose?.(); } catch (_) { }
+    try { slayStudioTakeLate(); } catch (e) { iigLog('WARN', 'studio late results:', e?.message); }
+}
 
 function slayStudioItems(create = true) {
     const ctx = SillyTavern.getContext();
@@ -13058,26 +13083,39 @@ function slayStudioWhoOptions() {
             if (!n?.name) continue;
             out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name), member: !!n._member });
         }
-        for (const l of refs.locReferences || []) if (l?.name && hasManualReference(l)) out.push({ key: 'loc:' + l.name, kind: 'loc', name: l.name, label: first(l.name) });
-        return out;
+        for (const l of refs.locReferences || []) if (slayLocUsable(l)) out.push({ key: 'loc:' + slayLocKey(l), kind: 'loc', name: l.name, locKey: slayLocKey(l), label: first(l.name) });
+        return slayStudioNumberLocs(out);
     }
     const refs = getCurrentCharacterRefs();
     out.push({ key: 'char', kind: 'char', label: first(getDefaultCharRefName(refs)) || '{{char}}' });
     out.push({ key: 'user', kind: 'user', label: first(getDefaultUserRefName(refs)) || '{{user}}' });
     for (const n of refs.npcReferences || []) if (n?.name && hasManualReference(n)) out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name) });
-    for (const l of slayRefList(refs, 'loc')) if (l?.name && hasManualReference(l)) out.push({ key: 'loc:' + l.name, kind: 'loc', name: l.name, label: first(l.name) });
+    for (const l of slayRefList(refs, 'loc')) if (slayLocUsable(l)) out.push({ key: 'loc:' + slayLocKey(l), kind: 'loc', name: l.name, locKey: slayLocKey(l), label: first(l.name) });
+    return slayStudioNumberLocs(out);
+}
+
+// Two places under one name get numbers, as on the «Сейчас здесь» chips.
+function slayStudioNumberLocs(out) {
+    const locs = out.filter(o => o.kind === 'loc');
+    const seen = {};
+    for (const o of locs) {
+        if (locs.filter(x => x.label === o.label).length < 2) continue;
+        seen[o.label] = (seen[o.label] || 0) + 1;
+        o.numbered = `${o.label} ${seen[o.label]}`;
+    }
+    for (const o of locs) if (o.numbered) { o.label = o.numbered; delete o.numbered; }
     return out;
 }
 
 // Chips → the generateImageWithRetry studio option.
 function slayStudioWhoToOption(opts, picked) {
-    const res = { char: false, user: false, npcNames: [], locName: '' };
+    const res = { char: false, user: false, npcNames: [], locName: '', locKey: '' };
     for (const o of opts) {
         if (!picked.has(o.key)) continue;
         if (o.kind === 'char') res.char = true;
         else if (o.kind === 'user') res.user = true;
         else if (o.kind === 'npc') res.npcNames.push(o.name);
-        else if (o.kind === 'loc' && !res.locName) res.locName = o.name;
+        else if (o.kind === 'loc' && !res.locName) { res.locName = o.name; res.locKey = o.locKey || ''; }
     }
     return res;
 }
@@ -13223,13 +13261,46 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
     // Thinking models spend the answer limit on reasoning first: 900 tokens
     // ran out before any text (a 400 «output token limit was exhausted by
     // model reasoning»). Only the tokens actually used are billed.
-    try { raw = await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: 8192 }); }
+    // Some models take fewer than 8192 and refuse the request outright: one
+    // more try with 4096. That is not the reasoning case, which says so itself.
+    // ST throws a bare «Got response status 400» and shows the provider's own
+    // words in a toast, so the reason is read off the response on its way past.
+    let why = '';
+    const ask = async (len) => {
+        const orig = window.fetch;
+        let live = true;
+        const tee = async function (...a) {
+            const r = await orig.apply(this, a);
+            try {
+                if (live && /chat-completions\/generate/.test(String(a[0]?.url || a[0]))) {
+                    const t = (await r.clone().text()).slice(0, 2000);
+                    if (!r.ok || /^\s*\{\s*"error"/.test(t)) why = t;
+                }
+            } catch (_) { }
+            return r;
+        };
+        window.fetch = tee;
+        try { return await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: len }); }
+        finally { live = false; if (window.fetch === tee) window.fetch = orig; }
+    };
+    const byReasoning = (m) => /reasoning|exhausted/i.test(m);
+    const limitTooBig = (m) => !byReasoning(m) && /max_tokens|max_completion_tokens|max_output_tokens|max output tokens|maximum (?:allowed )?(?:number of )?(?:output |completion )?tokens/i.test(m);
+    try { raw = await ask(8192); }
     catch (e) {
-        const msg = String(e?.message || e);
-        iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${msg}`);
-        if (/reasoning|token limit|max_tokens|max output tokens/i.test(msg)) throw new Error('модель чата истратила лимит ответа на размышления — снизь в пресете уровень размышлений (reasoning) или возьми модель без них');
-        if (/no message generated/i.test(msg)) throw new Error('модель вернула пустой ответ');
-        throw e;
+        let err = e, msg = `${e?.message || e} ${why}`.trim();
+        if (limitTooBig(msg)) {
+            iigLog('INFO', 'Studio rewrite: the model refused an 8192 answer limit, retrying with 4096');
+            why = '';
+            try { raw = await ask(4096); err = null; }
+            catch (e2) { err = e2; msg = `${e2?.message || e2} ${why}`.trim(); }
+        }
+        if (err) {
+            iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${msg}`);
+            if (limitTooBig(msg)) throw new Error('модель чата не принимает такой длинный ответ — возьми для переделки другую модель');
+            if (byReasoning(msg) || /token limit/i.test(msg)) throw new Error('модель чата истратила лимит ответа на размышления — снизь в пресете уровень размышлений (reasoning) или возьми модель без них');
+            if (/no message generated/i.test(msg)) throw new Error('модель вернула пустой ответ');
+            throw err;
+        }
     }
     const { text, hadImage } = slayStudioCleanRewrite(raw);
     iigLog('INFO', `Studio rewrite: source=${source || '?'} model=${model || '?'} context=${mode} answer=${String(raw || '').length} chars, clean=${text.length}${hadImage ? ', had image' : ''}`);
@@ -13338,7 +13409,7 @@ function slayApiWho(inFrame) {
     const npcSet = wanted(inFrame.npcs);
     if (npcSet.size) res.npcNames = (refs.npcReferences || []).filter(n => n?.name && hasManualReference(n) && hits(n.name, npcSet)).map(n => n.name);
     const locSet = wanted(inFrame.location);
-    if (locSet.size) res.locName = (slayRefList(refs, 'loc').find(l => l?.name && hasManualReference(l) && hits(l.name, locSet)) || {}).name || '';
+    if (locSet.size) res.locName = (slayRefList(refs, 'loc').find(l => slayLocUsable(l) && hits(l.name, locSet)) || {}).name || '';
     return res;
 }
 
@@ -13514,7 +13585,9 @@ function slayStudioWindow(ov) {
 function openSlayStudio() {
     const ctx = SillyTavern.getContext();
     if (!ctx.chatId && !ctx.groupId) { toastr.info('Открой чат — студия хранит картинки в нём', 'Студия'); return; }
+    try { _studioClose?.(); } catch (_) { }
     document.querySelector('.slay-studio-ov')?.remove();
+    slayStudioTakeLate();
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
         Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false });
     }
@@ -13609,8 +13682,9 @@ function openSlayStudio() {
 
     const drawResults = () => {
         const items = slayStudioItems(false);
-        const busy = Array.from({ length: _studio.busy }, () => '<div class="slay-studio-card busy"><div class="slay-studio-spin"><i class="fa-solid fa-spinner fa-spin"></i> рисую…</div></div>').join('');
-        if (!items.length && !_studio.busy) {
+        const busyN = _studio.busyChat === slayStudioChatKey() ? _studio.busy : 0;
+        const busy = Array.from({ length: busyN }, () => '<div class="slay-studio-card busy"><div class="slay-studio-spin"><i class="fa-solid fa-spinner fa-spin"></i> рисую…</div></div>').join('');
+        if (!items.length && !busyN) {
             $z('res').innerHTML = '<div class="slay-studio-empty">Здесь появятся картинки.<br>Они хранятся в студии этого чата, пока не удалишь.</div>';
             return;
         }
@@ -13628,7 +13702,8 @@ function openSlayStudio() {
             </div>`).join('');
     };
 
-    const close = () => { win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); };
+    const close = () => { win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; };
+    _studioClose = close;
     // Escape only while focus is inside the Studio: in window mode the chat
     // stays usable and its own Escape must keep working.
     const onKey = (e) => {
@@ -13640,18 +13715,21 @@ function openSlayStudio() {
 
     const runGenerate = async ({ prompt, idea, who, ar, n, noStyle, editSource, editText }) => {
         if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'Студия'); return; }
-        _studio.busy += n; drawResults();
+        const chatKey = slayStudioChatKey();
+        _studio.busy += n; _studio.busyChat = chatKey; drawResults();
+        let late = 0;
         const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
             studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText,
         }).then(async (res) => {
             if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
             const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
-            const items = slayStudioItems();
-            items.push({ id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false });
-            slayStudioSave();
+            const item = { id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false };
+            if (slayStudioChatKey() === chatKey) { slayStudioItems().push(item); slayStudioSave(); }
+            else { (_studioLate[chatKey] = _studioLate[chatKey] || []).push(item); late++; }
         }).finally(() => { _studio.busy = Math.max(0, _studio.busy - 1); if (ov.isConnected) drawResults(); }));
         const out = await Promise.allSettled(jobs);
         const bad = out.filter(r => r.status === 'rejected');
+        if (late) toastr.info('Картинка дорисовалась, пока был открыт другой чат. Она появится в студии того чата, когда вернёшься (до перезагрузки страницы).', 'Студия', { timeOut: 8000 });
         if (bad.length) toastr.error(`Не нарисовалось ${bad.length} из ${n}: ${bad[0].reason?.message || bad[0].reason}`, 'Студия', { timeOut: 8000 });
         else toastr.success('Готово. В чат ничего не ушло.', 'Студия', { timeOut: 2500 });
     };
@@ -14138,6 +14216,7 @@ function updateHeaderStatusDot() {
             addButtonsToExistingMessages();
             renderRefSlots();
             slayInjectStudioBtn();
+            slayStudioOnChatChanged();
             attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true });
             // Pictures that finished while another chat was open (P6).
             iigApplyPendingResults().catch(e => iigLog('WARN', 'pending results apply failed:', e?.message));
