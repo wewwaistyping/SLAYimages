@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.1.1';
+const SLAY_VERSION = '5.2.0-exp.18';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -231,6 +231,36 @@ const SLAY_VERSION = '5.1.1';
         return (ctx.characterId !== undefined && ctx.characters?.[ctx.characterId]) ? (ctx.characters[ctx.characterId].name || '') : '';
     }
 
+    // Whose an item is. `owners` holds character names; none means shared,
+    // so every item made before this existed stays visible to everyone.
+    function swOwnerName() {
+        const ctx = SillyTavern.getContext();
+        if (ctx.groupId) return swMemberName();
+        return (ctx.characterId !== undefined && ctx.characters?.[ctx.characterId]?.name) || '';
+    }
+    function swItemOwners(o) { return Array.isArray(o?.owners) ? o.owners : []; }
+    function swOwnedBy(o, name) { const ow = swItemOwners(o); return !ow.length || !name || ow.includes(name); }
+    // Names offered in the «Чей» row: the chat's characters plus whoever the
+    // item already belongs to, so editing never silently drops an owner.
+    function swOwnerPool(current = []) {
+        const ctx = SillyTavern.getContext();
+        const base = ctx.groupId ? swGroupMembers() : [swOwnerName()];
+        return [...new Set([...base, ...current].filter(Boolean))];
+    }
+    function swOwnersRowHtml(selected) {
+        const pool = swOwnerPool(selected);
+        return `<label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Чей</label>
+                    <div class="sw-owners-row" style="display:flex;flex-wrap:wrap;gap:6px;">${pool.map(n => `<div class="sw-tag-chip ${selected.includes(n) ? 'sw-tag-chip-active' : ''}" data-owner="${esc(n)}">${esc(n)}</div>`).join('')}<div class="sw-tag-chip ${selected.length ? '' : 'sw-tag-chip-active'}" data-owner-shared>Общая</div></div>
+                    <div style="font-size:11px;color:#888;margin-top:4px;">Общую вещь видят все персонажи. Можно отметить нескольких.</div>`;
+    }
+    function swBindOwnersRow(el) {
+        const row = el.querySelector('.sw-owners-row'); if (!row) return () => [];
+        const sync = () => { row.querySelector('[data-owner-shared]').classList.toggle('sw-tag-chip-active', !row.querySelector('[data-owner].sw-tag-chip-active')); };
+        for (const c of row.querySelectorAll('[data-owner]')) c.addEventListener('click', () => { c.classList.toggle('sw-tag-chip-active'); sync(); });
+        row.querySelector('[data-owner-shared]').addEventListener('click', () => { row.querySelectorAll('[data-owner]').forEach(c => c.classList.remove('sw-tag-chip-active')); sync(); });
+        return () => [...row.querySelectorAll('[data-owner].sw-tag-chip-active')].map(c => c.dataset.owner);
+    }
+
     // ── Item accessors (global) ──
     function swFindItem(id) { return swGetSettings().items.find(o => o.id === id) || null; }
     function swAddItem(item) { swGetSettings().items.push(item); swSave(); }
@@ -415,7 +445,8 @@ const SLAY_VERSION = '5.1.1';
     // "last worn on THIS figure" floats up (bot and user can have different
     // relevant histories).
     function swGroupFullsByTag(figure = 'user') {
-        const all = swGetSettings().items.filter(o => o.category === 'full');
+        const owner = figure === 'bot' && swGroupId() ? swOwnerName() : '';
+        const all = swGetSettings().items.filter(o => o.category === 'full' && swOwnedBy(o, owner));
         const byTag = {};
         for (const tk of TAG_KEYS) byTag[tk] = [];
         for (const item of all) {
@@ -739,7 +770,7 @@ const SLAY_VERSION = '5.1.1';
     }
 
     // ── Modal state ──
-    let swOpen = false, swTab = 'bot', swCatTab = 'full', swTagFilter = null, swForWhoFilter = null, swGenderFilter = null, swFavFilter = false;
+    let swOpen = false, swTab = 'bot', swCatTab = 'full', swTagFilter = null, swForWhoFilter = null, swGenderFilter = null, swFavFilter = false, swOwnFilter = false;
 
     function swOpenModal() {
         swCloseModal();
@@ -809,6 +840,7 @@ const SLAY_VERSION = '5.1.1';
         for (const t of m.querySelectorAll('#sw-type-tabs .sw-tab')) t.addEventListener('click', syncMembers);
         syncMembers();
         swForWhoFilter = swTab; // Default filter to current tab
+        swOwnFilter = !!gid;
         swRender();
         document.addEventListener('keydown', swEsc);
     }
@@ -988,6 +1020,8 @@ const SLAY_VERSION = '5.1.1';
             // Divider + favourites filter chip
             fwHtml += `<div style="width:1px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0;"></div>`;
             fwHtml += `<div class="sw-tag-chip sw-fav-filter-chip ${swFavFilter ? 'sw-tag-chip-active' : ''}" data-fav-filter title="Показать только избранные"><i class="fa-solid fa-star" style="color:${swFavFilter ? '#fbbf24' : '#888'};"></i></div>`;
+            const ownName = swTab === 'bot' ? swOwnerName() : '';
+            if (ownName) fwHtml += `<div class="sw-tag-chip ${swOwnFilter ? 'sw-tag-chip-active' : ''}" data-own-filter title="Вещи этого персонажа и общие">Только ${esc(ownName.split(' ')[0])}</div>`;
 
             forWhoWrap.innerHTML = fwHtml;
             for (const chip of forWhoWrap.querySelectorAll('.sw-tag-chip[data-fw]')) {
@@ -997,12 +1031,14 @@ const SLAY_VERSION = '5.1.1';
                 chip.addEventListener('click', () => { swGenderFilter = chip.dataset.gender || null; swRender(); });
             }
             forWhoWrap.querySelector('[data-fav-filter]')?.addEventListener('click', () => { swFavFilter = !swFavFilter; swRender(); });
+            forWhoWrap.querySelector('[data-own-filter]')?.addEventListener('click', () => { swOwnFilter = !swOwnFilter; swRender(); });
         }
 
         // ── Filter items by category + tag + forWho + gender + hidden ──
         const settings = swGetSettings();
         const allItems = settings.items;
         const showHidden = !!settings.showHidden;
+        const ownerNow = swOwnerName();
         const filtered = allItems.filter(o => {
             if (o.category !== swCatTab) return false;
             if (swTagFilter && (!Array.isArray(o.tags) || !o.tags.includes(swTagFilter))) return false;
@@ -1010,6 +1046,7 @@ const SLAY_VERSION = '5.1.1';
             if (swGenderFilter && (o.gender || 'unisex') !== swGenderFilter) return false;
             if (!showHidden && o.hidden) return false;
             if (swFavFilter && !o.favourite) return false;
+            if (swOwnFilter && swTab === 'bot' && !swOwnedBy(o, ownerNow)) return false;
             return true;
         });
 
@@ -1048,7 +1085,7 @@ const SLAY_VERSION = '5.1.1';
                     <button class="sw-corner-btn sw-corner-hide ${hid ? 'sw-corner-active' : ''}" data-act="hide" title="${hid ? 'Показать' : 'Скрыть'}"><i class="fa-solid fa-eye${hid ? '-slash' : ''}"></i></button>
                     <div style="position:absolute;top:4px;left:4px;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:11px;border-radius:6px;background:rgba(0,0,0,0.5);color:${GENDER_COLORS[o.gender || 'unisex']};">${GENDERS[o.gender || 'unisex']}</div>
                 </div>
-                <div class="sw-outfit-footer"><span class="sw-outfit-name" title="${esc(o.description || o.name)}">${esc(o.name)}</span>
+                <div class="sw-outfit-footer"><span class="sw-outfit-name" title="${esc(o.description || o.name)}">${esc(o.name)}</span>${swItemOwners(o).length ? `<span class="sw-outfit-owners">${esc(swItemOwners(o).map(n => n.split(' ')[0]).join(', '))}</span>` : ''}
                     <div class="sw-outfit-btns">
                         <div class="sw-btn-activate" title="${a ? 'Снять' : 'Надеть'}"><i class="fa-solid ${a ? 'fa-toggle-on' : 'fa-toggle-off'}"></i></div>
                         <div class="sw-btn-edit" title="Редактировать"><i class="fa-solid fa-pen"></i></div>
@@ -1347,7 +1384,7 @@ const SLAY_VERSION = '5.1.1';
         }
     }
     // Read tEXt chunk value for our keyword; null if absent or not a PNG.
-    function swPngReadText(bytes, keyword) {
+    function swPngReadText(bytes, keyword, maxLen = 1048576) {
         if (!swIsPng(bytes)) return null;
         let found = null;
         swPngWalkChunks(bytes, (type, dStart, dLen) => {
@@ -1361,9 +1398,10 @@ const SLAY_VERSION = '5.1.1';
             // claim hundreds of megabytes and this loop will dutifully build the
             // string one character at a time until the tab dies. Real outfit
             // cards are a couple of KB; 1 MB is already absurdly generous.
-            if (dEnd - kEnd > 1048576) { swLog('WARN', `outfit card: tEXt chunk of ${dEnd - kEnd} bytes is not plausible — ignoring`); return true; }
+            if (dEnd - kEnd > maxLen) { swLog('WARN', `card: tEXt chunk of ${dEnd - kEnd} bytes is not plausible — ignoring`); return true; }
             let text = '';
-            for (let i = kEnd + 1; i < dEnd; i++) text += String.fromCharCode(bytes[i]);
+            const STEP = 0x8000;
+            for (let i = kEnd + 1; i < dEnd; i += STEP) text += String.fromCharCode(...bytes.subarray(i, Math.min(dEnd, i + STEP)));
             found = text;
             return true;
         });
@@ -1517,6 +1555,7 @@ const SLAY_VERSION = '5.1.1';
                     <select id="sw-upl-gender" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="unisex" ${selGender === 'unisex' ? 'selected' : ''}>⚥ Унисекс</option><option value="female" ${selGender === 'female' ? 'selected' : ''}>♀️ Женское</option><option value="male" ${selGender === 'male' ? 'selected' : ''}>♂️ Мужское</option></select>
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Теги</label>
                     <div id="sw-upl-tags" style="display:flex;flex-wrap:wrap;gap:6px;">${tagsHtml}</div>
+                    ${swOwnersRowHtml(swTab === 'bot' && swOwnerName() ? [swOwnerName()] : [])}
                     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
                         <button id="sw-upl-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-upl-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
@@ -1526,6 +1565,7 @@ const SLAY_VERSION = '5.1.1';
             const el = tok.el;
 
             const close = (val) => { swRestoreInline(tok); resolve(val); };
+            const readOwners = swBindOwnersRow(el);
             el.querySelector('#sw-upl-cancel').addEventListener('click', () => close(null));
             el.querySelector('#sw-upl-save').addEventListener('click', () => {
                 const name = el.querySelector('#sw-upl-name').value.trim();
@@ -1534,7 +1574,7 @@ const SLAY_VERSION = '5.1.1';
                 const forWho = el.querySelector('#sw-upl-forwho').value;
                 const gender = el.querySelector('#sw-upl-gender').value;
                 const tags = [...el.querySelectorAll('#sw-upl-tags input:checked')].map(c => c.value);
-                close({ name, category, forWho, gender, tags });
+                close({ name, category, forWho, gender, tags, owners: readOwners() });
             });
             setTimeout(() => el.querySelector('#sw-upl-name')?.focus(), 50);
         });
@@ -1605,6 +1645,7 @@ const SLAY_VERSION = '5.1.1';
                     <select id="sw-edit-gender" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.2);color:#eee;font-size:13px;box-sizing:border-box;"><option value="unisex" ${(item.gender || 'unisex') === 'unisex' ? 'selected' : ''}>⚥ Унисекс</option><option value="female" ${item.gender === 'female' ? 'selected' : ''}>♀️ Женское</option><option value="male" ${item.gender === 'male' ? 'selected' : ''}>♂️ Мужское</option></select>
                     <label style="display:block;font-size:12px;color:#aaa;margin:8px 0 4px;">Теги</label>
                     <div id="sw-edit-tags" style="display:flex;flex-wrap:wrap;gap:6px;">${tagsHtml}</div>
+                    ${swOwnersRowHtml(swItemOwners(item))}
                     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
                         <button id="sw-edit-cancel" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(255,255,255,0.08);color:#aaa;">Отмена</button>
                         <button id="sw-edit-save" style="padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;background:rgba(219,112,147,0.3);color:#f0a0c0;">Сохранить</button>
@@ -1612,6 +1653,7 @@ const SLAY_VERSION = '5.1.1';
                 </div>`, () => { closed = true; settleImage(false); resolve(null); }, 'Редактирование отменено');
             if (!tok) { resolve(null); return; }
             const el = tok.el;
+            const readOwners = swBindOwnersRow(el);
 
             // Replacing the picture used to write straight into the item and delete
             // the old file on the spot, so «Отмена» could not undo it — there was
@@ -1742,7 +1784,7 @@ const SLAY_VERSION = '5.1.1';
                 const forWho = el.querySelector('#sw-edit-forwho').value;
                 const gender = el.querySelector('#sw-edit-gender').value;
                 const tags = [...el.querySelectorAll('#sw-edit-tags input:checked')].map(c => c.value);
-                close({ name, description, category, forWho, gender, tags });
+                close({ name, description, category, forWho, gender, tags, owners: readOwners() });
             });
             // was m.querySelector — `m` doesn't exist in this scope (it lives in
             // swOpenModal). This was THE long-standing "Uncaught ReferenceError:
@@ -1823,6 +1865,7 @@ const SLAY_VERSION = '5.1.1';
     }
 
     const DESCRIBE_PROMPTS = {
+        place: 'Reply IMMEDIATELY with a description of the place in the image. Skip any thinking, reasoning, or preamble. Start directly with the type of place. Max 3 sentences, max 500 characters. Include: type of place, layout, key objects and furniture, materials, colors, light sources. Describe only permanent features of the place: no people, no actions, no time of day, no weather, no camera angle, no art style. Avoid mentioning what is absent or missing. English only.',
         detailed: 'Reply IMMEDIATELY with a clothing description. Skip any thinking, reasoning, or preamble. Start directly with the garment name. Max 3 sentences, max 500 characters. Include: garment names, fabric, texture, fit, colors. Avoid mentioning what is absent or missing. English only.',
         simple: 'Reply IMMEDIATELY with a brief clothing description. Skip any thinking or preamble. Max 2 sentences, max 300 characters. List garments, colors. Avoid mentioning what is absent or missing. English only.',
         hair: 'Reply IMMEDIATELY with a short hairstyle description. Skip any thinking or preamble. Max 15 words. Format: "[style], [length], [texture]". Avoid mentioning hair color. Avoid mentioning what is absent or missing. Keep to one sentence only.',
@@ -1848,12 +1891,19 @@ const SLAY_VERSION = '5.1.1';
         // describe fields may still hold old values but are hidden and ignored.
         const own = swOwnConnectionOn(swS);
         const mode = own ? (swS.describeMode || 'direct') : 'direct';
-        const promptStyle = (category === 'hair') ? 'hair' : (swS.describePromptStyle || 'detailed');
+        const promptStyle = (category === 'hair') ? 'hair' : (category === 'place') ? 'place' : (swS.describePromptStyle || 'detailed');
         const describePrompt = DESCRIBE_PROMPTS[promptStyle] || DESCRIBE_PROMPTS.detailed;
         const maxDescLen = (category === 'hair') ? 250 : (promptStyle === 'simple' ? 400 : 600);
-        const maxTokens = (category === 'hair') ? 80 : 300;
+        const maxTokens = (category === 'hair') ? 400 : 1500;
+        // A reply cut off by the token limit ends mid-sentence: keep whole sentences.
+        const wholeSentences = (t) => {
+            t = String(t || '').trim();
+            if (!t || /[.!?…"')\]]$/.test(t)) return t;
+            const end = Math.max(t.lastIndexOf('. '), t.lastIndexOf('! '), t.lastIndexOf('? '));
+            return end > 40 ? t.slice(0, end + 1) : t;
+        };
         swLog('INFO', `swAnalyzeOutfit: mode=${mode}, promptStyle=${promptStyle}, maxLen=${maxDescLen}`);
-        const _tDescribe = toastr.info('Анализ образа...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
+        const _tDescribe = toastr.info(category === 'place' ? 'Описываю место...' : 'Анализ образа...', 'Гардероб', { timeOut: 0, extendedTimeOut: 0 });
 
         // ── Direct API mode (recommended) ──
         if (mode === 'direct') {
@@ -1920,7 +1970,7 @@ const SLAY_VERSION = '5.1.1';
                                 {
                                     role: 'user', content: [
                                         { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                                        { type: 'text', text: 'Describe the clothing in this image.' }
+                                        { type: 'text', text: category === 'place' ? 'Describe the place in this image.' : 'Describe the clothing in this image.' }
                                     ]
                                 }
                             ]
@@ -1969,6 +2019,7 @@ const SLAY_VERSION = '5.1.1';
                     desc = lastDot > 50 ? desc.substring(0, lastDot + 1) : desc.substring(0, maxDescLen);
                     swLog('INFO', `Description truncated to ${desc.length} chars`);
                 }
+                desc = wholeSentences(desc);
                 if (desc && desc.length > 10) {
                     try { toastr.clear(_tDescribe); } catch (_) {}
                     swLog('INFO', `Direct API described (${model}):`, desc.substring(0, 100)); return desc;
@@ -1993,7 +2044,7 @@ const SLAY_VERSION = '5.1.1';
                     {
                         role: 'user', content: [
                             { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                            { type: 'text', text: 'Describe the clothing in this image.' },
+                            { type: 'text', text: category === 'place' ? 'Describe the place in this image.' : 'Describe the clothing in this image.' },
                         ]
                     },
                 ];
@@ -2001,16 +2052,18 @@ const SLAY_VERSION = '5.1.1';
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
+                desc = wholeSentences(desc);
                 if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { if (signal?.aborted) { try { toastr.clear(_tDescribe); } catch (_) {} throw e; } swLog('WARN', 'generateRaw failed:', e.message); }
         }
 
         if (typeof ctx.generateQuietPrompt === 'function') {
             try {
-                const rawResult = await swAbortable(ctx.generateQuietPrompt({ quietPrompt: '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: maxTokens }), signal);
+                const rawResult = await swAbortable(ctx.generateQuietPrompt({ quietPrompt: category === 'place' ? '[OOC: Describe ONLY the place in the attached image: no people, no time of day. 1-3 sentences, English, no RP.]' : '[OOC: Describe ONLY the clothing in the attached image. 1-2 sentences, English, no RP.]', quietImage: `data:image/png;base64,${base64}`, maxTokens: maxTokens }), signal);
                 const result = typeof rawResult === 'string' ? rawResult : (rawResult?.text || rawResult?.message || String(rawResult || ''));
                 let desc = (result || '').trim().replace(/^["'`]+|["'`]+$/g, '');
                 if (desc && desc.length > maxDescLen) { const ld = desc.lastIndexOf('.', maxDescLen); desc = ld > 50 ? desc.substring(0, ld + 1) : desc.substring(0, maxDescLen); }
+                desc = wholeSentences(desc);
                 if (desc && desc.length > 10) { try { toastr.clear(_tDescribe); } catch (_) {} return desc; }
             } catch (e) { if (signal?.aborted) { try { toastr.clear(_tDescribe); } catch (_) {} throw e; } swLog('WARN', 'generateQuietPrompt failed:', e.message); }
         }
@@ -2165,6 +2218,7 @@ const SLAY_VERSION = '5.1.1';
                     forWho: result.forWho || 'all',
                     gender: result.gender || 'unisex',
                     tags: result.tags,
+                    owners: result.owners || [],
                     addedAt: Date.now(),
                 });
                 // Switch to the uploaded item's category
@@ -2199,6 +2253,7 @@ const SLAY_VERSION = '5.1.1';
             forWho: result.forWho || 'all',
             gender: result.gender || 'unisex',
             tags: result.tags,
+            owners: result.owners || [],
             addedAt: Date.now(),
         });
         swCatTab = result.category;
@@ -2218,16 +2273,38 @@ const SLAY_VERSION = '5.1.1';
         o.forWho = result.forWho || 'all';
         o.gender = result.gender || 'unisex';
         o.tags = result.tags || o.tags;
+        o.owners = result.owners || [];
         // A worn item that changes category stays in its OLD slot otherwise: the
         // coat moved from «Полный» to «Верх» kept being injected as FULL for every
         // character wearing it, invisible in the grid and impossible to take off.
         const unequipped = o.category !== prevCat ? swUnequipFromOtherSlots(id, o.category) : 0;
+        const takenOff = swUnequipFromNonOwners(o);
         swSave();
         swRender();
         swUpdatePromptInjection();
         swInjectFloatingBtn();
+        if (takenOff.length) { swUpdatePromptInjection(); toastr.info(`«${o.name}» снят с: ${takenOff.join(', ')} — вещь теперь не их`, 'Гардероб', { timeOut: 4500 }); }
         if (unequipped) toastr.info(`«${o.name}» снят — категория изменилась`, 'Гардероб', { timeOut: 3500 });
         else toastr.info('Обновлён', 'Гардероб');
+    }
+    // Take the item off every character it no longer belongs to (bot side only:
+    // owners are characters). Keys: a solo name, or «__group:<id>::<member>».
+    // Returns the names it came off.
+    function swUnequipFromNonOwners(o) {
+        if (!swItemOwners(o).length) return [];
+        const s = swGetSettings();
+        const names = [];
+        for (const cn of Object.keys(s.activeOutfits || {})) {
+            const grp = cn.startsWith('__group:');
+            if (grp && !cn.includes('::')) continue;   // the group's shared user half
+            const name = grp ? cn.slice(cn.indexOf('::') + 2) : cn;
+            const slots = s.activeOutfits[cn]?.bot;
+            if (!slots || swOwnedBy(o, name)) continue;
+            let hit = false;
+            for (const cat of CAT_KEYS) if (slots[cat] === o.id) { slots[cat] = null; hit = true; }
+            if (hit && !names.includes(name)) names.push(name);
+        }
+        return names;
     }
     // Clear `id` from every character's bot/user slots whose key is not `keepCat`.
     // Returns how many slots were cleared.
@@ -3033,6 +3110,10 @@ const SLAY_VERSION = '5.1.1';
             return result;
         },
         openModal: () => swOpenModal(),
+        // Ref cards (saved characters and places) are PNGs built the same way.
+        png: { isPng: swIsPng, readText: swPngReadText, insertText: swPngInsertText, enc: swB64EncodeUnicode, dec: swB64DecodeUnicode },
+        // Location slots: same connection and retries as outfit descriptions.
+        describePlace: (base64, opts) => swAnalyzeOutfit(base64, 'place', opts || {}),
         isReady: () => true,
         applyModalWidth: () => swApplyModalWidth(),
         // Settings panel: is the describe call on its own endpoint/key?
@@ -3487,7 +3568,7 @@ function saveSettings() {
     } else {
         context.saveSettingsDebounced();
     }
-    persistRefsToLocalStorage();
+    persistRefsSoon();
     updateSectionStatusesSoon();
 }
 function saveSettingsNow() { saveSettings(); }
@@ -3503,7 +3584,18 @@ const LS_KEY = 'slay_iig_refs_v1';
 // line later, which was 75% of the work this function did.
 const LS_BACKUP_KEYS = ['npcReferences', 'perCharacterRefs', 'savedChars', 'refHashMap', 'recentRefs'];
 
+// The backup is a synchronous write of the whole ref store. saveSettings() is
+// called on every keystroke in a name field, so it waits for the burst to end —
+// and still lands before ST's own debounced save (1 s), stamp included.
+let _persistRefsTimer = null;
+function persistRefsSoon() {
+    clearTimeout(_persistRefsTimer);
+    _persistRefsTimer = setTimeout(persistRefsToLocalStorage, 400);
+}
+
 function persistRefsToLocalStorage() {
+    clearTimeout(_persistRefsTimer);
+    _persistRefsTimer = null;
     let settings;
     try { settings = getSettings(); } catch (e) { return; }
     const savedAt = Date.now();
@@ -3619,7 +3711,30 @@ const EMPTY_REFS = () => ({
         { name: '', imageBase64: '', imagePath: '' },
         { name: '', imageBase64: '', imagePath: '' },
     ],
+    locReferences: [
+        { name: '', imageBase64: '', imagePath: '' },
+        { name: '', imageBase64: '', imagePath: '' },
+        { name: '', imageBase64: '', imagePath: '' },
+    ],
 });
+
+// Location refs: places named in the prompt (kitchen, «Café Noir»). Same
+// slot type as NPCs, own list, three per character.
+const LOC_SLOTS = 3;
+function slayPadLocs(obj) {
+    if (!Array.isArray(obj.locReferences)) obj.locReferences = [];
+    while (obj.locReferences.length < LOC_SLOTS) obj.locReferences.push({ name: '', imageBase64: '', imagePath: '' });
+    return obj.locReferences;
+}
+// The list a slot of this type writes into: NPCs or locations.
+function slayRefList(s, refType) {
+    if (refType === 'loc') {
+        if (!Array.isArray(s.locReferences)) s.locReferences = [];
+        while (s.locReferences.length < LOC_SLOTS) s.locReferences.push({ name: '', imageBase64: '', imagePath: '' });
+        return s.locReferences;
+    }
+    return s.npcReferences;
+}
 
 // Group chats: the refs block edits one member at a time (chips above the
 // slots) plus one user face for the whole group. Faces are the members' own
@@ -3651,6 +3766,31 @@ function slayGroupUserRef(settings, gid, create) {
     return settings.slayGroupRefs[gid];
 }
 
+// The group's user slot starts as a copy of the first member's solo user photo.
+// Once, and into the slot itself, so it is visible and can be replaced or
+// removed. It used to be borrowed silently from the post author's solo slot at
+// generation time — a same-named card from another story then lent its user.
+function slaySeedGroupUser(settings, gid) {
+    const grp = slayGroupUserRef(settings, gid, true);
+    if (grp.userSeeded) return grp;
+    const members = slayGroupMemberNames();
+    if (!members.length) return grp;   // group not loaded yet: try again later
+    grp.userSeeded = true;
+    if (!hasManualReference(grp.userRef)) {
+        for (const m of members) {
+            const r = settings.perCharacterRefs?.[m]?.userRef;
+            if (!hasManualReference(r)) continue;
+            grp.userRef = { ...r };
+            grp.userFrom = m;
+            grp.userFromSrc = r.imagePath || 'inline';
+            iigLog('INFO', `Group user slot seeded from "${m}"`);
+            break;
+        }
+    }
+    try { SillyTavern.getContext().saveSettingsDebounced(); } catch (_) { }
+    return grp;
+}
+
 function getCurrentCharacterRefs() {
     const settings = getSettings();
     const gid = SillyTavern.getContext().groupId;
@@ -3662,11 +3802,13 @@ function getCurrentCharacterRefs() {
         if (!mem.charRef) mem.charRef = { name: '', imageBase64: '', imagePath: '' };
         if (!Array.isArray(mem.npcReferences)) mem.npcReferences = [];
         while (mem.npcReferences.length < 4) mem.npcReferences.push({ name: '', imageBase64: '', imagePath: '' });
-        const grp = slayGroupUserRef(settings, gid, true);
+        slayPadLocs(mem);
+        const grp = slaySeedGroupUser(settings, gid);
         return {
             get charRef() { return mem.charRef; }, set charRef(v) { mem.charRef = v; },
             get userRef() { return grp.userRef; }, set userRef(v) { grp.userRef = v; },
             get npcReferences() { return mem.npcReferences; }, set npcReferences(v) { mem.npcReferences = v; },
+            get locReferences() { return mem.locReferences; }, set locReferences(v) { mem.locReferences = v; },
         };
     }
     const charName = getActiveCharacterName();
@@ -3694,6 +3836,7 @@ function getCurrentCharacterRefs() {
         if (!refs.userRef) refs.userRef = { name: '', imageBase64: '', imagePath: '' };
         if (!Array.isArray(refs.npcReferences)) refs.npcReferences = [];
         while (refs.npcReferences.length < 4) refs.npcReferences.push({ name: '', imageBase64: '', imagePath: '' });
+        slayPadLocs(refs);
         return refs;
     }
 
@@ -3702,6 +3845,7 @@ function getCurrentCharacterRefs() {
     if (!settings.userRef) settings.userRef = { name: '', imageBase64: '', imagePath: '' };
     if (!Array.isArray(settings.npcReferences)) settings.npcReferences = [];
     while (settings.npcReferences.length < 4) settings.npcReferences.push({ name: '', imageBase64: '', imagePath: '' });
+    slayPadLocs(settings);
     return settings;
 }
 function getCurrentCharacterNpcs() { return getCurrentCharacterRefs().npcReferences; }
@@ -3720,14 +3864,14 @@ function slayGroupAuthor(messageId) {
 
 // Everything a group picture can use, read-only:
 //   charRef — the post author's face (empty for the user's own posts);
-//   userRef — the group's user face, else the author's user slot;
+//   userRef — the group's user face (seeded once, see slaySeedGroupUser);
 //   npcReferences — every other member's face (tagged _member, so their outfit
 //   can follow) and every member's NPCs. All still go only when named.
 function slayGroupRefs(author) {
     const s = getSettings();
     const gid = SillyTavern.getContext().groupId;
     const own = author ? slayRefsForCharacter(author) : EMPTY_REFS();
-    const grpUser = slayGroupUserRef(s, gid, false)?.userRef;
+    const grpUser = gid ? slaySeedGroupUser(s, gid).userRef : null;
     const npcs = [];
     const seen = new Set();
     const add = (ref, extra) => {
@@ -3744,13 +3888,21 @@ function slayGroupRefs(author) {
         const names = String(r?.name || '').trim();
         add(r, { name: names && parseNameTokens(names).some(t => t.toLowerCase() === m.toLowerCase()) ? names : [m, names].filter(Boolean).join(', '), _member: m });
     }
+    const locs = [];
+    const seenLoc = new Set();
     for (const m of [author, ...members.filter(x => x !== author)].filter(Boolean)) {
         for (const npc of slayRefsForCharacter(m).npcReferences || []) add(npc, {});
+        for (const loc of slayRefsForCharacter(m).locReferences || []) {
+            if (!slayLocUsable(loc)) continue;
+            const key = (loc.imagePath || '') + '|' + String(loc.name || '').toLowerCase();
+            if (!seenLoc.has(key)) { seenLoc.add(key); locs.push(loc); }
+        }
     }
     return {
         charRef: author && hasManualReference(own.charRef) && !own.charRef.name ? { ...own.charRef, name: author } : own.charRef,
-        userRef: hasManualReference(grpUser) ? grpUser : own.userRef,
+        userRef: grpUser || EMPTY_REFS().userRef,
         npcReferences: npcs,
+        locReferences: locs,
     };
 }
 
@@ -3763,6 +3915,7 @@ function slayRefsForCharacter(name) {
         charRef: refs.charRef || EMPTY_REFS().charRef,
         userRef: refs.userRef || EMPTY_REFS().userRef,
         npcReferences: Array.isArray(refs.npcReferences) ? refs.npcReferences : [],
+        locReferences: Array.isArray(refs.locReferences) ? refs.locReferences : [],
     };
 }
 
@@ -3823,11 +3976,80 @@ function matchNpcReferences(prompt, npcList) {
     for (const npc of npcList) {
         if (!npc || !npc.name || (!npc.imagePath && !npc.imageBase64 && !npc.imageData)) continue;
         if (nameIsInPrompt(npc.name, lowerPrompt)) {
-            matched.push({ name: npc.name, imageBase64: npc.imageBase64, imagePath: npc.imagePath });
+            matched.push({ name: npc.name, imageBase64: npc.imageBase64, imagePath: npc.imagePath, _member: npc._member });
         }
     }
     return matched;
 }
+
+// Location refs: at most one per picture — the one named FIRST in the text.
+// Two rooms in one prompt usually means «they walk from A to B»; sending both
+// mostly teaches the model to paste photos together.
+function matchLocationReference(prompt, locList) {
+    if (!prompt || !Array.isArray(locList) || !locList.length) return null;
+    const lower = prompt.toLowerCase();
+    let best = null, bestAt = Infinity;
+    for (const loc of locList) {
+        if (!slayLocUsable(loc)) continue;
+        if (!nameIsInPrompt(loc.name, lower)) continue;
+        for (const t of parseNameTokens(loc.name)) {
+            const tl = t.toLowerCase();
+            let i = -1;
+            while ((i = lower.indexOf(tl, i + 1)) !== -1) {
+                const b = i ? lower[i - 1] : '', a = lower[i + tl.length] || '';
+                if (!/\p{L}/u.test(b) && !/\p{L}/u.test(a)) break;
+            }
+            if (i !== -1 && i < bestAt) { bestAt = i; best = loc; }
+        }
+    }
+    return best ? { name: best.name, imageBase64: best.imageBase64, imagePath: best.imagePath, desc: best.desc, mode: best.mode } : null;
+}
+
+// A location may carry a text description and say what goes to the picture:
+// 'img' (the reference, as before), 'desc' (text only, no reference spent) or 'both'.
+function slayLocHasImage(l) { return !!(l && (l.imagePath || l.imageBase64)); }
+function slayLocUsable(l) { return !!(l && l.name && (slayLocHasImage(l) || String(l.desc || '').trim())); }
+function slayLocMode(l) {
+    if (!slayLocHasImage(l)) return 'desc';
+    if (!String(l?.desc || '').trim()) return 'img';
+    return ['img', 'desc', 'both'].includes(l.mode) ? l.mode : 'img';
+}
+// «Сейчас здесь»: one pinned place per chat, kept in the chat's metadata by name.
+function slayHereName() {
+    try { return String(SillyTavern.getContext().chatMetadata?.slay_loc_here || ''); } catch (_) { return ''; }
+}
+function slaySetHere(name) {
+    const ctx = SillyTavern.getContext();
+    if (!ctx.chatMetadata) return;
+    if (name) ctx.chatMetadata.slay_loc_here = name; else delete ctx.chatMetadata.slay_loc_here;
+    try { (ctx.saveMetadataDebounced || ctx.saveMetadata)?.(); } catch (_) { }
+    slayUpdateLocationPrompt();
+}
+// Every location the current chat can use (group: all members').
+function slaySceneLocs() {
+    try { return (SillyTavern.getContext().groupId ? slayGroupRefs('').locReferences : slayRefList(getCurrentCharacterRefs(), 'loc')) || []; } catch (_) { return []; }
+}
+function slayHereLocation(list = slaySceneLocs()) {
+    const n = slayHereName();
+    return n ? (list.find(l => l && l.name === n && slayLocUsable(l)) || null) : null;
+}
+// The pinned place reaches the chat model the way a worn outfit does.
+const SLAY_LOC_PROMPT_KEY = 'slay_location';
+function slayUpdateLocationPrompt() {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.setExtensionPrompt !== 'function') return;
+        // Generation off: nothing goes, unless the (experimental) checkbox asks
+        // for the place to hold in the story text too — then a plain line goes.
+        const st = getSettings();
+        const loc = (st.enabled || st.locPromptWithoutGen) ? slayHereLocation() : null;
+        const desc = String(loc?.desc || '').trim().replace(/[.\s]+$/, '');
+        const text = loc && desc && !st.enabled ? `[CURRENT LOCATION — the scene takes place in ${swNameList(loc.name)[0] || loc.name}: ${desc}. Keep the narration consistent with this place.]` : loc && desc ? `[LOCATION LOCK — mandatory for image prompts: the scene is set in ${swNameList(loc.name)[0] || loc.name}: ${desc}. Every image prompt must place the characters in this exact location and describe it. Ignore any other place from the character card, the greeting or earlier image prompts, including your own.]` : '';
+        ctx.setExtensionPrompt(SLAY_LOC_PROMPT_KEY, text, 1, 0);
+    } catch (e) { iigLog('WARN', 'location prompt:', e?.message); }
+}
+const SLAY_LOCATION_NOTE = 'use it ONLY for the place: interior, architecture, furniture, light. Do NOT copy people, pose, camera angle or framing from it';
+const SLAY_EDIT_NOTE = 'is the CURRENT PICTURE to edit — keep it exactly as it is except for the requested change';
 
 // ── External blocks + context images (from sillyimages-master) ──
 function getMessageRenderText(message, settings = getSettings()) {
@@ -4195,7 +4417,7 @@ function findSavedCharByPath(path) {
 
 // Add a look to an existing character, or create the character and start it off
 // with this one. Re-saving a picture that is already there just relabels it.
-function saveLook({ charId = null, names = '', label = '', path, folders = null }) {
+function saveLook({ charId = null, names = '', label = '', path, folders = null, kind = '' }) {
     if (!path) return null;
     const settings = getSettings();
     if (!Array.isArray(settings.savedChars)) settings.savedChars = [];
@@ -4203,6 +4425,7 @@ function saveLook({ charId = null, names = '', label = '', path, folders = null 
     let ch = charId ? settings.savedChars.find(c => c.id === charId) : null;
     if (!ch) {
         ch = { id: swUid('sc'), names: names || '', looks: [] };
+        if (kind === 'place') ch.kind = 'place';
         // The save dialog's «Папка» row — only a new character takes it; an
         // existing one keeps whatever folders it already has.
         if (Array.isArray(folders) && folders.length) ch.folders = [...new Set(folders)];
@@ -4258,6 +4481,7 @@ function slayCountPathUses(path) {
                     if (refs.charRef && refs.charRef.imagePath === path) n++;
                     if (refs.userRef && refs.userRef.imagePath === path) n++;
                     for (const npc of (refs.npcReferences || [])) if (npc && npc.imagePath === path) n++;
+                    for (const loc of (refs.locReferences || [])) if (loc && loc.imagePath === path) n++;
                 }
             }
             // Group chats: one user face per group
@@ -4268,6 +4492,7 @@ function slayCountPathUses(path) {
             if (val.charRef && val.charRef.imagePath === path) n++;
             if (val.userRef && val.userRef.imagePath === path) n++;
             for (const npc of (val.npcReferences || [])) if (npc && npc.imagePath === path) n++;
+            for (const loc of (val.locReferences || [])) if (loc && loc.imagePath === path) n++;
             // Recently-used ribbon
             for (const r of (val.recentRefs || [])) {
                 const p = typeof r === 'string' ? r : (r && r.path);
@@ -4446,6 +4671,7 @@ function pickLookForFolder(c, folderId) {
 function revealSavedChar(charId) {
     const ch = getSavedChars().find(c => c.id === charId);
     if (!ch) return;
+    _swLibKind = ch.kind === 'place' ? 'places' : 'people';
     if (!swCharsInFilter([ch], _swFolderFilter).length) _swFolderFilter = 'all';
     _swSelChar = ch.id;
     _swSelLook = null;
@@ -4911,6 +5137,7 @@ async function convertDataUrlToPng(dataUrl) {
     });
 }
 
+let _iigSaveSeq = 0;
 async function saveImageToFile(dataUrl, debugMeta = {}) {
     const context = SillyTavern.getContext();
     let parsed;
@@ -4928,7 +5155,7 @@ async function saveImageToFile(dataUrl, debugMeta = {}) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const response = await fetch('/api/images/upload', {
         method: 'POST', headers: context.getRequestHeaders(),
-        body: JSON.stringify({ image: parsed.base64Data, format: parsed.normalizedFormat, ch_name: charName, filename: `iig_${timestamp}` })
+        body: JSON.stringify({ image: parsed.base64Data, format: parsed.normalizedFormat, ch_name: charName, filename: `iig_${timestamp}_${++_iigSaveSeq}` })
     });
     if (!response.ok) {
         const raw = await response.text().catch(() => '');
@@ -5024,7 +5251,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const settings = getSettings();
     const endpoint = normalizeApiEndpoint(settings.endpoint);
     const model = settings.model;
-    const aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
+    const aspectRatio = options.forceAspect || (settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1'));
     const imageSize = options.imageSize || settings.imageSize || '1K';
 
     // ── Custom apiType: user supplies the FULL endpoint URL, we append
@@ -5052,6 +5279,8 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         if (label === 'char_outfit' || label === 'user_outfit') return `Image ${n} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
         if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') return `Image ${n} is ${name} — preserve this appearance exactly.`;
         if (label === 'context') return `Image ${n} is style/mood context.`;
+        if (label === 'location') return `Image ${n} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
+        if (label === 'edit_source') return `Image ${n} ${SLAY_EDIT_NOTE}.`;
         return '';
     };
     const withRefPreamble = (p, instructions) => instructions.length > 0
@@ -5207,7 +5436,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const settings = getSettings();
     const model = settings.model;
     const url = `${normalizeApiEndpoint(settings.endpoint)}/v1beta/models/${model}:generateContent`;
-    let aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
+    let aspectRatio = options.forceAspect || (settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1'));
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) aspectRatio = '1:1';
     let imageSize = options.imageSize || settings.imageSize || '1K';
     if (!VALID_IMAGE_SIZES.includes(imageSize)) imageSize = VALID_IMAGE_SIZES.includes(settings.imageSize) ? settings.imageSize : '1K';
@@ -5233,6 +5462,8 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         else if (label === 'npc_user') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
         else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — preserve this appearance exactly.`;
         else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
+        else if (label === 'location') instruction = `Image ${i + 1} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
+        else if (label === 'edit_source') instruction = `Image ${i + 1} ${SLAY_EDIT_NOTE}.`;
 
         if (instruction) instructions.push(instruction);
         parts.push({ inlineData: { mimeType: 'image/jpeg', data: referenceImages[i] } });
@@ -5268,7 +5499,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
     const settings = getSettings();
     const endpoint = getEffectiveEndpoint(settings);
     const url = endpoint.endsWith('/api/generate') ? endpoint : `${endpoint}/api/generate`;
-    const aspectRatio = settings.naisteraAspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.naisteraAspectRatio || '1:1');
+    const aspectRatio = options.forceAspect || (settings.naisteraAspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.naisteraAspectRatio || '1:1'));
     const model = normalizeNaisteraModel(options.model || settings.naisteraModel || 'grok');
     const referenceImages = options.referenceImages || [];
     const referenceLabels = options.referenceLabels || [];
@@ -5884,7 +6115,7 @@ function slayChoose(title, text, options) {
 // choke a phone. Returns the paths to delete (after one confirm), or null.
 function slayPickOrphans(found, total) {
     const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
-    const KIND = { char: 'лицо бота', user: 'юзер', npc0: 'NPC 1', npc1: 'NPC 2', npc2: 'NPC 3', npc3: 'NPC 4', look: 'образ' };
+    const KIND = { char: 'лицо бота', user: 'юзер', npc0: 'NPC 1', npc1: 'NPC 2', npc2: 'NPC 3', npc3: 'NPC 4', look: 'образ', loc0: 'локация 1', loc1: 'локация 2', loc2: 'локация 3' };
     const items = found.map((x, i) => {
         const name = x.path.split('/').pop();
         const ts = Number((name.match(/(\d{12,14})(?=\.\w+$)/) || [])[1]) || 0;
@@ -6484,6 +6715,9 @@ function attachRegenButton(imgEl) {
         e.stopPropagation(); e.preventDefault();
         if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
         if (btn.classList.contains('iig-regen-busy')) return;
+        // Set by the lightbox: { prompt } for «Промпт», { editText, editSource } for «Правка».
+        const extra = btn._slayNext || null;
+        btn._slayNext = null;
         btn.classList.add('iig-regen-busy');
         const icon = btn.querySelector('i');
         const origIconClass = icon.className;
@@ -6498,6 +6732,7 @@ function attachRegenButton(imgEl) {
             try { data = JSON.parse(decoded); }
             catch (_) { data = JSON.parse(decoded.replace(/'/g, '"')); }
             data = iigNormalizeInstruction(data);
+            if (extra?.prompt) data = { ...data, prompt: extra.prompt };
         } catch (err) {
             toastr.error('Не удалось распарсить параметры картинки', 'SLAY Images');
             icon.className = origIconClass; btn.classList.remove('iig-regen-busy'); return;
@@ -6535,7 +6770,7 @@ function attachRegenButton(imgEl) {
         overlay.innerHTML = `
             <div class="iig-spinner-wrap"><div class="iig-spinner"></div></div>
             <div class="iig-status">
-                <span class="iig-status-label">Перегенерация...</span>
+                <span class="iig-status-label">${extra?.editText ? 'Правка...' : 'Перегенерация...'}</span>
                 <span class="iig-status-timer"></span>
             </div>
         `;
@@ -6565,6 +6800,8 @@ function attachRegenButton(imgEl) {
                 aspectRatio: data.aspect_ratio, imageSize: data.image_size,
                 quality: data.quality, preset: data.preset, messageId,
                 characters: data.characters, uc: data.uc,
+                editSource: extra?.editText ? extra.editSource : undefined,
+                editText: extra?.editText || undefined,
             });
             if (overlayLabel?.isConnected) overlayLabel.textContent = 'Сохранение...';
             if (overlayTimer?.isConnected) overlayTimer.textContent = '';
@@ -6633,6 +6870,18 @@ function attachRegenButton(imgEl) {
                 liveImg.setAttribute('src', newImagePath);
                 liveImg.src = newImagePath;
                 const r = await persistSrc(newImagePath);
+                // «Промпт»: the new text goes into the tag, so the next ↻ uses it.
+                if (r === true && extra?.prompt) {
+                    const oldInstr = imgEl.getAttribute('data-iig-instruction') || '';
+                    const n = await iigRewriteTagByInstruction(message, oldInstr, (full) => slaySetTagPrompt(full, extra.prompt));
+                    if (n > 0) {
+                        try {
+                            const obj = JSON.parse(iigDecodeInstruction(oldInstr));
+                            obj.prompt = extra.prompt;
+                            liveImg.setAttribute('data-iig-instruction', JSON.stringify(obj));
+                        } catch (_) { }
+                    } else iigLog('WARN', 'Prompt edit: tag not rewritten — the next ↻ will use the old prompt');
+                }
                 if (r === true) {
                     // FORCE save (not debounced). If the user reloads the chat
                     // before the debounce fires (~5s), message.mes still has
@@ -6645,6 +6894,23 @@ function attachRegenButton(imgEl) {
                     // Say it: a silent WARN in the console is how a paid picture
                     // ended up in the folder but not in the chat.
                     toastr.warning('Картинка перерисована, но в чат не записалась — после перезагрузки вернётся старая. Файл лежит в папке картинок.', 'SLAY Images', { timeOut: 9000 });
+                } else if (r !== 'deferred' && extra && origSrcAttr && message) {
+                    // Edit or new prompt: offer the way back, once.
+                    const newPath = newImagePath;
+                    toastr.success('Готово. Нажми сюда, чтобы вернуть как было.', extra.editText ? 'Правка' : 'Новый промпт', {
+                        timeOut: 15000, extendedTimeOut: 5000,
+                        onclick: async () => {
+                            try {
+                                recordSrcRemap(newPath, origSrcAttr);
+                                replaceImageSrcEverywhere(message, newPath, origSrcAttr);
+                                const live = findLiveImgByInstruction(liveImg) || liveImg;
+                                live.setAttribute('src', origSrcAttr);
+                                live.src = origSrcAttr;
+                                try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+                                toastr.info('Вернула прошлую картинку', 'SLAY Images', { timeOut: 2000 });
+                            } catch (e) { toastr.error('Не вышло вернуть: ' + (e?.message || e), 'SLAY Images'); }
+                        },
+                    });
                 } else if (r !== 'deferred') {
                     toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
                 }
@@ -6828,6 +7094,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         .filter(c => c && typeof c === 'object')
         .map(c => ({ ...c, name: decodeNumericEntities(String(c.name || '')), prompt: decodeNumericEntities(String(c.prompt || '')), uc: decodeNumericEntities(String(c.uc || '')) }));
     options = { ...options, characters: tagChars };
+    // Studio: who is in frame was picked by chips — refs go without the
+    // «name in prompt» check. { char, user, npcNames: [], locName }.
+    const studio = options.studio || null;
     // Normalize the prompt BEFORE name-matching and before it's sent to the API.
     // This is the single chokepoint where charInPrompt/userInPrompt are computed
     // and where the request body is built, so decoding here fixes both.
@@ -6851,6 +7120,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     } else if (settings.slayStyle) {
         style = settings.slayStyle;
     }
+    // Another extension picked the style itself (window.slayImages.generate).
+    if (typeof options.styleOverride === 'string') style = options.styleOverride;
+    if (options.noStyle) style = '';
     const maxRetries = settings.maxRetries;
     const baseDelay = settings.retryDelay;
 
@@ -6872,8 +7144,17 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     const userDisplayName = getDefaultUserRefName(refs);
     const fullSearchText = [prompt, ...tagChars.map(c => `${c.name} ${c.prompt}`)].join(' ');
     const lowerPrompt = fullSearchText.toLowerCase();
-    const charInPrompt = nameIsInPrompt(charDisplayName, lowerPrompt);
-    const userInPrompt = nameIsInPrompt(userDisplayName, lowerPrompt);
+    const charInPrompt = studio ? !!studio.char : nameIsInPrompt(charDisplayName, lowerPrompt);
+    const userInPrompt = studio ? !!studio.user : nameIsInPrompt(userDisplayName, lowerPrompt);
+    const studioNpcs = studio ? (refs.npcReferences || []).filter(n => hasManualReference(n) && (studio.npcNames || []).includes(n.name)).map(n => ({ name: n.name, imageBase64: n.imageBase64, imagePath: n.imagePath, _member: n._member })) : null;
+    const studioLoc = studio && studio.locName ? ((refs.locReferences || []).find(l => l && l.name === studio.locName && hasManualReference(l)) || null) : null;
+    // The scene's place: the one pinned as «Сейчас здесь», else the one named in the prompt.
+    // The pin wins: names are plain words («beach»), and the pinned place's own
+    // description («a beach shack») used to name another slot and push it aside.
+    const sceneLoc = studio ? studioLoc : (slayHereLocation(refs.locReferences || []) || matchLocationReference(fullSearchText, refs.locReferences || []));
+    const sceneLocMode = sceneLoc ? slayLocMode(sceneLoc) : '';
+    const sceneLocImg = sceneLoc && sceneLocMode !== 'desc' ? sceneLoc : null;
+    let sceneLocImgSent = false;
     // Refs ship only when their owner is explicitly named in the image prompt. This restores
     // the pre-PR behaviour: char face/outfit gated by charInPrompt, user face/outfit by userInPrompt.
     // Matched NPCs already use the same name-matching path via matchNpcReferences.
@@ -6893,6 +7174,33 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     // NovelAI takes no reference pictures (V5 ignores them by design).
     const _skipRefs = _customFormat === 'images' || settings.apiType === 'novelai';
     const _isEdits = _customFormat === 'edits';
+    // «Правка»: the current picture rides first, the request leads the prompt.
+    let editB64 = null;
+    if (options.editSource && options.editText && !_skipRefs) {
+        try {
+            const raw = await loadRefImageAsBase64(options.editSource);
+            editB64 = raw ? await compressBase64Image(raw, 1280, 0.88) : null;
+        } catch (e) { iigLog('WARN', 'edit source load failed:', e?.message); }
+        if (!editB64) throw new Error('Не удалось загрузить картинку для правки');
+        prompt = `EDIT REQUEST: ${options.editText}\nChange only that. Keep the composition, camera, people, faces, outfits and setting of the current picture (the first reference image) as they are.\n\nScene: ${prompt}`;
+        iigLog('INFO', `Edit: "${String(options.editText).slice(0, 80)}" on ${String(options.editSource).slice(-40)}`);
+    }
+    // Pictures handed in by another extension (window.slayImages.generate refs):
+    // people go after the NPCs, one place stands in when no slot location is in frame.
+    const apiRefs = [];
+    if (Array.isArray(options.extraRefs) && options.extraRefs.length && !_skipRefs
+        && (settings.apiType !== 'naistera' || naisteraModelSupportsRefs(normalizeNaisteraModel(options.model || settings.naisteraModel)))) {
+        for (const r of options.extraRefs.slice(0, MAX_GENERATION_REFERENCE_IMAGES)) {
+            const src = typeof r?.image === 'string' ? r.image : '';
+            if (!src) continue;
+            try {
+                const b64raw = src.startsWith('data:') ? (src.split(',')[1] || null) : await loadRefImageAsBase64(src);
+                const b64 = b64raw ? await compressBase64Image(b64raw, 1024, 0.85) : null;
+                if (b64) apiRefs.push({ name: String(r.name || '').trim() || 'reference', place: r.kind === 'place', b64 });
+            } catch (e) { iigLog('WARN', 'extension ref skipped:', e?.message); }
+        }
+        iigLog('INFO', `Extension refs: ${apiRefs.length} of ${options.extraRefs.length}`);
+    }
     if (settings.apiType !== 'naistera' && !_skipRefs) {
         const canPush = () => referenceImages.length < MAX_GENERATION_REFERENCE_IMAGES;
         const pushRef = (image, label, name = '') => {
@@ -6903,6 +7211,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             return true;
         };
 
+        if (editB64) pushRef(editB64, 'edit_source', '');
         // 1. Character avatar — only if char is mentioned
         if (canPush() && shouldSendCharReference) {
             const charReference = await getPreferredCharacterReferenceBase64(refs, settings);
@@ -6938,7 +7247,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
 
         // 4. Matched NPCs
-        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
+        const matchedNpcs = studioNpcs || matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const b64 = npc.imagePath ? await loadRefImageAsBase64(npc.imagePath) : (npc.imageBase64 || npc.imageData);
@@ -6949,9 +7258,18 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 if (ob64) pushRef(ob64, 'char_outfit', npc._member);
             }
         }
+        for (const x of apiRefs) if (!x.place && canPush()) pushRef(x.b64, 'npc_matched', x.name);
+        // 4b. One location, last: dropped first when the slots run out.
+        const loc = sceneLocImg;
+        if (loc && canPush()) {
+            const b64 = loc.imagePath ? await loadRefImageAsBase64(loc.imagePath) : loc.imageBase64;
+            if (pushRef(b64, 'location', swNameList(loc.name)[0] || loc.name)) { sceneLocImgSent = true; iigLog('INFO', `Location matched: ${loc.name}`); }
+        } else if (loc) iigLog('INFO', `Location "${loc.name}" skipped — no room left for references`);
+        const apiPlace = apiRefs.find(x => x.place);
+        if (!loc && apiPlace && canPush()) pushRef(apiPlace.b64, 'location', apiPlace.name);
         // 5. Context images — not for images/edits: there every file is a
         // subject to keep, and a previous scene would be «kept» too.
-        if (settings.imageContextEnabled && !_isEdits) {
+        if (settings.imageContextEnabled && !_isEdits && !studio) {
             const contextCount = normalizeImageContextCount(settings.imageContextCount);
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'base64', contextCount);
             for (const cr of contextRefs) {
@@ -6984,6 +7302,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             naisteraRefLabels.push(label);
             return true;
         };
+        if (editB64) pushRef('data:image/jpeg;base64,' + editB64, 'current picture to edit (keep everything, change only what is asked)');
         // 1. Character avatar — only if char is mentioned
         if (canPush() && shouldSendCharReference) {
             const u = await getPreferredCharacterReferenceDataUrl(refs, settings);
@@ -7016,7 +7335,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             }
         }
         // 4. NPC faces (matched against prompt)
-        const matchedNpcs = matchNpcReferences(fullSearchText, refs.npcReferences || []);
+        const matchedNpcs = studioNpcs || matchNpcReferences(fullSearchText, refs.npcReferences || []);
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
@@ -7026,8 +7345,17 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 if (ob64) pushRef(`data:image/png;base64,${ob64}`, `${npc._member} outfit`);
             }
         }
+        for (const x of apiRefs) if (!x.place && canPush()) pushRef('data:image/jpeg;base64,' + x.b64, `${x.name} (NPC)`);
+        // 4b. One location, last
+        const locN = sceneLocImg;
+        if (locN && canPush()) {
+            const url = await getDataUrl(locN);
+            if (url && pushRef(url, `${swNameList(locN.name)[0] || locN.name} (location only: setting, not people/pose/camera)`)) { sceneLocImgSent = true; iigLog('INFO', `Location (naistera): ${locN.name}`); }
+        } else if (locN) iigLog('INFO', `Location "${locN.name}" skipped — no room left for references`);
+        const apiPlaceN = apiRefs.find(x => x.place);
+        if (!locN && apiPlaceN && canPush()) pushRef('data:image/jpeg;base64,' + apiPlaceN.b64, `${apiPlaceN.name} (location only: setting, not people/pose/camera)`);
         // 5. Context refs (previous images)
-        if (settings.imageContextEnabled) {
+        if (settings.imageContextEnabled && !studio) {
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'dataUrl', normalizeImageContextCount(settings.imageContextCount));
             for (const cr of contextRefs) {
                 if (!canPush()) break;
@@ -7043,7 +7371,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     if (referenceDataUrls.length > MAX_GENERATION_REFERENCE_IMAGES) { referenceDataUrls.length = MAX_GENERATION_REFERENCE_IMAGES; naisteraRefLabels.length = MAX_GENERATION_REFERENCE_IMAGES; }
 
     // Video test mode
-    const enableVideoTest = settings.apiType === 'naistera'
+    const enableVideoTest = !studio && settings.apiType === 'naistera'
         && settings.naisteraVideoTest
         && shouldUseNaisteraVideoTest(options.model || settings.naisteraModel)
         && shouldTriggerNaisteraVideoForMessage(options.messageId, settings.naisteraVideoEveryN);
@@ -7073,6 +7401,17 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         if (wardrobeParts.length > 0) {
             prompt = settings.apiType === 'novelai' ? `${wardrobeParts.join(', ')}, ${prompt}` : `${wardrobeParts.join(' ')}\n${prompt}`;
             iigLog('INFO', `Wardrobe v4 descriptions injected: ${wardrobeParts.join(' | ').substring(0, 200)}`);
+        }
+    }
+
+    // Location description: asked for, or standing in for a picture that did not go
+    // (no room left, or a provider that takes no references at all).
+    if (sceneLoc && !options.editText) {
+        const locDesc = String(sceneLoc.desc || '').trim();
+        if (locDesc && (sceneLocMode !== 'img' || !sceneLocImgSent)) {
+            const locName = swNameList(sceneLoc.name)[0] || sceneLoc.name;
+            prompt = settings.apiType === 'novelai' ? `${prompt}, ${locDesc}` : `[Setting — ${locName}: ${locDesc}]\n${prompt}`;
+            iigLog('INFO', `Location description injected (${locName}, ${locDesc.length} chars)`);
         }
     }
 
@@ -7367,6 +7706,56 @@ function iigAddLazyAttrs(tagHtml) {
 // The one way a successful image generation is written back into a tag.
 function iigSuccessTag(fullMatch, imagePath) {
     return iigAddLazyAttrs(iigStripErrorStamp(iigSetTagSrc(fullMatch, imagePath)));
+}
+
+// Replace the prompt inside a tag's data-iig-instruction, keeping the quote
+// style the tag already uses. Returns the tag unchanged when it can't parse.
+function slaySetTagPrompt(fullTag, newPrompt) {
+    const m = String(fullTag).match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/);
+    if (!m) return fullTag;
+    const q = m[1];
+    const decoded = iigDecodeInstruction(m[2]);
+    let obj;
+    try { obj = JSON.parse(decoded); }
+    catch (_) { try { obj = JSON.parse(decoded.replace(/'/g, '"')); } catch (_2) { return fullTag; } }
+    obj.prompt = newPrompt;
+    let enc = JSON.stringify(obj).replace(/&/g, '&amp;');
+    enc = q === "'" ? enc.replace(/'/g, '&#39;') : enc.replace(/"/g, '&quot;');
+    return fullTag.replace(m[0], () => `data-iig-instruction=${q}${enc}${q}`);
+}
+
+
+// Picture → ref slot ('char' | 'user' | 'npc-N' | 'loc-N'). Compressed copy in
+// iig_refs, so a big generated file is not re-sent at full size every time.
+async function slayImageToSlot(src, key, labelText = '') {
+    const slots = findAllSlotsByKey(key);
+    if (!src || src.startsWith('data:')) { toastr.warning('Картинка ещё не сохранена', 'SLAY Images'); return false; }
+    if (!slots.length) { toastr.warning('Не нашла слоты рефов — открой настройки SLAY один раз', 'SLAY Images'); return false; }
+    try {
+        const raw = await loadRefImageAsBase64(src);
+        if (!raw) throw new Error('не удалось прочитать картинку');
+        const small = await compressBase64Image(raw, 768, 0.8);
+        const refType = slots[0].dataset.refType;
+        const idx = parseInt(slots[0].dataset.npcIndex, 10);
+        const label = (refType === 'npc' || refType === 'loc') ? `${refType}${idx}` : refType;
+        const path = await saveRefImageToFile(small, label);
+        for (const sl of slots) applyPathToSlot(sl, refType, idx, path);
+        pushRecentRef(path);
+        toastr.success(`Поставлено в «${labelText || key}» — проверь имя в слоте`, 'SLAY Images', { timeOut: 3500 });
+        return true;
+    } catch (err) { toastr.error('Не вышло: ' + (err?.message || err), 'SLAY Images'); return false; }
+}
+function slayRefSlotChoices() {
+    return [['char', '{{char}}'], ['user', '{{user}}'], ...[0, 1, 2, 3].map(i => ['npc-' + i, 'NPC ' + (i + 1)]), ...[...Array(LOC_SLOTS).keys()].map(i => ['loc-' + i, 'Локация ' + (i + 1)])];
+}
+
+// «Правка» needs a provider that takes reference pictures.
+function slayCanEditImage() {
+    const st = getSettings();
+    if (st.apiType === 'novelai') return false;
+    if (st.apiType === 'custom' && (st.customBodyFormat || 'chat') === 'images') return false;
+    if (st.apiType === 'naistera') return naisteraModelSupportsRefs(normalizeNaisteraModel(st.naisteraModel));
+    return true;
 }
 
 function iigDecodeInstruction(str) {
@@ -8352,6 +8741,12 @@ function renderRefSlots() {
             row.className = 'slay-ref-members';
             grid.parentNode.insertBefore(row, grid);
             row.addEventListener('click', (e) => {
+                if (e.target.closest('[data-seed-ok]')) {
+                    const g = slayGroupUserRef(getSettings(), SillyTavern.getContext().groupId, false);
+                    if (g) { delete g.userFrom; delete g.userFromSrc; saveSettings(); }
+                    renderRefSlots();
+                    return;
+                }
                 const b = e.target.closest('[data-member]');
                 if (!b) return;
                 _slayRefGroupMember[SillyTavern.getContext().groupId] = b.dataset.member;
@@ -8363,6 +8758,11 @@ function renderRefSlots() {
             const cur = slayRefGroupMember();
             row.innerHTML = slayGroupMemberNames().map(n => `<div class="slay-ref-member${n === cur ? ' active' : ''}" data-member="${sanitizeForHtml(n)}">${sanitizeForHtml(n)}</div>`).join('')
                 + '<div class="slay-ref-members-note">Лицо и NPC — того, кого выбрала (общие с его соло-чатом). Юзер — один на группу.</div>';
+            // Shown while the seeded photo is still the one in the slot.
+            const g = slayGroupUserRef(getSettings(), groupId, false);
+            if (g?.userFrom && (g.userRef?.imagePath || 'inline') === g.userFromSrc && hasManualReference(g.userRef)) {
+                row.innerHTML += `<div class="slay-ref-seed-note"><span>Фото юзера взято из чата с «${sanitizeForHtml(g.userFrom)}». Проверь, что это тот юзер: если нет, замени или удали.</span><button type="button" class="menu_button" data-seed-ok>Понятно</button></div>`;
+            }
         }
     }
     const userDisplayName = getActiveUserName() || 'User';
@@ -8403,7 +8803,163 @@ function renderRefSlots() {
         setThumb(slot, npc);
         setNameInput(slot.querySelector('.iig-ref-name'), npc?.name);
     }
+    const locs = slayRefList(settings, 'loc');
+    for (let i = 0; i < LOC_SLOTS; i++) {
+        const slot = document.querySelector(`.iig-ref-slot[data-ref-type="loc"][data-npc-index="${i}"]`);
+        if (!slot) continue;
+        setThumb(slot, locs[i] || null);
+        setNameInput(slot.querySelector('.iig-ref-name'), locs[i]?.name);
+        const badge = slot.querySelector('.slay-loc-badge');
+        if (badge) {
+            const m = slayLocUsable(locs[i]) ? slayLocMode(locs[i]) : '';
+            badge.hidden = !m || m === 'img';
+            badge.textContent = m === 'desc' ? 'описание' : m === 'both' ? 'фото + описание' : '';
+        }
+        slot.classList.toggle('slay-loc-text-only', slayLocUsable(locs[i]) && !slayLocHasImage(locs[i]));
+        slot.classList.toggle('slay-loc-here-on', !!locs[i]?.name && locs[i].name === slayHereName());
+    }
+    slayRenderHereRow();
+    slayUpdateLocationPrompt();
     updateSectionStatusesSoon();
+}
+
+// «Сейчас здесь»: chips under the location slots.
+function slayRenderHereRow() {
+    const row = document.getElementById('slay_loc_here');
+    if (!row) return;
+    if (!row.dataset.bound) {
+        row.dataset.bound = '1';
+        row.addEventListener('click', (e) => {
+            const b = e.target.closest('[data-here]');
+            if (!b) return;
+            e.preventDefault();
+            slaySetHere(b.dataset.here === slayHereName() ? '' : b.dataset.here);
+            renderRefSlots();
+        });
+    }
+    const esc = sanitizeForHtml;
+    const locs = slaySceneLocs().filter(slayLocUsable);
+    const here = locs.some(l => l.name === slayHereName()) ? slayHereName() : '';
+    row.style.display = locs.length ? '' : 'none';
+    row.innerHTML = `<span class="slay-loc-here-t">Сейчас здесь:</span><button type="button" class="slay-loc-chip${here ? '' : ' on'}" data-here="">нигде</button>`
+        + locs.map(l => `<button type="button" class="slay-loc-chip${l.name === here ? ' on' : ''}" data-here="${esc(l.name)}">${esc(swNameList(l.name)[0] || l.name)}</button>`).join('')
+        + '<div class="slay-loc-here-note">Отмеченное идёт на каждую картинку чата, описание видит и бот. Без отметки — место, названное в промпте.</div>';
+}
+
+// The grey line is always there; with five or more possible references the
+// amber plate takes its place and says how many.
+function slayUpdateRefsWarn() {
+    const hint = document.getElementById('slay_refs_many_hint');
+    const warn = document.getElementById('slay_refs_many_warn');
+    if (!hint || !warn) return;
+    let n = 0;
+    try {
+        const st = getSettings();
+        const ctx = SillyTavern.getContext();
+        const refs = ctx.groupId ? slayGroupRefs(slayRefGroupMember()) : getCurrentCharacterRefs();
+        if (st.sendCharAvatar && hasManualReference(refs.charRef)) n++;
+        if (st.sendUserAvatar && hasManualReference(refs.userRef)) n++;
+        n += (refs.npcReferences || []).filter(hasManualReference).length;
+        if ((refs.locReferences || []).some(l => slayLocUsable(l) && slayLocMode(l) !== 'desc')) n++;
+        const sw = ctx.extensionSettings.slay_wardrobe || {};
+        if (window.slayWardrobe?.isReady?.() && sw.sendOutfitImage !== false) {
+            for (const t of ['bot', 'user']) {
+                if (sw[t === 'bot' ? 'sendOutfitImageBot' : 'sendOutfitImageUser'] === false) continue;
+                const worn = window.slayWardrobe.getActiveOutfitData(t);
+                if (worn && Object.values(worn).some(o => o && (o.imagePath || o.base64))) n++;
+            }
+        }
+        if (st.imageContextEnabled) n += normalizeImageContextCount(st.imageContextCount);
+        n = Math.min(n, MAX_GENERATION_REFERENCE_IMAGES);
+    } catch (_) { }
+    const many = n >= 5;
+    hint.style.display = many ? 'none' : '';
+    warn.style.display = many ? '' : 'none';
+    if (many) warn.textContent = `⚠️ До ${n} рефов на картинку — модель будет путать лица и одежду. Лучше 2–4.`;
+}
+
+// Editor of one location slot: names, description, what goes to the picture.
+function slayEditLocationDialog(index) {
+    const list = slayRefList(getCurrentCharacterRefs(), 'loc');
+    if (!list[index]) list[index] = { name: '', imageBase64: '', imagePath: '' };
+    const loc = list[index];
+    document.getElementById('slay_loc_dialog')?.remove();
+    const esc = sanitizeForHtml;
+    const hasImg = slayLocHasImage(loc);
+    let mode = hasImg ? (['img', 'desc', 'both'].includes(loc.mode) ? loc.mode : 'img') : 'desc';
+    const ov = document.createElement('div');
+    ov.id = 'slay_loc_dialog';
+    ov.className = 'slay-loc-dialog';
+    ov.innerHTML = `<div class="slay-loc-box">
+        <div class="slay-loc-title">Локация ${index + 1}</div>
+        <label>Названия через запятую — по ним место находится в промпте</label>
+        <input type="text" class="text_pole slay-loc-name" value="${esc(loc.name || '')}" placeholder="кухня, kitchen">
+        <label>Описание места (по-английски, 1–3 предложения)</label>
+        <textarea class="text_pole slay-loc-desc" rows="5" placeholder="Dim garage bar, neon beer signs, concrete floor…">${esc(loc.desc || '')}</textarea>
+        <div class="slay-loc-row"><button type="button" class="menu_button slay-loc-ai"${hasImg ? '' : ' disabled'}><i class="fa-solid fa-wand-magic-sparkles"></i> Описать по картинке</button><span class="slay-loc-note">${hasImg ? 'тем же подключением, что описывает одежду' : 'картинки нет — опиши руками'}</span></div>
+        <label>Что отправлять на картинку</label>
+        <div class="slay-loc-row slay-loc-modes">
+            <button type="button" class="slay-loc-chip" data-mode="img"${hasImg ? '' : ' disabled'}>Картинку</button>
+            <button type="button" class="slay-loc-chip" data-mode="desc">Описание</button>
+            <button type="button" class="slay-loc-chip" data-mode="both"${hasImg ? '' : ' disabled'}>Оба</button>
+        </div>
+        <div class="slay-loc-note slay-loc-mode-note"></div>
+        <div class="slay-loc-row slay-loc-foot"><button type="button" class="menu_button slay-loc-save">Сохранить</button><button type="button" class="menu_button slay-loc-cancel">Отмена</button></div>
+    </div>`;
+    const close = () => ov.remove();
+    const nameEl = ov.querySelector('.slay-loc-name');
+    const ta = ov.querySelector('.slay-loc-desc');
+    const note = ov.querySelector('.slay-loc-mode-note');
+    const NOTES = {
+        img: 'Как раньше: место уходит рефом и занимает слот. Описание пойдёт, только если картинке не хватило места.',
+        desc: 'Реф не тратится: к промпту картинки добавляется текст описания.',
+        both: 'И реф, и текст: точнее всего, но плюс один реф.',
+    };
+    const paint = () => {
+        for (const b of ov.querySelectorAll('[data-mode]')) b.classList.toggle('on', b.dataset.mode === mode);
+        note.textContent = NOTES[mode];
+    };
+    paint();
+    // Clicks must not reach ST's document handlers (they close the drawer underneath).
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
+    ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
+    ov.addEventListener('click', (e) => {
+        if (e.target === ov) { close(); return; }
+        const m = e.target.closest('[data-mode]');
+        if (m && !m.disabled) { mode = m.dataset.mode; paint(); }
+    });
+    ov.querySelector('.slay-loc-cancel').addEventListener('click', close);
+    const ai = ov.querySelector('.slay-loc-ai');
+    ai.addEventListener('click', async () => {
+        if (ai.disabled) return;
+        const label = ai.innerHTML;
+        ai.disabled = true;
+        ai.innerHTML = '<i class="fa-solid fa-spinner iig-spin-anim"></i> Описываю…';
+        try {
+            if (!window.slayWardrobe?.describePlace) throw new Error('описание недоступно');
+            const raw = loc.imagePath ? await loadRefImageAsBase64(loc.imagePath) : loc.imageBase64;
+            if (!raw) throw new Error('картинка не загрузилась');
+            const small = await compressBase64Image(raw, 1024, 0.85).catch(() => null);
+            const d = await window.slayWardrobe.describePlace(small || raw);
+            if (d && ov.isConnected) ta.value = d;
+        } catch (e) { toastr.warning('Не получилось описать: ' + (e?.message || 'ошибка'), 'SLAY Images', { timeOut: 5000 }); }
+        finally { ai.disabled = false; ai.innerHTML = label; }
+    });
+    ov.querySelector('.slay-loc-save').addEventListener('click', () => {
+        const name = nameEl.value.trim();
+        const desc = ta.value.trim();
+        if (!name && (desc || hasImg)) { toastr.info('Дай месту название — по нему оно находится в промпте', 'SLAY Images'); nameEl.focus(); return; }
+        const wasHere = !!loc.name && loc.name === slayHereName();
+        loc.name = name;
+        if (desc) loc.desc = desc; else delete loc.desc;
+        loc.mode = mode;
+        if (wasHere) slaySetHere(name);
+        saveSettings();
+        renderRefSlots();
+        close();
+    });
+    document.body.appendChild(ov);
+    (loc.name ? ta : nameEl).focus();
 }
 
 let _renderRefSlotsDebounce = null;
@@ -8457,6 +9013,7 @@ function slayCountEquipped(swS) {
 // Text writes only, so it is cheap enough to run after every settings save.
 function updateSectionStatuses() {
     if (!document.querySelector('.iig-settings')) return;
+    try { slayUpdateRefsWarn(); } catch (_) { }
     const set = (id, text) => { const el = document.getElementById('slay_sec_status_' + id); if (el) el.textContent = text; };
     const settings = getSettings();
     const apiType = settings.apiType || 'openai';
@@ -8532,6 +9089,15 @@ function createSettingsUI() {
     const container = document.getElementById('extensions_settings');
     if (!container) return;
 
+    let locSlotsHtml = '';
+    for (let i = 0; i < LOC_SLOTS; i++) {
+        locSlotsHtml += `<div class="iig-ref-slot iig-ref-slot-loc" data-ref-type="loc" data-npc-index="${i}">
+            <div class="iig-ref-thumb-wrap"><img src="" alt="Локация" class="iig-ref-thumb" decoding="async"><span class="slay-loc-badge" hidden></span><div class="iig-ref-empty-icon"><i class="fa-solid fa-mountain-sun"></i></div><div class="iig-ref-upload-overlay" title="Upload"><i class="fa-solid fa-camera"></i></div></div>
+            <input type="file" accept="image/*" class="iig-ref-file-input" style="display:none">
+            <div class="iig-ref-info"><div class="iig-ref-label">Локация ${i + 1}</div><input type="text" class="text_pole iig-ref-name" placeholder="Название (кухня, kitchen)" value=""></div>
+            <div class="iig-ref-actions"><div class="menu_button iig-ref-upload-btn" title="Upload"><i class="fa-solid fa-upload"></i></div><div class="menu_button iig-ref-crop-btn" title="Обрезать"><i class="fa-solid fa-crop-simple"></i></div><div class="menu_button iig-ref-desc-btn" title="Описание места"><i class="fa-solid fa-file-lines"></i></div><div class="menu_button iig-ref-save-btn" title="Сохранить локацию в библиотеку"><i class="fa-solid fa-floppy-disk"></i></div><div class="menu_button iig-ref-delete-btn" title="Удалить"><i class="fa-solid fa-trash-can"></i></div></div>
+        </div>`;
+    }
     let npcSlotsHtml = '';
     for (let i = 0; i < 4; i++) {
         npcSlotsHtml += `<div class="iig-ref-slot" data-ref-type="npc" data-npc-index="${i}">
@@ -8633,6 +9199,12 @@ function createSettingsUI() {
                         </div>
                         <div class="iig-refs-divider"><span>NPCs</span></div>
                         <div class="iig-refs-row iig-refs-npcs">${npcSlotsHtml}</div>
+                        <div class="iig-refs-divider slay-locs-toggle" id="slay_locs_toggle" title="Свернуть или показать локации"><span>Локации <i class="fa-solid fa-chevron-down"></i></span></div>
+                        <div class="iig-refs-row iig-refs-npcs iig-refs-locs">${locSlotsHtml}</div>
+                        <div id="slay_loc_here" class="slay-loc-here iig-refs-loc-hint"></div>
+                        <label class="checkbox_label slay-loc-nogen" title="Экспериментально"><input type="checkbox" id="slay_loc_nogen" ${settings.locPromptWithoutGen ? 'checked' : ''}><span><i class="fa-solid fa-flask"></i> Описание места боту и при выключенной генерации</span></label>
+                        <p class="hint" id="slay_refs_many_hint">Много рефов — модель путает лица и одежду. Лучше 2–4 на картинку.</p>
+                        <div id="slay_refs_many_warn" class="slay-refs-warn" style="display:none"></div>
                         </div>
                         <label class="checkbox_label"><input type="checkbox" id="slay_skip_crop" ${settings.skipCrop ? 'checked' : ''}><span>Не предлагать кроп картинок</span></label>
                         <p class="hint" style="font-size:0.75em;">Касается рефов, образов и вещей гардероба.</p>
@@ -8706,7 +9278,7 @@ function createSettingsUI() {
     const html = `
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>💅🔥 SLAY Images</b>
+            <b class="slay-hd" title="SLAY Images"><span class="slay-hd-s">SLAY</span><svg class="slay-hd-sp" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2Q12 12 22 12Q12 12 12 22Q12 12 2 12Q12 12 12 2Z"/></svg><span class="slay-hd-i">images</span></b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -8799,10 +9371,11 @@ function applyPathToSlot(slotEl, refType, npcIndex, savedPath) {
     const s = getCurrentCharacterRefs();
     if (refType === 'char') { s.charRef.imageBase64 = ''; s.charRef.imagePath = savedPath; }
     else if (refType === 'user') { s.userRef.imageBase64 = ''; s.userRef.imagePath = savedPath; }
-    else if (refType === 'npc') {
-        if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
-        s.npcReferences[npcIndex].imageBase64 = '';
-        s.npcReferences[npcIndex].imagePath = savedPath;
+    else if (refType === 'npc' || refType === 'loc') {
+        const list = slayRefList(s, refType);
+        if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        list[npcIndex].imageBase64 = '';
+        list[npcIndex].imagePath = savedPath;
     }
     saveSettings();
     if (slotEl) {
@@ -8817,9 +9390,10 @@ function applyNameToSlot(slotEl, refType, npcIndex, name) {
     const s = getCurrentCharacterRefs();
     if (refType === 'char') s.charRef.name = name;
     else if (refType === 'user') s.userRef.name = name;
-    else if (refType === 'npc') {
-        if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
-        s.npcReferences[npcIndex].name = name;
+    else if (refType === 'npc' || refType === 'loc') {
+        const list = slayRefList(s, refType);
+        if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        list[npcIndex].name = name;
     }
     saveSettings();
     const input = slotEl?.querySelector('.iig-ref-name');
@@ -8834,9 +9408,9 @@ function findAllSlotsByKey(key) {
     if (key === 'char' || key === 'user') {
         return [...document.querySelectorAll(`.iig-ref-slot[data-ref-type="${key}"]`)];
     }
-    const m = key.match(/^npc-(\d+)$/);
+    const m = key.match(/^(npc|loc)-(\d+)$/);
     if (!m) return [];
-    return [...document.querySelectorAll(`.iig-ref-slot[data-ref-type="npc"][data-npc-index="${m[1]}"]`)];
+    return [...document.querySelectorAll(`.iig-ref-slot[data-ref-type="${m[1]}"][data-npc-index="${m[2]}"]`)];
 }
 
 // Find slot DOM element by its "ref key" ("char" / "user" / "npc-0" / "npc-1" / ...)
@@ -8845,8 +9419,8 @@ function findSlotByKey(key) {
     if (key === 'char' || key === 'user') {
         return document.querySelector(`.iig-ref-slot[data-ref-type="${key}"]`);
     }
-    const m = key.match(/^npc-(\d+)$/);
-    if (m) return document.querySelector(`.iig-ref-slot[data-ref-type="npc"][data-npc-index="${m[1]}"]`);
+    const m = key.match(/^(npc|loc)-(\d+)$/);
+    if (m) return document.querySelector(`.iig-ref-slot[data-ref-type="${m[1]}"][data-npc-index="${m[2]}"]`);
     return null;
 }
 
@@ -8885,22 +9459,260 @@ let _swSelChar = null, _swSelLook = null;
 // and never synced, so the phone and the PC can't argue about where everyone
 // went. Resets to «Все» on reload.
 let _swFolderFilter = 'all';
+// Library tab: 'people' | 'places'. Places are saved looks with kind:'place'.
+let _swLibKind = 'people';
 // Whose look strip was drawn last: its scroll position is only worth keeping
 // while the strip still belongs to the same person.
 let _swLastRenderedChar = null;
 
+// ── Ref cards: a saved character or place as one PNG ──
+// The file is the cover look as a normal picture; a tEXt chunk keyed
+// SLAY_REF_CARD_KEY holds base64(UTF-8 JSON):
+//   { spec:'slay_ref_card', spec_version:'1.0', kind:'person'|'place', names,
+//     looks:[{ label, image? }], desc?, mode? }
+// Every look carries its stored file as base64, the cover included: the PNG's
+// own pixels are a re-encode, and importing those would never match the file
+// the picture came from (a duplicate on every re-import). Ids and folders stay local.
+const SLAY_REF_CARD_KEY = 'slayref';
+const SLAY_REF_CARD_SPEC = 'slay_ref_card';
+const SLAY_REF_CARD_MAX = 24 * 1024 * 1024;
+
+// A dialog over everything, isolated from ST's document handlers.
+function slayCardOverlay(html, onClose) {
+    document.getElementById('slay_card_dialog')?.remove();
+    const ov = document.createElement('div');
+    ov.id = 'slay_card_dialog';
+    ov.className = 'slay-loc-dialog';
+    ov.innerHTML = `<div class="slay-loc-box">${html}</div>`;
+    const close = () => { if (!ov.isConnected) return; ov.remove(); try { onClose?.(); } catch (_) { } };
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
+    ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
+    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('.slay-loc-cancel')) close(); });
+    document.body.appendChild(ov);
+    return { ov, close };
+}
+
+function slayExportSavedChar(charId) {
+    const ch = getSavedChars().find(c => c.id === charId);
+    if (!ch || !ch.looks?.length) return;
+    const png = window.slayWardrobe?.png;
+    if (!png) { toastr.error('Экспорт недоступен: гардероб не загрузился', 'SLAY Images'); return; }
+    const esc = sanitizeForHtml;
+    const isPlace = ch.kind === 'place';
+    const first = swNameList(ch.names)[0] || 'без имени';
+    const picked = new Set(ch.looks.map(l => l.id));
+    const MODES = { img: 'картинку', desc: 'описание', both: 'картинку и описание' };
+    const { ov, close } = slayCardOverlay(`
+        <div class="slay-loc-title">Экспорт: ${esc(first)}</div>
+        <div class="slay-loc-note">${isPlace ? 'Названия' : 'Имена'} в карточке: ${esc(ch.names || '—')}</div>
+        ${isPlace ? `<div class="slay-loc-note">Описание${ch.desc ? ':' : ' пустое — в карточку уйдут картинка и названия.'}</div>${ch.desc ? `<div class="slay-lib-desc">${esc(ch.desc)}</div><div class="slay-loc-note">Отправлять: ${MODES[ch.mode] || MODES.img}</div>` : ''}` : ''}
+        <div class="slay-loc-note">${ch.looks.length > 1 ? 'Какие образы войдут. Тап — убрать или вернуть. Первый отмеченный станет обложкой файла.' : 'В файл войдёт эта картинка.'}</div>
+        <div class="slay-card-looks"></div>
+        <div class="slay-loc-note slay-card-count"></div>
+        <div class="slay-loc-row slay-loc-foot"><button type="button" class="menu_button slay-card-go">Скачать карточку</button><button type="button" class="menu_button slay-loc-cancel">Отмена</button></div>`);
+    const grid = ov.querySelector('.slay-card-looks');
+    const go = ov.querySelector('.slay-card-go');
+    const draw = () => {
+        const cover = ch.looks.find(l => picked.has(l.id));
+        grid.innerHTML = ch.looks.map(l => `<button type="button" class="slay-card-look${picked.has(l.id) ? '' : ' off'}" data-look="${esc(l.id)}"><img alt="" loading="lazy" decoding="async" src="${esc(l.path)}"><span class="slay-card-ck">${picked.has(l.id) ? '✓' : ''}</span>${l === cover && ch.looks.length > 1 ? '<span class="slay-card-cv">обложка</span>' : ''}<span class="slay-card-lbl">${esc(l.label || '—')}</span></button>`).join('');
+        ov.querySelector('.slay-card-count').textContent = `Войдёт ${picked.size} из ${ch.looks.length} · один файл`;
+        go.disabled = !picked.size;
+    };
+    draw();
+    grid.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-look]');
+        if (!b || ch.looks.length < 2) return;
+        if (picked.has(b.dataset.look)) picked.delete(b.dataset.look); else picked.add(b.dataset.look);
+        draw();
+    });
+    go.addEventListener('click', async () => {
+        if (go.disabled) return;
+        go.disabled = true;
+        const looks = ch.looks.filter(l => picked.has(l.id));
+        const note = toastr.info('Собираю карточку...', 'SLAY Images', { timeOut: 0, extendedTimeOut: 0 });
+        try {
+            // Through a canvas: tEXt chunks exist only in PNG, the stored refs are JPEG.
+            const img = await new Promise((res, rej) => {
+                const im = new Image();
+                im.onload = () => res(im);
+                im.onerror = () => rej(new Error('обложка не загрузилась (файл удалён?)'));
+                im.src = looks[0].path;
+            });
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            const blob = await new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'));
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const payload = { spec: SLAY_REF_CARD_SPEC, spec_version: '1.0', kind: isPlace ? 'place' : 'person', names: ch.names || '', looks: [] };
+            for (const l of looks) {
+                const b64 = await loadRefImageAsBase64(l.path);
+                if (!b64) throw new Error(`образ «${l.label || 'без подписи'}» не загрузился`);
+                payload.looks.push({ label: l.label || '', image: b64 });
+            }
+            if (isPlace && ch.desc) { payload.desc = ch.desc; payload.mode = ['img', 'desc', 'both'].includes(ch.mode) ? ch.mode : 'img'; }
+            const text = png.enc(JSON.stringify(payload));
+            if (text.length > SLAY_REF_CARD_MAX) throw new Error('образов слишком много для одного файла — убери часть');
+            const out = new Blob([png.insertText(bytes, SLAY_REF_CARD_KEY, text)], { type: 'image/png' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(out);
+            const safe = String(first).replace(/[^\p{L}\p{N} _-]/gu, '').trim().replace(/\s+/g, '_') || 'ref';
+            a.download = `slay_${isPlace ? 'place' : 'char'}_${safe}.png`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+            toastr.success(`Карточка «${first}» экспортирована (${looks.length} ${slayPlural(looks.length, 'образ', 'образа', 'образов')})`, 'SLAY Images', { timeOut: 3000 });
+            close();
+        } catch (e) {
+            toastr.error('Экспорт не удался: ' + (e?.message || e), 'SLAY Images');
+            go.disabled = false;
+        } finally { try { toastr.clear(note); } catch (_) { } }
+    });
+}
+
+function slayParseRefCard(p) {
+    if (p?.spec !== SLAY_REF_CARD_SPEC || !Array.isArray(p.looks) || !p.looks.length) return null;
+    const kind = p.kind === 'place' ? 'place' : 'person';
+    const names = String(p.names || '').slice(0, 300).trim();
+    if (!names) return null;
+    const looks = [];
+    p.looks.slice(0, 40).forEach((l, i) => {
+        const label = String(l?.label || '').slice(0, 80);
+        const image = typeof l?.image === 'string' ? l.image.replace(/\s+/g, '') : '';
+        const ok = !!image && /^[A-Za-z0-9+/]+=*$/.test(image);
+        // The cover may come without its file (then the PNG itself is used).
+        if (ok || i === 0) looks.push({ label, image: ok ? image : null });
+    });
+    return {
+        kind, names, looks,
+        desc: kind === 'place' ? String(p.desc || '').slice(0, 2000).trim() : '',
+        mode: ['img', 'desc', 'both'].includes(p.mode) ? p.mode : '',
+    };
+}
+
+function slayImportRefCard() {
+    const inp = document.createElement('input');
+    // No accept filter: with image/* Android opens the gallery picker, which can
+    // hand over a re-encoded copy with the card's data stripped.
+    inp.type = 'file';
+    inp.addEventListener('change', async () => {
+        const f = inp.files?.[0];
+        if (!f) return;
+        try {
+            const png = window.slayWardrobe?.png;
+            if (!png) throw new Error('гардероб не загрузился');
+            if (f.size > 48 * 1024 * 1024) throw new Error(`файл слишком большой (${Math.round(f.size / 1048576)} МБ)`);
+            const bytes = new Uint8Array(await f.arrayBuffer());
+            if (!png.isPng(bytes)) { toastr.error('Это не карточка SLAY: файл не PNG. Если его прислали в мессенджере как фото, попроси прислать файлом.', 'SLAY Images', { timeOut: 7000 }); return; }
+            const raw = png.readText(bytes, SLAY_REF_CARD_KEY, SLAY_REF_CARD_MAX + 4096);
+            if (!raw) {
+                if (png.readText(bytes, 'slaywardrobe')) toastr.info('Это карточка наряда — её импортируют в гардеробе, кнопкой «Импорт».', 'SLAY Images', { timeOut: 6000 });
+                else toastr.error('В этой картинке нет данных SLAY. Мессенджеры вырезают их, если файл отправлен как фото.', 'SLAY Images', { timeOut: 7000 });
+                return;
+            }
+            const card = slayParseRefCard(JSON.parse(png.dec(raw)));
+            if (!card) throw new Error('карточка повреждена или другой версии');
+            slayImportRefCardDialog(card, bytes);
+        } catch (e) { toastr.error('Импорт не удался: ' + (e?.message || e), 'SLAY Images'); }
+    });
+    inp.click();
+}
+
+function slayBytesToBase64(bytes) {
+    let bin = '';
+    const STEP = 0x8000;
+    for (let i = 0; i < bytes.length; i += STEP) bin += String.fromCharCode(...bytes.subarray(i, i + STEP));
+    return btoa(bin);
+}
+
+function slayImportRefCardDialog(card, bytes) {
+    const esc = sanitizeForHtml;
+    const isPlace = card.kind === 'place';
+    const first = swNameList(card.names)[0] || card.names;
+    const want = new Set(swNameList(card.names).map(x => x.toLowerCase()));
+    const same = getSavedChars().find(c => (c.kind === 'place') === isPlace && swNameList(c.names).some(n => want.has(n.toLowerCase()))) || null;
+    const coverUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+    let merge = !!same;
+    const MODES = { img: 'картинку', desc: 'описание', both: 'картинку и описание' };
+    const { ov, close } = slayCardOverlay(`
+        <div class="slay-loc-title">В файле — ${isPlace ? 'локация' : 'персонаж'}</div>
+        <div class="slay-loc-note">${isPlace ? 'Названия' : 'Имена'}: ${esc(card.names)}${card.looks.length > 1 ? ` · образов: ${card.looks.length}` : ''}</div>
+        <div class="slay-card-looks">${card.looks.map((l, i) => `<div class="slay-card-look"><img alt="" src="${i === 0 ? coverUrl : 'data:image/jpeg;base64,' + l.image}"><span class="slay-card-lbl">${esc(l.label || '—')}</span></div>`).join('')}</div>
+        ${isPlace && card.desc ? `<div class="slay-lib-desc">${esc(card.desc)}</div><div class="slay-loc-note">Отправлять: ${MODES[card.mode] || MODES.img}</div>` : ''}
+        ${same ? `<div class="slay-loc-note">У тебя уже есть «${esc(swNameList(same.names)[0] || same.names)}» (образов: ${same.looks.length}). Что сделать?</div>
+            <button type="button" class="slay-card-opt" data-merge="1"><b>Добавить образы к ${isPlace ? 'этой локации' : 'нему'}</b><span>Одинаковые картинки не задвоятся.</span></button>
+            <button type="button" class="slay-card-opt" data-merge="0"><b>Создать ${isPlace ? 'отдельную' : 'отдельного'}</b><span>Будет две записи с одним именем.</span></button>` : ''}
+        <div class="slay-loc-row slay-loc-foot"><button type="button" class="menu_button slay-card-go">Добавить в «${isPlace ? 'Локации' : 'Персонажи'}»</button><button type="button" class="menu_button slay-loc-cancel">Отмена</button></div>`,
+        () => URL.revokeObjectURL(coverUrl));
+    const paint = () => { for (const b of ov.querySelectorAll('[data-merge]')) b.classList.toggle('on', (b.dataset.merge === '1') === merge); };
+    paint();
+    ov.addEventListener('click', (e) => { const b = e.target.closest('[data-merge]'); if (b) { merge = b.dataset.merge === '1'; paint(); } });
+    const go = ov.querySelector('.slay-card-go');
+    go.addEventListener('click', async () => {
+        if (go.disabled) return;
+        go.disabled = true;
+        const note = toastr.info('Сохраняю...', 'SLAY Images', { timeOut: 0, extendedTimeOut: 0 });
+        let ch = merge ? same : null;
+        let added = 0, failed = 0;
+        try {
+            for (let i = 0; i < card.looks.length; i++) {
+                try {
+                    const b64 = card.looks[i].image || slayBytesToBase64(bytes);
+                    const hashes = await computeRefHashes(b64);
+                    let path = await lookupRefByHashes(hashes);
+                    if (!path) {
+                        const compressed = hashes.compressed || await compressBase64Image(b64, 768, 0.8);
+                        path = await saveRefImageToFile(compressed, isPlace ? 'loc' : 'look', { skipDedupCheck: true });
+                        recordRefHashes(hashes, path);
+                    }
+                    if (!path) throw new Error('файл не сохранился');
+                    ch = saveLook({ charId: ch ? ch.id : null, names: ch ? '' : card.names, label: card.looks[i].label, path, kind: isPlace ? 'place' : '' }) || ch;
+                    added++;
+                } catch (e) { failed++; iigLog('WARN', `ref card: look ${i} skipped: ${e?.message}`); }
+            }
+            if (!ch || !added) throw new Error('ни одна картинка не сохранилась');
+            if (isPlace && card.desc && !ch.desc) { ch.desc = card.desc; ch.mode = card.mode || 'img'; saveSettings(); }
+            _swLibKind = isPlace ? 'places' : 'people';
+            revealSavedChar(ch.id);
+            renderSavedPortraits();
+            toastr.success(`«${first}»: добавлено ${added} ${slayPlural(added, 'образ', 'образа', 'образов')}${failed ? `, не получилось: ${failed}` : ''}`, 'SLAY Images', { timeOut: 3500 });
+            close();
+        } catch (e) {
+            toastr.error('Импорт не удался: ' + (e?.message || e), 'SLAY Images');
+            go.disabled = false;
+        } finally { try { toastr.clear(note); } catch (_) { } }
+    });
+}
+
 function renderSavedPortraits() {
     const host = document.getElementById('slay_saved_portraits');
     if (!host) return;
-    const chars = getSavedChars();
+    const allSaved = getSavedChars();
+    const hasPlaces = allSaved.some(c => c.kind === 'place');
+    if (!hasPlaces) _swLibKind = 'people';
+    const chars = allSaved.filter(c => (c.kind === 'place') === (_swLibKind === 'places'));
     const countEl = document.getElementById('slay_saved_count');
-    if (countEl) countEl.textContent = chars.length ? String(chars.length) : '';
+    if (countEl) countEl.textContent = allSaved.length ? String(allSaved.length) : '';
+    // «Персонажи | Локации» — only once at least one place is saved.
+    const kindTabs = hasPlaces
+        ? `<div class="iig-lib-kinds" role="tablist"><button type="button" class="iig-lib-kind${_swLibKind === 'people' ? ' on' : ''}" data-libkind="people">Персонажи</button><button type="button" class="iig-lib-kind${_swLibKind === 'places' ? ' on' : ''}" data-libkind="places">Локации</button></div>`
+        : '';
+    const bindKinds = () => {
+        for (const b of host.querySelectorAll('[data-libkind]')) b.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (_swLibKind === b.dataset.libkind) return;
+            _swLibKind = b.dataset.libkind; _swSelChar = null; _swSelLook = null;   // the open folder stays: folders are shared by both tabs
+            renderSavedPortraits();
+        });
+    };
 
     if (chars.length === 0) {
-        host.innerHTML = `<div class="iig-saved-empty">
-            Пока пусто. Нажмите на слот с картинкой → <b>дискета</b>, и персонаж окажется здесь —
-            вместе с именами, чтобы в следующем чате не вписывать их заново.
+        host.innerHTML = kindTabs + `<div class="iig-saved-empty">
+            Пока пусто. Нажмите на слот с картинкой → <b>дискета</b>, и ${_swLibKind === 'places' ? 'локация' : 'персонаж'} окажется здесь —
+            вместе с названиями, чтобы в следующем чате не вписывать их заново.
+            <div style="margin-top:8px;"><button type="button" class="menu_button slay-card-import" style="width:auto;display:inline-flex;gap:6px;align-items:center;"><i class="fa-solid fa-file-import"></i> Импорт карточки</button></div>
         </div>`;
+        bindKinds();
+        host.querySelector('.slay-card-import')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); slayImportRefCard(); });
         return;
     }
 
@@ -8940,7 +9752,7 @@ function renderSavedPortraits() {
     // on the right; after that the pill moves into the chip row as the last «＋».
     let html = `<div class="iig-recent-refs-head${folders.length ? '' : ' iig-has-pill'}">
         <span class="iig-recent-refs-title"><i class="fa-solid fa-heart"></i> Сохранённые</span>
-        <span class="iig-saved-head-r"><span class="iig-recent-refs-hint">персонаж → образ → слот</span>${folders.length ? '' : `<button type="button" class="iig-folder-pill" title="Новая папка"><i class="fa-solid fa-plus"></i> папка</button>`}</span>
+        <span class="iig-saved-head-r"><span class="iig-recent-refs-hint">персонаж → образ → слот</span><button type="button" class="iig-saved-btn slay-card-import" title="Импорт карточки персонажа или локации"><i class="fa-solid fa-file-import"></i></button>${folders.length ? '' : `<button type="button" class="iig-folder-pill" title="Новая папка"><i class="fa-solid fa-plus"></i> папка</button>`}</span>
     </div>`;
 
     // Chip row: [Все N] [папка n]… [Без папки n] [＋]. «Без папки» only while
@@ -8988,7 +9800,9 @@ function renderSavedPortraits() {
                 <button class="iig-saved-btn iig-char-rename" title="Изменить имена"><i class="fa-solid fa-pen"></i></button>
                 ${chars.length > 1 ? `<button class="iig-saved-btn iig-char-merge" title="\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c \u0441 \u0434\u0440\u0443\u0433\u0438\u043c"><i class="fa-solid fa-code-merge"></i></button>` : ''}
                 <button class="iig-saved-btn iig-char-folders${inFolders.length ? ' on' : ''}" title="${inFolders.length ? 'Папки: ' + esc(inFolders.map(f => f.name).join(' · ')) : 'Папки'}"><i class="fa-solid fa-folder"></i></button>
+                <button class="iig-saved-btn slay-card-export" title="Экспорт карточкой — один файл, образы на выбор"><i class="fa-solid fa-file-export"></i></button>
             </div>
+            ${sel.kind === 'place' ? `<div class="slay-lib-desc${sel.desc ? '' : ' none'}">${esc(sel.desc || 'Описания нет — оно появится, если сохранить локацию из слота с описанием.')}</div>` : ''}
             <div class="iig-look-strip">`;
         for (const l of sel.looks) {
             html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
@@ -9013,7 +9827,10 @@ function renderSavedPortraits() {
         </div>`;
     }
 
-    host.innerHTML = html;
+    host.innerHTML = kindTabs + html;
+    bindKinds();
+    host.querySelector('.slay-card-import')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); slayImportRefCard(); });
+    host.querySelector('.slay-card-export')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (sel) slayExportSavedChar(sel.id); });
 
     // Put the strips back where they were (see above).
     const peopleRow = host.querySelector('.iig-people-row');
@@ -9053,15 +9870,19 @@ function renderSavedPortraits() {
     // Slot buttons come from the DOM, so the NPC count always matches reality.
     const chips = host.querySelector('#slay_look_slots');
     if (chips) {
-        const btns = [`<button class="iig-look-chip" data-key="char">{{char}}</button>`,
-                      `<button class="iig-look-chip" data-key="user">{{user}}</button>`];
-        const seen = new Set();
-        document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]').forEach((sl, i) => {
-            const idx = String(sl.dataset.npcIndex != null ? sl.dataset.npcIndex : i);
-            if (seen.has(idx)) return;
-            seen.add(idx);
-            btns.push(`<button class="iig-look-chip" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
-        });
+        const btns = [];
+        if (sel?.kind === 'place') {
+            for (let i = 0; i < LOC_SLOTS; i++) btns.push(`<button class="iig-look-chip" data-key="loc-${i}">Локация ${i + 1}</button>`);
+        } else {
+            btns.push(`<button class="iig-look-chip" data-key="char">{{char}}</button>`, `<button class="iig-look-chip" data-key="user">{{user}}</button>`);
+            const seen = new Set();
+            document.querySelectorAll('.iig-ref-slot[data-ref-type="npc"]').forEach((sl, i) => {
+                const idx = String(sl.dataset.npcIndex != null ? sl.dataset.npcIndex : i);
+                if (seen.has(idx)) return;
+                seen.add(idx);
+                btns.push(`<button class="iig-look-chip" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
+            });
+        }
         chips.innerHTML = btns.join('');
     }
 
@@ -9273,6 +10094,15 @@ function renderSavedPortraits() {
             for (const sl of slots) {
                 applyPathToSlot(sl, refType, npcIndex, look.path);
                 applyNameToSlot(sl, refType, npcIndex, sel.names);
+            }
+            if (refType === 'loc' && sel.kind === 'place') {
+                const l = slayRefList(getCurrentCharacterRefs(), 'loc')[npcIndex];
+                if (l) {
+                    if (sel.desc) { l.desc = sel.desc; l.mode = ['img', 'desc', 'both'].includes(sel.mode) ? sel.mode : 'img'; }
+                    else { delete l.desc; delete l.mode; }
+                    saveSettings();
+                    renderRefSlots();
+                }
             }
             pushRecentRef(look.path);
             const target = slots[slots.length - 1];
@@ -9597,6 +10427,7 @@ function showAssignPopup(anchor, path, name = '') {
         seenNpc.add(idx);
         slotButtons.push(`<button class="iig-assign-btn" data-key="npc-${idx}">NPC ${Number(idx) + 1}</button>`);
     });
+    for (let i = 0; i < LOC_SLOTS; i++) slotButtons.push(`<button class="iig-assign-btn" data-key="loc-${i}">Локация ${i + 1}</button>`);
     popup.innerHTML = `
         <button class="iig-popup-close" type="button" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
         <div class="iig-assign-title">Куда применить?${name ? ` <span style="opacity:.75;font-weight:400;">— ${sanitizeForHtml(name)}</span>` : ''}</div>
@@ -9657,12 +10488,14 @@ function showSlotOptionsPopup(slot) {
     const npcIndex = parseInt(slot.dataset.npcIndex, 10);
     const targetLabel = refType === 'char' ? '{{char}}'
         : refType === 'user' ? '{{user}}'
+        : refType === 'loc' ? `Локация ${Number.isFinite(npcIndex) ? npcIndex + 1 : '?'}`
         : `NPC ${Number.isFinite(npcIndex) ? npcIndex + 1 : '?'}`;
     popup.innerHTML = `
         <button class="iig-popup-close" type="button" title="Закрыть" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
         <div class="iig-assign-title">Добавить в <span style="color:var(--slay-pink,#f472b6);">${targetLabel}</span></div>
         <div class="iig-slot-options-row">
             <button class="iig-slot-option-btn" data-act="file"><i class="fa-solid fa-folder-open"></i><span>Файл</span></button>
+            ${refType !== 'loc' ? '<button class="iig-slot-option-btn" data-act="avatar"><i class="fa-solid fa-id-badge"></i><span>С аватарки</span></button>' : ''}
             <button class="iig-slot-option-btn" data-act="paste"><i class="fa-solid fa-clipboard"></i><span>Вставить</span></button>
             <button class="iig-slot-option-btn" data-act="recent"><i class="fa-solid fa-clock-rotate-left"></i><span>Недавние</span></button>
             <button class="iig-slot-option-btn" data-act="library"><i class="fa-solid fa-heart"></i><span>Сохранённые</span></button>
@@ -9683,6 +10516,11 @@ function showSlotOptionsPopup(slot) {
         closeAllRefPopups();
         const fileInput = slot.querySelector('.iig-ref-file-input');
         if (fileInput) fileInput.click();
+    });
+    popup.querySelector('[data-act="avatar"]')?.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        closeAllRefPopups();
+        await slayAvatarToSlot(slot);
     });
     popup.querySelector('[data-act="paste"]').addEventListener('click', async (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -9723,6 +10561,115 @@ function openSavedPortraits({ scroll = false } = {}) {
 }
 
 // Paste image from clipboard → upload → apply to slot
+// «С аватарки»: the bot's card picture (group: the picked member's) or the
+// current persona's.
+async function slayAvatarUrlFor(refType) {
+    const ctx = SillyTavern.getContext();
+    if (refType === 'char') {
+        let avatar = '';
+        if (ctx.groupId) {
+            const member = slayRefGroupMember();
+            const g = ctx.groups?.find?.(x => x.id === ctx.groupId);
+            avatar = (g?.members || []).find(a => ctx.characters?.find?.(c => c.avatar === a)?.name === member) || '';
+        } else {
+            avatar = ctx.characters?.[ctx.characterId]?.avatar || '';
+        }
+        return avatar && avatar !== 'none' ? `/characters/${encodeURIComponent(avatar)}` : '';
+    }
+    let avatar = '';
+    try { avatar = (await import('/scripts/personas.js')).user_avatar || ''; } catch (_) { }
+    if (!avatar) avatar = document.querySelector('#user_avatar_block .avatar-container.selected')?.dataset?.avatarId || '';
+    return avatar ? `/User Avatars/${encodeURIComponent(avatar)}` : '';
+}
+
+// NPC slot: any character card can lend its picture. Group members come first.
+function slayPickAvatarSource() {
+    return new Promise((resolve) => {
+        const ctx = SillyTavern.getContext();
+        const esc = sanitizeForHtml;
+        const g = ctx.groupId ? ctx.groups?.find?.(x => x.id === ctx.groupId) : null;
+        const inGroup = new Set(g?.members || []);
+        const chars = (ctx.characters || []).filter(c => c?.avatar && c.avatar !== 'none')
+            .map(c => ({ name: String(c.name || ''), url: `/characters/${encodeURIComponent(c.avatar)}`, thumb: `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`, top: inGroup.has(c.avatar) ? 1 : 0 }))
+            .sort((a, b) => (b.top - a.top) || a.name.localeCompare(b.name));
+        document.getElementById('slay_av_dialog')?.remove();
+        const ov = document.createElement('div');
+        ov.id = 'slay_av_dialog';
+        ov.className = 'slay-loc-dialog';
+        ov.innerHTML = `<div class="slay-loc-box">
+            <div class="slay-loc-title">Чья аватарка?</div>
+            <input type="text" class="text_pole slay-av-search" placeholder="Поиск по имени">
+            <div class="slay-av-list"></div>
+            <div class="slay-loc-row slay-loc-foot"><button type="button" class="menu_button slay-loc-cancel">Отмена</button></div>
+        </div>`;
+        const input = ov.querySelector('.slay-av-search');
+        const list = ov.querySelector('.slay-av-list');
+        const SHOWN = 60;
+        const draw = () => {
+            const q = input.value.trim().toLowerCase();
+            const hit = chars.filter(c => !q || c.name.toLowerCase().includes(q));
+            list.innerHTML = hit.slice(0, SHOWN).map(c => `<button type="button" class="slay-av-item" data-i="${chars.indexOf(c)}"><img loading="lazy" decoding="async" alt="" src="${esc(c.thumb)}"><span>${esc(c.name)}</span></button>`).join('')
+                + (hit.length > SHOWN ? `<div class="slay-loc-note">Показаны первые ${SHOWN} из ${hit.length} — ищи по имени.</div>` : '')
+                || '<div class="slay-loc-note">Никто не подходит</div>';
+        };
+        const done = (v) => { ov.remove(); resolve(v); };
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
+        ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') done(null); });
+        ov.addEventListener('click', (e) => {
+            if (e.target === ov || e.target.closest('.slay-loc-cancel')) { done(null); return; }
+            const b = e.target.closest('[data-i]');
+            if (b) { const c = chars[Number(b.dataset.i)]; done(c ? { name: c.name, url: c.url } : null); }
+        });
+        input.addEventListener('input', draw);
+        draw();
+        document.body.appendChild(ov);
+        input.focus();
+    });
+}
+
+// Same steps as an upload: crop (if on), dedup, compress, save.
+async function slayAvatarToSlot(slot) {
+    const refType = slot.dataset.refType;
+    try {
+        let url = '', pickedName = '';
+        if (refType === 'npc') {
+            const pick = await slayPickAvatarSource();
+            if (!pick) return;
+            url = pick.url; pickedName = pick.name;
+        } else url = await slayAvatarUrlFor(refType);
+        // An empty NPC slot takes the card's name along with its picture.
+        const nameIfEmpty = () => { if (pickedName && !slot.querySelector('.iig-ref-name')?.value.trim()) applyNameToSlot(slot, refType, parseInt(slot.dataset.npcIndex, 10), pickedName); };
+        if (!url) {
+            toastr.warning(refType === 'char' ? 'У персонажа нет аватарки, или чат не открыт' : 'Не нашла аватарку текущей персоны', 'SLAY Images', { timeOut: 3500 });
+            return;
+        }
+        let rawBase64 = await loadRefImageAsBase64(url);
+        if (!rawBase64) { toastr.error('Аватарка не загрузилась', 'SLAY Images'); return; }
+        rawBase64 = await slayMaybeCrop(rawBase64, { aspect: 0, title: 'Обрезать реф', subtitle: pickedName ? `Аватарка: ${pickedName}` : refType === 'char' ? 'Аватарка персонажа' : 'Аватарка юзера' });
+        if (rawBase64 === null) return;
+        const hashes = await computeRefHashes(rawBase64);
+        const npcIndex = parseInt(slot.dataset.npcIndex, 10);
+        const cached = await lookupRefByHashes(hashes);
+        if (cached) {
+            applyPathToSlot(slot, refType, npcIndex, cached);
+            nameIfEmpty();
+            pushRecentRef(cached);
+            toastr.success('Аватарка стоит рефом (такая картинка уже была, дубликат не создан)', 'SLAY Images', { timeOut: 2200 });
+            return;
+        }
+        const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
+        const savedPath = await saveRefImageToFile(compressed, refType === 'npc' ? `npc${npcIndex}` : refType, { skipDedupCheck: true });
+        recordRefHashes(hashes, savedPath);
+        applyPathToSlot(slot, refType, npcIndex, savedPath);
+        nameIfEmpty();
+        pushRecentRef(savedPath);
+        toastr.success('Аватарка стоит рефом', 'SLAY Images', { timeOut: 1800 });
+    } catch (err) {
+        iigLog('ERROR', `Avatar to slot failed: ${err?.message}`);
+        toastr.error(`Не получилось взять аватарку: ${err?.message || 'ошибка'}`, 'SLAY Images');
+    }
+}
+
 async function pasteFromClipboardToSlot(slot) {
     try {
         if (!navigator.clipboard || !navigator.clipboard.read) {
@@ -9758,7 +10705,7 @@ async function pasteFromClipboardToSlot(slot) {
             return;
         }
         const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
-        const label = refType === 'npc' ? `npc${npcIndex}` : refType;
+        const label = (refType === 'npc' || refType === 'loc') ? `${refType}${npcIndex}` : refType;
         const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
         recordRefHashes(hashes, savedPath);
         applyPathToSlot(slot, refType, npcIndex, savedPath);
@@ -9819,14 +10766,14 @@ function bindRefSlotEvents() {
             const st = getCurrentCharacterRefs();
             const ref = refType === 'char' ? st.charRef
                 : refType === 'user' ? st.userRef
-                : (st.npcReferences[npcIndex] || null);
+                : (slayRefList(st, refType)[npcIndex] || null);
             const path = ref && ref.imagePath ? ref.imagePath : '';
             if (!path) { toastr.warning('В этом слоте нет картинки', 'SLAY Images'); return; }
             const next = await slayRecropExisting(path, {
                 aspect: 0,
                 title: 'Обрезать реф',
                 subtitle: (ref && ref.name) || '',
-                label: refType === 'npc' ? `npc${npcIndex}` : refType,
+                label: (refType === 'npc' || refType === 'loc') ? `${refType}${npcIndex}` : refType,
             });
             if (!next || next === path) return;
             applyPathToSlot(slot, refType, npcIndex, next);
@@ -9839,9 +10786,23 @@ function bindRefSlotEvents() {
             const st = getCurrentCharacterRefs();
             const ref = refType === 'char' ? st.charRef
                 : refType === 'user' ? st.userRef
-                : (st.npcReferences[npcIndex] || null);
+                : (slayRefList(st, refType)[npcIndex] || null);
             const path = ref && ref.imagePath ? ref.imagePath : '';
             if (!path) { toastr.warning('\u0412 \u044d\u0442\u043e\u043c \u0441\u043b\u043e\u0442\u0435 \u043d\u0435\u0442 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', 'SLAY Images'); return; }
+            if (refType === 'loc') {
+                const names = String((ref && ref.name) || '').trim();
+                if (!names) { toastr.warning('Сначала впиши название локации', 'SLAY Images'); return; }
+                const want = new Set(swNameList(names).map(x => x.toLowerCase()));
+                const same = getSavedChars().find(c => c.kind === 'place' && swNameList(c.names).some(n => want.has(n.toLowerCase())));
+                const ch = saveLook({ charId: same ? same.id : null, names, path, kind: 'place' });
+                // The description travels with the place; an empty slot field
+                // does not wipe one the library already holds.
+                if (ch && String(ref.desc || '').trim()) { ch.desc = String(ref.desc).trim(); ch.mode = slayLocMode(ref); saveSettings(); }
+                if (ch) { _swLibKind = 'places'; revealSavedChar(ch.id); }
+                openSavedPortraits({ scroll: true });
+                toastr.success(`Локация «${swNameList(names)[0]}» сохранена`, 'SLAY Images', { timeOut: 2200 });
+                return;
+            }
             const res = await slayPromptSaveLook((ref && ref.name) || '', path);
             if (!res) return;
             const ch = saveLook({ charId: res.charId, names: res.names, label: res.label, path, folders: res.folderId ? [res.folderId] : null });
@@ -9859,11 +10820,14 @@ function bindRefSlotEvents() {
             const s = getCurrentCharacterRefs();
             if (refType === 'char') s.charRef.name = value;
             else if (refType === 'user') s.userRef.name = value;
-            else if (refType === 'npc') {
-                if (!s.npcReferences[npcIndex]) s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
-                s.npcReferences[npcIndex].name = value;
+            else if (refType === 'npc' || refType === 'loc') {
+                const list = slayRefList(s, refType);
+                if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+                if (refType === 'loc' && list[npcIndex].name && list[npcIndex].name === slayHereName()) slaySetHere(value);
+                list[npcIndex].name = value;
             }
         };
+        slot.querySelector('.iig-ref-desc-btn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); slayEditLocationDialog(npcIndex); });
         if (nameInput) {
             nameInput.addEventListener('input', (e) => { writeName(e.target.value); saveSettings(); });
             // Blur/change/Enter write the name once more. There used to be a
@@ -9903,7 +10867,7 @@ function bindRefSlotEvents() {
                     return;
                 }
                 const compressed = hashes.compressed || await compressBase64Image(rawBase64, 768, 0.8);
-                const label = refType === 'npc' ? `npc${npcIndex}` : refType;
+                const label = (refType === 'npc' || refType === 'loc') ? `${refType}${npcIndex}` : refType;
                 const savedPath = await saveRefImageToFile(compressed, label, { skipDedupCheck: true });
                 recordRefHashes(hashes, savedPath);
                 applyPathToSlot(slot, refType, npcIndex, savedPath);
@@ -9942,7 +10906,7 @@ function bindRefSlotEvents() {
             const s = getCurrentCharacterRefs();
             if (refType === 'char') s.charRef = { name: '', imageBase64: '', imagePath: '' };
             else if (refType === 'user') s.userRef = { name: '', imageBase64: '', imagePath: '' };
-            else if (refType === 'npc') s.npcReferences[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+            else if (refType === 'npc' || refType === 'loc') slayRefList(s, refType)[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
             saveSettingsNow();
             const thumb = slot.querySelector('.iig-ref-thumb'); if (thumb) thumb.src = '';
             const tw = slot.querySelector('.iig-ref-thumb-wrap'); if (tw) tw.classList.remove('has-image');
@@ -10648,9 +11612,13 @@ function attachVideoDownloadButton(video) {
 
 const STYLE_CACHE_EXT_VERSION = SLAY_VERSION;
 const STYLE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h fallback when ETag isn't supported
+const SLAY_STYLES_BASE = 'https://wewwaistyping.github.io/slayimagespromts/';
+const SLAY_STYLES_CACHE_KEY = 'slay_styles_cache_v3';
+// rp in Latin read as a bogus «гр» chip — it is the site's «Для ролплея».
+const SLAY_STYLE_TAG_LABELS = { rp: 'Для ролплея', painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
 
 async function openStylePickerModal() {
-    const BASE = 'https://wewwaistyping.github.io/slayimagespromts/';
+    const BASE = SLAY_STYLES_BASE;
 
     const overlay = document.createElement('div');
     overlay.className = 'slay-style-overlay';
@@ -10711,7 +11679,7 @@ async function openStylePickerModal() {
     //   v = extension version at time of cache (invalidates on extension upgrade)
     //   ts = cache creation timestamp (for TTL fallback when ETag isn't available)
     // v3: entries carry `block` (the long panel) since 5.1 — older caches are skipped.
-    const CACHE_KEY = 'slay_styles_cache_v3';
+    const CACHE_KEY = SLAY_STYLES_CACHE_KEY;
     let styles = [];
 
     // Parsing lives in slayParseStyleCards (top-level, harness-tested).
@@ -10790,7 +11758,7 @@ async function openStylePickerModal() {
 
     const allTags = [...new Set(styles.flatMap(s => s.tags))];
     // rp in Latin read as a bogus «гр» chip — it is the site's «Для ролплея».
-    const TAG_LABELS = { rp: 'Для ролплея', painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
+    const TAG_LABELS = SLAY_STYLE_TAG_LABELS;
     let activeTag = '';
 
     const filtersEl = overlay.querySelector('.slay-style-filters');
@@ -11257,6 +12225,15 @@ function bindSettingsEvents() {
 
     document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { window.slayWardrobe?.findOrphanImages?.(); });
     document.getElementById('slay_skip_crop')?.addEventListener('change', (e) => { settings.skipCrop = e.target.checked; saveSettings(); });
+    // Folding hides the slots only: filled locations keep going to pictures.
+    // Folded until the user opens them once; after that their choice is kept.
+    {
+        const locsToggle = document.getElementById('slay_locs_toggle');
+        const applyLocs = () => locsToggle?.closest('.iig-refs-grid')?.classList.toggle('slay-locs-off', settings.uiLocsHidden !== false);
+        applyLocs();
+        locsToggle?.addEventListener('click', () => { settings.uiLocsHidden = settings.uiLocsHidden === false; applyLocs(); saveSettings(); });
+        document.getElementById('slay_loc_nogen')?.addEventListener('change', (e) => { settings.locPromptWithoutGen = e.target.checked; saveSettings(); slayUpdateLocationPrompt(); });
+    }
     document.getElementById('slay_sw_enabled')?.addEventListener('change', (e) => {
         const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe;
         if (swS) swS.wardrobeEnabled = e.target.checked;
@@ -11268,6 +12245,7 @@ function bindSettingsEvents() {
     });
     document.getElementById('slay_enabled')?.addEventListener('change', (e) => {
         settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot();
+        slayInjectStudioBtn();
         if (settings.enabled) { addButtonsToExistingMessages(); attachRegenButtonsInRoot(document.getElementById('chat') || document.body); }
         else iigStripOurUi();
     });
@@ -11951,10 +12929,716 @@ function bindSettingsEvents() {
 }
 
 // ── Lightbox ──
+// ╔════════════════════════════════════════════════════════════════════╗
+// ║  Студия: pictures generated OUTSIDE the chat (exp.11)               ║
+// ╚════════════════════════════════════════════════════════════════════╝
+// Its own window behind a button next to the wardrobe icon. Who is in frame
+// is picked with chips (refs go without the «name in prompt» check), the
+// idea can be rewritten by the CHAT model with the preset's image rules, and
+// results stay in this chat's studio until sent to the chat or deleted.
+
+const SLAY_STUDIO_TASKS = {
+    free: { label: 'Свободно', idea: '', who: ['char', 'user'] },
+    portrait: { label: 'Портрет персонажа', idea: 'Portrait of {who}, head and shoulders, neutral background, soft studio light.', who: ['char'], ar: '3:4' },
+    sheet: { label: 'Лист персонажа', idea: 'Character sheet of {who}: front view, side profile and full body on one canvas, plain light background, the same outfit in every view, no text.', who: ['char'], ar: '16:9' },
+    place: { label: 'Локация для рефа', idea: 'Empty interior of {loc}, no people, wide shot, natural light, detailed furniture and props.', who: ['loc'], ar: '16:9' },
+    cover: { label: 'Обложка', idea: 'Cinematic cover art: {who}{locp}, dramatic light, empty space at the top for a title.', who: ['char', 'user'], ar: '3:4' },
+    scene: { label: 'Сцена из чата', idea: '', who: ['char', 'user'], ctx: 'last' },
+};
+const SLAY_STUDIO_CTX = {
+    off: ['Без контекста', 'Переделка видит только идею и правила картинок из пресета.'],
+    last: ['Последние сообщения', 'К идее добавятся последние 6 сообщений чата.'],
+    card: ['Карточка + лорбук', 'Без переписки: внешность и места — из карточки и лорбука.'],
+};
+const SLAY_STUDIO_RATIOS = ['1:1', '3:4', '4:3', '2:3', '9:16', '16:9'];
+// Window state, memory only: which chips, task, ratio. Reset per chat.
+const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busy: 0 };
+
+function slayStudioItems(create = true) {
+    const ctx = SillyTavern.getContext();
+    const md = ctx.chatMetadata;
+    if (!md || typeof md !== 'object') return [];
+    if (!Array.isArray(md.slay_studio)) { if (!create) return []; md.slay_studio = []; }
+    return md.slay_studio;
+}
+function slayStudioSave() {
+    const ctx = SillyTavern.getContext();
+    try { (ctx.saveMetadataDebounced || ctx.saveMetadata)?.(); } catch (e) { iigLog('WARN', 'studio save failed:', e?.message); }
+}
+
+// Who can be in frame: from the current ref set (group: every member).
+function slayStudioWhoOptions() {
+    const ctx = SillyTavern.getContext();
+    const out = [];
+    const first = (n) => swNameList(n)[0] || String(n || '').trim();
+    if (ctx.groupId) {
+        const refs = slayGroupRefs('');
+        out.push({ key: 'user', kind: 'user', label: first(getDefaultUserRefName(refs)) || '{{user}}' });
+        for (const n of refs.npcReferences || []) {
+            if (!n?.name) continue;
+            out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name), member: !!n._member });
+        }
+        for (const l of refs.locReferences || []) if (l?.name && hasManualReference(l)) out.push({ key: 'loc:' + l.name, kind: 'loc', name: l.name, label: first(l.name) });
+        return out;
+    }
+    const refs = getCurrentCharacterRefs();
+    out.push({ key: 'char', kind: 'char', label: first(getDefaultCharRefName(refs)) || '{{char}}' });
+    out.push({ key: 'user', kind: 'user', label: first(getDefaultUserRefName(refs)) || '{{user}}' });
+    for (const n of refs.npcReferences || []) if (n?.name && hasManualReference(n)) out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name) });
+    for (const l of slayRefList(refs, 'loc')) if (l?.name && hasManualReference(l)) out.push({ key: 'loc:' + l.name, kind: 'loc', name: l.name, label: first(l.name) });
+    return out;
+}
+
+// Chips → the generateImageWithRetry studio option.
+function slayStudioWhoToOption(opts, picked) {
+    const res = { char: false, user: false, npcNames: [], locName: '' };
+    for (const o of opts) {
+        if (!picked.has(o.key)) continue;
+        if (o.kind === 'char') res.char = true;
+        else if (o.kind === 'user') res.user = true;
+        else if (o.kind === 'npc') res.npcNames.push(o.name);
+        else if (o.kind === 'loc' && !res.locName) res.locName = o.name;
+    }
+    return res;
+}
+
+// The preset's image rules: the toggle carrying <image_gen> / our tag format.
+function slayStudioPresetRules() {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (ctx.mainApi !== 'openai') return '';
+        const prompts = Array.isArray(ctx.chatCompletionSettings?.prompts) ? ctx.chatCompletionSettings.prompts : [];
+        const cands = prompts.filter(p => p && !p.marker && /data-iig-instruction|<image_gen>/i.test(String(p.content || '')));
+        if (!cands.length) return '';
+        const orders = Array.isArray(ctx.chatCompletionSettings?.prompt_order) ? ctx.chatCompletionSettings.prompt_order : [];
+        const on = new Set();
+        for (const o of orders) for (const e of (o?.order || [])) if (e?.enabled) on.add(e.identifier);
+        const pick = cands.find(p => on.has(p.identifier)) || cands[0];
+        return ctx.substituteParams ? ctx.substituteParams(String(pick.content)) : String(pick.content);
+    } catch (e) { iigLog('WARN', 'studio preset rules:', e?.message); return ''; }
+}
+
+function slayStudioPlainText(html) {
+    return String(html || '').replace(/<img[^>]*>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function slayStudioContext(mode, idea) {
+    const ctx = SillyTavern.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat.filter(m => m && !m.is_system) : [];
+    if (mode === 'last') {
+        return chat.slice(-6).map(m => `${m.name}: ${slayStudioPlainText(m.mes).slice(0, 1500)}`).join('\n\n');
+    }
+    if (mode === 'card') {
+        const parts = [];
+        const chars = ctx.groupId
+            ? (ctx.groups?.find?.(g => g.id === ctx.groupId)?.members || []).map(a => ctx.characters?.find?.(c => c.avatar === a)).filter(Boolean)
+            : [ctx.characters?.[ctx.characterId]].filter(Boolean);
+        for (const c of chars) {
+            const desc = [c.description, c.scenario].filter(Boolean).join('\n');
+            if (desc) parts.push(`${c.name}:\n${ctx.substituteParams ? ctx.substituteParams(desc) : desc}`.slice(0, 3000));
+        }
+        try {
+            const persona = ctx.substituteParams ? ctx.substituteParams('{{persona}}') : '';
+            if (persona && persona !== '{{persona}}') parts.push(`${ctx.name1}:\n${persona}`.slice(0, 1500));
+        } catch (_) { }
+        try {
+            if (typeof ctx.getWorldInfoPrompt === 'function') {
+                const scan = [idea, ...chat.slice(-10).reverse().map(m => `${m.name}: ${slayStudioPlainText(m.mes)}`)];
+                const wi = await ctx.getWorldInfoPrompt(scan, 8192, true);
+                const text = String(wi?.worldInfoString || '').trim();
+                if (text) parts.push('Lorebook:\n' + text.slice(0, 4000));
+            }
+        } catch (e) { iigLog('WARN', 'studio lorebook:', e?.message); }
+        return parts.join('\n\n');
+    }
+    return '';
+}
+
+// Idea → finished image prompt, written by the chat model with the preset's
+// image rules. One quiet request; nothing goes into the chat.
+// The answer must be TEXT. An image-capable chat model (or a proxy that
+// draws) can answer «write an image prompt» with a picture: a markdown image,
+// an <img>, an [IMG:…] tag. Strip all of that; if no real text is left, say so.
+function slayStudioCleanRewrite(raw) {
+    let out = String(raw || '').trim();
+    // Our own tag: the prompt inside it is exactly what we want.
+    const m = out.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/);
+    if (m) { try { const o = JSON.parse(iigDecodeInstruction(m[2])); if (o?.prompt) return { text: String(o.prompt).trim(), hadImage: false }; } catch (_) { } }
+    const before = out;
+    out = out
+        .replace(/!\[[^\]]*\]\([^)]*\)\S*/g, ' ')                 // ![image](url)_856
+        .replace(/<img\b[^>]*>/gi, ' ')
+        .replace(/<\/?(?:video|source|picture|figure)\b[^>]*>/gi, ' ')
+        .replace(/\[IMG:[^\]]*\]/gi, ' ')
+        .replace(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif|avif)(?:\?\S*)?/gi, ' ')
+        .replace(/^\s*```[a-z]*\s*/i, '').replace(/```\s*$/, '')
+        .replace(/^\s*(?:prompt|image prompt)\s*:\s*/i, '')
+        .replace(/\s+\n/g, '\n').replace(/[ \t]{2,}/g, ' ')
+        .trim()
+        .replace(/^["«]|["»]$/g, '')
+        .trim();
+    const hadImage = out !== before.trim() && /!\[|<img|\[IMG:|\.(?:png|jpe?g|webp|gif)/i.test(before);
+    return { text: out, hadImage };
+}
+
+async function slayStudioRewrite(idea, mode, whoNames, givenContext = '') {
+    const ctx = SillyTavern.getContext();
+    if (typeof ctx.generateRaw !== 'function') throw new Error('эта версия таверны не умеет тихую генерацию');
+    const rules = slayStudioPresetRules();
+    const context = mode === 'given' ? String(givenContext || '').slice(0, 12000) : await slayStudioContext(mode, idea);
+    // Plain text request with our own system prompt — NOT the whole preset
+    // (generateQuietPrompt would make the model write a chat reply with tags).
+    const system = 'You are a TEXT-ONLY assistant that writes a prompt for a separate image generator. '
+        + 'Do NOT create, draw or attach any image yourself, do not output links, markdown images or HTML tags. Your whole answer is plain text.\n\n'
+        + (rules
+            ? 'Use these image rules from the roleplay preset for the CONTENT of the prompt (camera, style, avoid list) — but output only the prompt text itself, never the tag or block they describe:\n\n' + rules
+            : 'The prompt covers: camera and shot, characters by FIRST NAME only (reference pictures supply their looks), what they do, environment, light, style, and an Avoid list.')
+        + '\n\nReturn ONLY the final prompt text in English, one paragraph. No tags, no JSON, no comments.';
+    const prompt = [
+        context ? 'Context:\n' + context : '',
+        whoNames.length ? 'In frame: ' + whoNames.join(', ') + '.' : '',
+        'Idea: ' + idea,
+        'Write the image prompt as plain text.',
+    ].filter(Boolean).join('\n\n');
+    let source = '', model = '';
+    try {
+        source = ctx.mainApi === 'openai' ? String(ctx.chatCompletionSettings?.chat_completion_source || '') : String(ctx.mainApi || '');
+        model = typeof ctx.getChatCompletionModel === 'function' && ctx.mainApi === 'openai' ? String(ctx.getChatCompletionModel() || '') : '';
+    } catch (_) { }
+    let raw;
+    try { raw = await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: 900 }); }
+    catch (e) {
+        iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${e?.message || e}`);
+        if (/no message generated/i.test(String(e?.message || e))) throw new Error('модель вернула пустой ответ');
+        throw e;
+    }
+    const { text, hadImage } = slayStudioCleanRewrite(raw);
+    iigLog('INFO', `Studio rewrite: source=${source || '?'} model=${model || '?'} context=${mode} answer=${String(raw || '').length} chars, clean=${text.length}${hadImage ? ', had image' : ''}`);
+    // Fewer than a dozen letters left = there was no prompt, only a picture/link.
+    if ((text.match(/\p{L}/gu) || []).length < 12) {
+        if (hadImage) throw new Error('модель чата вернула картинку вместо текста — проверь, что в подключении чата выбрана текстовая модель');
+        throw new Error('модель вернула пустой ответ');
+    }
+    return text;
+}
+
+function slayStudioTag(item) {
+    const json = JSON.stringify({ style: '', prompt: item.prompt || '', aspect_ratio: item.ar || '' }).replace(/&/g, '&amp;').replace(/'/g, '&#39;');
+    return iigSuccessTag(`<img data-iig-instruction='${json}' src="${item.path}">`, item.path);
+}
+
+async function slayStudioToChat(item, where) {
+    const ctx = SillyTavern.getContext();
+    if (!Array.isArray(ctx.chat)) return false;
+    const tag = slayStudioTag(item);
+    if (where === 'append') {
+        let idx = -1;
+        for (let i = ctx.chat.length - 1; i >= 0; i--) { const m = ctx.chat[i]; if (m && !m.is_user && !m.is_system) { idx = i; break; } }
+        if (idx < 0) { toastr.warning('В чате нет сообщения бота — отправь новым сообщением', 'Студия'); return false; }
+        const msg = ctx.chat[idx];
+        msg.mes = `${msg.mes || ''}\n\n${tag}`;
+        if (Array.isArray(msg.swipes) && Number.isInteger(msg.swipe_id) && msg.swipes[msg.swipe_id] !== undefined) msg.swipes[msg.swipe_id] = msg.mes;
+        ctx.updateMessageBlock?.(idx, msg);
+    } else {
+        const name = ctx.groupId ? (slayGroupMemberNames()[0] || ctx.name2) : ctx.name2;
+        const avatar = ctx.characters?.find?.(c => c.name === name)?.avatar;
+        const msg = { name, is_user: false, is_system: false, send_date: new Date().toLocaleString('en-US', { month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }), mes: tag, extra: { slay_studio: true } };
+        if (ctx.groupId && avatar) { msg.original_avatar = avatar; msg.force_avatar = `/thumbnail?type=avatar&file=${encodeURIComponent(avatar)}`; }
+        ctx.chat.push(msg);
+        ctx.addOneMessage?.(msg);
+    }
+    try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+    item.sent = true;
+    slayStudioSave();
+    return true;
+}
+
+function slayStudioCostText() {
+    const n = _studio.n;
+    return `${_studio.raw ? '' : '1 запрос к модели чата (переделка) + '}${n} ${slayPlural(n, 'запрос', 'запроса', 'запросов')} к провайдеру картинок.`;
+}
+
+function slayStudioFill(opts) {
+    const t = SLAY_STUDIO_TASKS[_studio.task];
+    if (!t?.idea) return null;
+    const people = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
+    const loc = opts.find(o => _studio.who.has(o.key) && o.kind === 'loc');
+    return t.idea.replace('{who}', people.join(' and ') || 'a person').replace('{loc}', loc ? loc.label : 'a room').replace('{locp}', loc ? ' in ' + loc.label : '');
+}
+
+// PC: a floating window over the chat (drag by the header, resize by the
+// corner) with «⤢» to the full two-column screen. Phone: always full screen.
+// Only classes and inline geometry change — the DOM (and a running
+// generation) survives every switch. Remembered in localStorage.
+// ╔═════════════════════════════════════════════════════════════╗
+// ║  window.slayImages — door for other extensions              ║
+// ╚═════════════════════════════════════════════════════════════╝
+// Know My Setting draws pictures for wiki articles through SLAY: SLAY's own
+// connection, key and styles, nothing goes into the chat. Nothing here runs
+// on its own — without a caller SLAY behaves exactly as before.
+// Results are data URLs; the caller keeps them (no file is written here).
+const SLAY_API_VERSION = 1;
+const SLAY_API_PROVIDERS = { openai: 'OpenAI-compatible', gemini: 'Gemini-compatible', novelai: 'NovelAI', naistera: 'Naistera', custom: 'Custom' };
+
+// Can SLAY draw right now, and what with.
+function slayApiStatus() {
+    const s = getSettings();
+    if (s.enabled === false) return { ok: false, reason: 'генерация выключена в настройках SLAY' };
+    try { validateSettings(); } catch (e) { return { ok: false, reason: String(e?.message || e).replace(/^Ошибка настроек:\s*/, '') }; }
+    const fmt = s.apiType === 'custom' ? (s.customBodyFormat || 'chat') : 'chat';
+    const naistera = s.apiType === 'naistera';
+    const refs = !(fmt === 'images' || s.apiType === 'novelai') && (!naistera || naisteraModelSupportsRefs(normalizeNaisteraModel(s.naisteraModel)));
+    return {
+        ok: true,
+        apiType: s.apiType,
+        provider: SLAY_API_PROVIDERS[s.apiType] || String(s.apiType || ''),
+        model: naistera ? canonNaisteraModelName(s.naisteraModel) : (s.apiType === 'novelai' ? s.novelModel : s.model) || '',
+        refs,            // takes reference pictures
+        edit: refs,      // «Правка» rides on refs
+        ratios: VALID_ASPECT_RATIOS.slice(),
+        models: naistera ? NAISTERA_MODELS.slice() : [],   // per-request choice only for Naistera
+    };
+}
+
+// Who can be in frame: the current chat's refs (group: every member).
+function slayApiInFrame() {
+    try { return slayStudioWhoOptions().map(o => ({ kind: o.kind, name: o.name || o.label, label: o.label, member: !!o.member })); }
+    catch (e) { return []; }
+}
+
+// inFrame: { char, user, npcs: [names], location: name } — names match any alias of a slot.
+function slayApiWho(inFrame) {
+    const res = { char: false, user: false, npcNames: [], locName: '' };
+    if (!inFrame || typeof inFrame !== 'object') return res;
+    res.char = !!inFrame.char;
+    res.user = !!inFrame.user;
+    const ctx = SillyTavern.getContext();
+    const refs = ctx.groupId ? slayGroupRefs('') : getCurrentCharacterRefs();
+    const wanted = (list) => new Set((Array.isArray(list) ? list : [list]).map(x => String(x || '').trim().toLowerCase()).filter(Boolean));
+    const hits = (slotName, set) => swNameList(slotName).some(a => set.has(String(a).trim().toLowerCase())) || set.has(String(slotName || '').trim().toLowerCase());
+    const npcSet = wanted(inFrame.npcs);
+    if (npcSet.size) res.npcNames = (refs.npcReferences || []).filter(n => n?.name && hasManualReference(n) && hits(n.name, npcSet)).map(n => n.name);
+    const locSet = wanted(inFrame.location);
+    if (locSet.size) res.locName = (slayRefList(refs, 'loc').find(l => l?.name && hasManualReference(l) && hits(l.name, locSet)) || {}).name || '';
+    return res;
+}
+
+// opts: { prompt, count 1–4, aspectRatio, inFrame, refs: [{ name, image, kind: 'person'|'place' }],
+//         style: 'settings' | 'none' | 'text', styleText, model (Naistera), editSource, editText, caller }
+// → [{ ok, src (data URL) } | { ok: false, error }], one per requested picture.
+async function slayApiGenerate(opts = {}) {
+    const st = slayApiStatus();
+    if (!st.ok) throw new Error(st.reason);
+    const prompt = String(opts.prompt || '').trim();
+    if (!prompt) throw new Error('пустой промпт');
+    const n = Math.max(1, Math.min(4, parseInt(opts.count, 10) || 1));
+    const o = { studio: slayApiWho(opts.inFrame), extraRefs: Array.isArray(opts.refs) ? opts.refs : [] };
+    if (VALID_ASPECT_RATIOS.includes(opts.aspectRatio)) { o.forceAspect = opts.aspectRatio; o.aspectRatio = opts.aspectRatio; }
+    if (opts.style === 'none') o.noStyle = true;
+    else if (opts.style === 'text' && typeof opts.styleText === 'string') o.styleOverride = opts.styleText;
+    if (opts.model && st.apiType === 'naistera') o.model = String(opts.model);
+    if (opts.editSource && opts.editText) { o.editSource = String(opts.editSource); o.editText = String(opts.editText); }
+    iigLog('INFO', `API generate from ${String(opts.caller || 'extension').slice(0, 40)}: n=${n}, ratio=${o.aspectRatio || 'default'}, style=${opts.style || 'settings'}, refs=${o.extraRefs.length}, inFrame=${JSON.stringify(o.studio)}${o.editText ? ', edit' : ''}`);
+    const out = await Promise.allSettled(Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, o).then((res) => {
+        if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
+        if (typeof res !== 'string' || !res.startsWith('data:')) throw new Error('провайдер вернул не картинку');
+        return res;
+    })));
+    return out.map(r => r.status === 'fulfilled' ? { ok: true, src: r.value } : { ok: false, error: String(r.reason?.message || r.reason) });
+}
+
+// Idea → image prompt by the chat model with the preset's image rules (as in
+// the Studio). context: text the caller gives (an article), not the chat.
+async function slayApiRewrite(idea, opts = {}) {
+    const text = String(idea || '').trim();
+    if (!text) throw new Error('пустая идея');
+    const names = (Array.isArray(opts.inFrame) ? opts.inFrame : []).map(x => String(x || '').trim()).filter(Boolean);
+    return slayStudioRewrite(text, 'given', names, String(opts.context || ''));
+}
+
+// The style living in the preset's image toggle («Как в пресете»): its title,
+// the suffix the model is told to append, and the Avoid list. null if not found.
+function slayApiPresetStyle() {
+    const rules = slayStudioPresetRules();
+    if (!rules) return null;
+    const title = (rules.replace(/<image_gen>/i, '').split('\n').map(x => x.trim()).find(Boolean) || '').replace(/\s+—.*$/, '').slice(0, 80);
+    const before = rules.split(/\n\s*\d*\.?\s*NEGATIVE\b/i)[0];
+    const quoted = [...before.matchAll(/(?:^|\n)\s*'([^\n]{60,})'\s*(?=\n|$)/g)].map(m => m[1]);
+    const suffix = quoted.length ? quoted[quoted.length - 1].trim() : '';
+    const avoid = (rules.match(/'(Avoid:[^\n]*?)'\s*(?:\n|$)/i) || [])[1] || '';
+    if (!suffix || /\{\{STYLE\}\}/.test(suffix)) return null;
+    return { title, suffix, avoid: /\{\{AVOID\}\}/.test(avoid) ? '' : avoid };
+}
+
+function slayApiCurrentStyle() {
+    const s = getSettings();
+    return { name: s.slayStyleName || 'Как в пресете', text: s.slayStyle || '', customId: s.slayStyleCustomId || '', inPreset: slayStyleInPreset() };
+}
+
+// The style catalogue: the picker's cache, fetched once if there is none.
+async function slayApiStyles(opts = {}) {
+    let site = null;
+    try {
+        const c = JSON.parse(localStorage.getItem(SLAY_STYLES_CACHE_KEY) || 'null');
+        if (c?.v === STYLE_CACHE_EXT_VERSION && Array.isArray(c.styles)) site = c.styles;
+    } catch (_) { }
+    if (!site || opts.refresh) {
+        try {
+            const resp = await fetch(SLAY_STYLES_BASE);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const fresh = slayParseStyleCards(await resp.text(), SLAY_STYLES_BASE);
+            site = fresh;
+            try { localStorage.setItem(SLAY_STYLES_CACHE_KEY, JSON.stringify({ v: STYLE_CACHE_EXT_VERSION, styles: fresh, etag: resp.headers.get('ETag') || '', lastModified: resp.headers.get('Last-Modified') || '', ts: Date.now() })); } catch (_) { }
+        } catch (e) { iigLog('WARN', 'API styles fetch failed:', e?.message); site = site || []; }
+    }
+    return {
+        current: slayApiCurrentStyle(),
+        favs: slayStyleFavs().slice(),
+        tagLabels: { ...SLAY_STYLE_TAG_LABELS },
+        site: site.map(x => ({ name: x.name, tags: (x.tags || []).slice(), desc: x.desc || '', images: (x.images || []).slice(0, 4), stability: x.stability || '', stabilityText: x.stabilityText || '', text: x.prompt || '' })),
+        mine: slayCustomStyles().map(c => ({ id: c.id, name: c.name || '', desc: c.note || '', images: c.cover ? [c.cover] : [], text: c.desc || '' })),
+    };
+}
+
+window.slayImages = Object.freeze({
+    version: SLAY_API_VERSION,
+    slayVersion: SLAY_VERSION,
+    status: slayApiStatus,
+    inFrame: slayApiInFrame,
+    generate: slayApiGenerate,
+    rewrite: slayApiRewrite,
+    currentStyle: slayApiCurrentStyle,
+    styles: slayApiStyles,
+    hasPresetRules: () => !!slayStudioPresetRules(),
+    presetStyle: slayApiPresetStyle,
+});
+
+const SLAY_STUDIO_WIN_KEY = 'slay_studio_window';
+const slayStudioIsDesktop = () => {
+    try { return window.matchMedia('(hover: hover) and (pointer: fine)').matches || window.innerWidth >= 900; } catch (_) { return window.innerWidth >= 900; }
+};
+function slayStudioWindow(ov) {
+    const box = ov.querySelector('.slay-studio');
+    const head = ov.querySelector('.slay-studio-top');
+    const modeBtn = ov.querySelector('.slay-studio-mode');
+    let st = { mode: 'float', x: null, y: null, w: 420, h: 640 };
+    try { Object.assign(st, JSON.parse(localStorage.getItem(SLAY_STUDIO_WIN_KEY) || '{}')); } catch (_) { }
+    const save = () => { try { localStorage.setItem(SLAY_STUDIO_WIN_KEY, JSON.stringify(st)); } catch (_) { } };
+    const MIN_W = 340, MIN_H = 420;
+    const clamp = () => {
+        const vw = window.innerWidth, vh = window.innerHeight;
+        st.w = Math.max(MIN_W, Math.min(st.w || 420, vw - 16));
+        st.h = Math.max(MIN_H, Math.min(st.h || 640, vh - 16));
+        if (st.x == null || st.y == null) { st.x = vw - st.w - 24; st.y = Math.max(8, Math.round((vh - st.h) / 2)); }
+        st.x = Math.max(8, Math.min(st.x, vw - st.w - 8));
+        st.y = Math.max(8, Math.min(st.y, vh - st.h - 8));
+    };
+    const place = () => {
+        box.style.left = st.x + 'px'; box.style.top = st.y + 'px';
+        box.style.width = st.w + 'px'; box.style.height = st.h + 'px';
+    };
+    const unplace = () => { for (const p of ['left', 'top', 'width', 'height']) box.style.removeProperty(p); };
+    const apply = () => {
+        const float = slayStudioIsDesktop() && st.mode !== 'full';
+        ov.classList.toggle('slay-studio-float', float);
+        if (float) { clamp(); place(); } else unplace();
+        modeBtn.hidden = !slayStudioIsDesktop();
+        modeBtn.textContent = float ? '⤢' : '⤡';
+        modeBtn.title = float ? 'Развернуть на весь экран' : 'Свернуть в окно';
+    };
+    // Drag by the header (not by its buttons).
+    let drag = null;
+    const onDown = (e) => {
+        if (!ov.classList.contains('slay-studio-float') || e.button !== 0 || e.target.closest('button')) return;
+        drag = { dx: e.clientX - st.x, dy: e.clientY - st.y };
+        head.setPointerCapture?.(e.pointerId);
+        e.preventDefault();
+    };
+    const onMove = (e) => {
+        if (!drag) return;
+        st.x = e.clientX - drag.dx; st.y = e.clientY - drag.dy;
+        clamp(); place();
+    };
+    const onUp = () => { if (drag) { drag = null; save(); } };
+    head.addEventListener('pointerdown', onDown);
+    head.addEventListener('pointermove', onMove);
+    head.addEventListener('pointerup', onUp);
+    head.addEventListener('pointercancel', onUp);
+    // Resize by the corner (CSS resize): read the size back after the user lets go.
+    let rsT = 0;
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        if (!ov.classList.contains('slay-studio-float') || drag) return;
+        const r = box.getBoundingClientRect();
+        if (Math.abs(r.width - st.w) < 1 && Math.abs(r.height - st.h) < 1) return;
+        st.w = Math.round(r.width); st.h = Math.round(r.height);
+        clearTimeout(rsT);
+        rsT = setTimeout(() => { clamp(); place(); save(); }, 250);
+    }) : null;
+    ro?.observe(box);
+    const onWinResize = () => apply();
+    window.addEventListener('resize', onWinResize);
+    // The overlay always spans the viewport, so its size is the viewport's —
+    // a backup for browsers/emulators that skip the window resize event.
+    let lastVp = '';
+    const vpo = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        const k = window.innerWidth + 'x' + window.innerHeight;
+        if (k !== lastVp) { lastVp = k; apply(); }
+    }) : null;
+    vpo?.observe(ov);
+    apply();
+    return {
+        toggle() { st.mode = st.mode === 'full' ? 'float' : 'full'; save(); apply(); },
+        destroy() { ro?.disconnect(); vpo?.disconnect(); window.removeEventListener('resize', onWinResize); clearTimeout(rsT); },
+    };
+}
+
+function openSlayStudio() {
+    const ctx = SillyTavern.getContext();
+    if (!ctx.chatId && !ctx.groupId) { toastr.info('Открой чат — студия хранит картинки в нём', 'Студия'); return; }
+    document.querySelector('.slay-studio-ov')?.remove();
+    if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
+        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false });
+    }
+    const esc = sanitizeForHtml;
+    const opts = slayStudioWhoOptions();
+    if (!_studio.who) _studio.who = new Set(opts.filter(o => o.kind === 'char' || o.kind === 'user' || o.member).map(o => o.key).slice(0, 3));
+    const ratios = SLAY_STUDIO_RATIOS.filter(r => VALID_ASPECT_RATIOS.includes(r));
+    const title = ctx.groupId ? 'группа' : (ctx.name2 || '');
+
+    const ov = document.createElement('div');
+    ov.className = 'slay-studio-ov';
+    // SLAYbuttons gathers small things hanging in <body> into its menu and
+    // once took this window for a button. data-sbg-in = «already placed, skip».
+    ov.setAttribute('data-sbg-in', '');
+    ov.innerHTML = `
+      <div class="slay-studio" role="dialog" aria-label="Студия">
+        <div class="slay-studio-top"><b>🎨 Студия</b><span class="slay-studio-sub">${esc(title)}</span><button type="button" class="slay-studio-mode" data-act="mode" title="Развернуть"></button><button type="button" class="slay-studio-x" data-act="close" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
+        <div class="slay-studio-cols">
+          <div class="slay-studio-left">
+            <div class="slay-studio-lbl">Что рисуем</div>
+            <div class="slay-studio-chips" data-zone="tasks"></div>
+            <div class="slay-studio-lbl">Кто и где в кадре</div>
+            <div class="slay-studio-chips" data-zone="who"></div>
+            <div class="slay-studio-note" data-zone="refline"></div>
+            <div class="slay-studio-lbl">Идея (как хочешь, можно по-русски)</div>
+            <textarea class="text_pole slay-studio-idea" rows="3" placeholder="например: они на кухне ночью, она смеётся над его шуткой"></textarea>
+            <label class="slay-studio-check"><input type="checkbox" data-zone="raw"> Без переделки — отправить в генерацию как есть</label>
+            <div data-zone="rw">
+              <div class="slay-studio-lbl">Контекст для переделки</div>
+              <div class="slay-studio-seg" data-zone="ctx"></div>
+              <div class="slay-studio-note" data-zone="ctxnote"></div>
+              <button type="button" class="slay-studio-btn ai" data-act="rewrite">✨ Переделать по пресету</button>
+              <div class="slay-studio-lbl">Готовый промпт (можно поправить)</div>
+              <textarea class="text_pole slay-studio-prompt" rows="6" placeholder="Нажми «Переделать по пресету» — здесь появится промпт для генерации"></textarea>
+            </div>
+            <div class="slay-studio-set">
+              <label>Стиль<select data-zone="style"><option value="">Как в настройках SLAY</option><option value="none">Без добавки стиля</option></select></label>
+              <label>Соотношение<select data-zone="ar">${ratios.map(r => `<option value="${r}">${r}</option>`).join('')}</select></label>
+              <label>Сколько<select data-zone="n"><option>1</option><option>2</option><option>4</option></select></label>
+            </div>
+            <button type="button" class="slay-studio-btn go" data-act="go">Нарисовать</button>
+            <div class="slay-studio-note" data-zone="cost"></div>
+          </div>
+          <div class="slay-studio-right">
+            <div class="slay-studio-lbl">Результаты — только здесь, пока сама не отправишь в чат</div>
+            <div class="slay-studio-res" data-zone="res"></div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const win = slayStudioWindow(ov);
+    const $z = (z) => ov.querySelector(`[data-zone="${z}"]`);
+    const ideaEl = ov.querySelector('.slay-studio-idea');
+    const promptEl = ov.querySelector('.slay-studio-prompt');
+    $z('ar').value = ratios.includes(_studio.ar) ? _studio.ar : (ratios[0] || '1:1');
+    $z('n').value = String(_studio.n);
+    $z('raw').checked = _studio.raw;
+    $z('style').value = _studio.noStyle ? 'none' : '';
+
+    const drawLeft = () => {
+        $z('tasks').innerHTML = Object.entries(SLAY_STUDIO_TASKS).map(([k, t]) => `<button type="button" class="slay-studio-chip${_studio.task === k ? ' on' : ''}" data-task="${k}">${esc(t.label)}</button>`).join('');
+        $z('who').innerHTML = opts.length
+            ? opts.map(o => `<button type="button" class="slay-studio-chip${o.kind === 'loc' ? ' loc' : ''}${_studio.who.has(o.key) ? ' on' : ''}" data-who="${esc(o.key)}">${o.kind === 'loc' ? '📍 ' : ''}${esc(o.label)}</button>`).join('')
+            : '<span class="slay-studio-note">Рефов нет — нарисуется только по тексту.</span>';
+        const picked = opts.filter(o => _studio.who.has(o.key)).map(o => o.label);
+        $z('refline').textContent = picked.length
+            ? `Рефы уйдут: ${picked.join(', ')} (+ одежда из гардероба). Имена в промпте не нужны: выбрала кнопкой — значит в кадре. Локация — максимум одна.`
+            : 'Никого не выбрано — рисуется только по тексту.';
+        $z('ctx').innerHTML = Object.entries(SLAY_STUDIO_CTX).map(([k, [l]]) => `<button type="button" class="${_studio.ctx === k ? 'on' : ''}" data-ctx="${k}">${l}</button>`).join('');
+        $z('ctxnote').textContent = SLAY_STUDIO_CTX[_studio.ctx][1] + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
+        $z('rw').hidden = _studio.raw;
+        $z('cost').textContent = slayStudioCostText();
+    };
+
+    const drawResults = () => {
+        const items = slayStudioItems(false);
+        const busy = Array.from({ length: _studio.busy }, () => '<div class="slay-studio-card busy"><div class="slay-studio-spin"><i class="fa-solid fa-spinner fa-spin"></i> рисую…</div></div>').join('');
+        if (!items.length && !_studio.busy) {
+            $z('res').innerHTML = '<div class="slay-studio-empty">Здесь появятся картинки.<br>Они хранятся в студии этого чата, пока не удалишь.</div>';
+            return;
+        }
+        $z('res').innerHTML = busy + items.slice().reverse().map(it => `
+            <div class="slay-studio-card" data-id="${esc(it.id)}">
+              <img loading="lazy" decoding="async" alt="" src="${esc(it.path)}">
+              <div class="slay-studio-cap" title="${esc(it.prompt || '')}">${it.sent ? '✓ в чате · ' : ''}${esc(it.idea || it.prompt || '')}</div>
+              <div class="slay-studio-acts">
+                <button type="button" data-card="chat">В чат</button>
+                <button type="button" data-card="ref">Сделать рефом</button>
+                ${slayCanEditImage() ? '<button type="button" data-card="edit">🪄 Правка</button>' : ''}
+                <button type="button" data-card="dl" title="Скачать">⬇</button>
+                <button type="button" data-card="del" title="Удалить">🗑</button>
+              </div>
+            </div>`).join('');
+    };
+
+    const close = () => { win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); };
+    // Escape only while focus is inside the Studio: in window mode the chat
+    // stays usable and its own Escape must keep working.
+    const onKey = (e) => {
+        if (e.key !== 'Escape' || document.querySelector('.slay-choose-ov:not(.slay-studio-ov)')) return;
+        if (!ov.contains(document.activeElement)) return;
+        e.stopPropagation(); close();
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    const runGenerate = async ({ prompt, idea, who, ar, n, noStyle, editSource, editText }) => {
+        if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'Студия'); return; }
+        _studio.busy += n; drawResults();
+        const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
+            studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText,
+        }).then(async (res) => {
+            if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
+            const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
+            const items = slayStudioItems();
+            items.push({ id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false });
+            slayStudioSave();
+        }).finally(() => { _studio.busy = Math.max(0, _studio.busy - 1); if (ov.isConnected) drawResults(); }));
+        const out = await Promise.allSettled(jobs);
+        const bad = out.filter(r => r.status === 'rejected');
+        if (bad.length) toastr.error(`Не нарисовалось ${bad.length} из ${n}: ${bad[0].reason?.message || bad[0].reason}`, 'Студия', { timeOut: 8000 });
+        else toastr.success('Готово. В чат ничего не ушло.', 'Студия', { timeOut: 2500 });
+    };
+
+    const onClick = async (e) => {
+        const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-card]');
+        if (!t) { if (e.target === ov) close(); return; }
+        if (t.dataset.act === 'close') { close(); return; }
+        if (t.dataset.act === 'mode') { win.toggle(); return; }
+        if (t.dataset.task) {
+            _studio.task = t.dataset.task;
+            const task = SLAY_STUDIO_TASKS[_studio.task];
+            const want = new Set();
+            for (const k of task.who) {
+                if (k === 'loc') { const l = opts.find(o => o.kind === 'loc'); if (l) want.add(l.key); }
+                else for (const o of opts) if (o.kind === k || (k === 'char' && o.member)) { want.add(o.key); if (k === 'char') break; }
+            }
+            _studio.who = want;
+            if (task.ctx) _studio.ctx = task.ctx;
+            if (task.ar && ratios.includes(task.ar)) { _studio.ar = task.ar; $z('ar').value = task.ar; }
+            const filled = slayStudioFill(opts);
+            if (filled !== null) ideaEl.value = filled;
+            drawLeft(); return;
+        }
+        if (t.dataset.who) {
+            const k = t.dataset.who;
+            if (_studio.who.has(k)) _studio.who.delete(k); else _studio.who.add(k);
+            const filled = slayStudioFill(opts);
+            if (filled !== null) ideaEl.value = filled;
+            drawLeft(); return;
+        }
+        if (t.dataset.ctx) { _studio.ctx = t.dataset.ctx; drawLeft(); return; }
+        if (t.dataset.act === 'rewrite') {
+            const idea = ideaEl.value.trim();
+            if (!idea) { toastr.info('Напиши идею', 'Студия'); return; }
+            if (t.disabled) return;
+            t.disabled = true; const was = t.textContent; t.textContent = 'Переделываю…';
+            try {
+                const names = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
+                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names);
+            } catch (err) { toastr.error('Переделка не вышла: ' + (err?.message || err), 'Студия'); }
+            finally { t.disabled = false; t.textContent = was; }
+            return;
+        }
+        if (t.dataset.act === 'go') {
+            const idea = ideaEl.value.trim();
+            const prompt = _studio.raw ? idea : (promptEl.value.trim() || '');
+            if (!prompt) { toastr.info(_studio.raw ? 'Напиши идею' : 'Сначала «Переделать по пресету» — или поставь «Без переделки»', 'Студия'); return; }
+            runGenerate({ prompt, idea, who: slayStudioWhoToOption(opts, _studio.who), ar: $z('ar').value, n: _studio.n, noStyle: _studio.noStyle });
+            return;
+        }
+        if (t.dataset.card) {
+            const id = t.closest('.slay-studio-card')?.dataset.id;
+            const items = slayStudioItems(false);
+            const item = items.find(x => x.id === id);
+            if (!item) return;
+            const act = t.dataset.card;
+            if (act === 'dl') { iigSaveMedia(item.path, { mode: 'download' }); return; }
+            if (act === 'del') {
+                const i = items.indexOf(item);
+                if (i >= 0) items.splice(i, 1);
+                slayStudioSave();
+                // A picture already in the chat keeps its file.
+                if (!item.sent) slayDeleteStoredImage(item.path).catch(() => { });
+                drawResults(); return;
+            }
+            if (act === 'chat') {
+                const where = await slayChoose('В чат', 'Куда поставить картинку? Тегом SLAY, так что ↻ и «Правка» в чате тоже будут работать.', [
+                    { key: 'new', label: 'Новым сообщением', primary: true },
+                    { key: 'append', label: 'К последнему сообщению бота' },
+                ]);
+                if (!where) return;
+                if (await slayStudioToChat(item, where)) { toastr.success('Картинка в чате', 'Студия', { timeOut: 2000 }); drawResults(); }
+                return;
+            }
+            if (act === 'ref') {
+                const key = await slayChoose('Сделать рефом', 'В какой слот? Картинка сожмётся и встанет рефом, имя в слоте останется прежним.', slayRefSlotChoices().map(([k, l]) => ({ key: k, label: l })));
+                if (key) await slayImageToSlot(item.path, key, slayRefSlotChoices().find(([k]) => k === key)?.[1]);
+                return;
+            }
+            if (act === 'edit') {
+                const text = await slayPromptInput('Что поменять? (картинка уйдёт рефом, это платный запрос)', '');
+                if (!text || !String(text).trim()) return;
+                runGenerate({ prompt: item.prompt, idea: '🪄 ' + String(text).trim(), who: item.who || {}, ar: item.ar, n: 1, noStyle: _studio.noStyle, editSource: item.path, editText: String(text).trim() });
+            }
+        }
+    };
+    // Isolation like the other SLAY dialogs: clicks must not reach ST's
+    // document handlers (they close drawers and popups underneath).
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) {
+        ov.addEventListener(type, (e) => { if (type === 'click') onClick(e); e.stopPropagation(); });
+    }
+    ov.addEventListener('keydown', (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
+    ov.addEventListener('change', (e) => {
+        const z = e.target.dataset?.zone;
+        if (z === 'raw') { _studio.raw = e.target.checked; drawLeft(); }
+        else if (z === 'n') { _studio.n = parseInt(e.target.value, 10) || 1; drawLeft(); }
+        else if (z === 'ar') _studio.ar = e.target.value;
+        else if (z === 'style') _studio.noStyle = e.target.value === 'none';
+    });
+    drawLeft();
+    drawResults();
+}
+
+// Button next to the wardrobe icon. Shown while generation is on.
+function slayInjectStudioBtn() {
+    const on = getSettings().enabled !== false;
+    let btn = document.getElementById('slay-studio-btn');
+    if (!on) { btn?.remove(); return; }
+    if (btn) return;
+    const host = document.getElementById('leftSendForm');
+    if (!host) return;
+    btn = document.createElement('div');
+    btn.id = 'slay-studio-btn';
+    btn.title = 'Студия SLAY — картинки не в чат';
+    btn.innerHTML = '<i class="fa-solid fa-palette"></i>';
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openSlayStudio(); });
+    host.appendChild(btn);
+}
+
 function initLightbox() {
     if (document.getElementById('slay_lightbox')) return;
     const overlay = document.createElement('div'); overlay.id = 'slay_lightbox'; overlay.className = 'iig-lightbox';
-    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><div class="iig-lightbox-bar"><span class="iig-lightbox-file"></span><button type="button" class="iig-lightbox-dl" title="Скачать файл"><i class="fa-solid fa-download"></i> Скачать</button><button type="button" class="iig-lightbox-share" title="Поделиться"><i class="fa-solid fa-share-nodes"></i> Поделиться</button><button type="button" class="iig-lightbox-asstyle" title="Сохранить как свой стиль"><i class="fa-solid fa-palette"></i> Как стиль</button></div></div>`;
+    overlay.innerHTML = `<div class="iig-lightbox-backdrop"></div><button class="iig-lightbox-close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button><div class="iig-lightbox-content"><img class="iig-lightbox-img" src="" alt=""><div class="iig-lightbox-caption"></div><div class="iig-lightbox-bar"><span class="iig-lightbox-file"></span><button type="button" class="iig-lightbox-dl" title="Скачать файл"><i class="fa-solid fa-download"></i> Скачать</button><button type="button" class="iig-lightbox-share" title="Поделиться"><i class="fa-solid fa-share-nodes"></i> Поделиться</button><button type="button" class="iig-lightbox-asstyle" title="Сохранить как свой стиль"><i class="fa-solid fa-palette"></i> Как стиль</button><button type="button" class="iig-lightbox-edit" title="Перерисовать с правкой"><i class="fa-solid fa-wand-magic-sparkles"></i> Правка</button><button type="button" class="iig-lightbox-prompt" title="Поправить промпт и перерисовать"><i class="fa-solid fa-pen"></i> Промпт</button><button type="button" class="iig-lightbox-asref" title="Поставить в слот рефа"><i class="fa-solid fa-user-plus"></i> Сделать рефом</button></div><div class="iig-lb-panel" hidden></div></div>`;
     document.body.appendChild(overlay);
     const close = (e) => {
         // CRITICAL: stop the event from bubbling to document. Otherwise ST's extensions
@@ -11978,7 +13662,7 @@ function initLightbox() {
         e.preventDefault(); e.stopPropagation();
         const img = overlay._chatImg;
         let prompt = '';
-        try { prompt = JSON.parse(img?.getAttribute('data-iig-instruction') || '{}')?.prompt || ''; } catch (_) { }
+        prompt = instrPrompt();
         const src = img?.getAttribute('src') || '';
         close();
         const found = slayStyleFromPrompt(prompt);
@@ -11988,6 +13672,99 @@ function initLightbox() {
         if (saved) toastr.success(`Стиль «${saved.name}» сохранён — он в «Выбрать стиль» → «Свой стиль»`, 'SLAY Images', { timeOut: 5000 });
     });
     const lbSrc = () => overlay.querySelector('.iig-lightbox-img').getAttribute('src') || '';
+    // ── «Правка» / «Промпт» / «Сделать рефом» ──
+    const editBtn = overlay.querySelector('.iig-lightbox-edit');
+    const promptBtn = overlay.querySelector('.iig-lightbox-prompt');
+    const asRefBtn = overlay.querySelector('.iig-lightbox-asref');
+    const panel = overlay.querySelector('.iig-lb-panel');
+    const chatSrc = () => overlay._chatImg?.getAttribute?.('src') || '';
+    const regenBtnOf = () => overlay._chatImg?.closest?.('.iig-img-wrap')?.querySelector('.iig-regen-btn') || null;
+    const instrPrompt = () => {
+        try { return iigNormalizeInstruction(JSON.parse(iigDecodeInstruction(overlay._chatImg?.getAttribute('data-iig-instruction') || '{}'))).prompt || ''; }
+        catch (_) { return ''; }
+    };
+    const runRegen = (next) => {
+        const btn = regenBtnOf();
+        if (!btn) { toastr.warning('У этой картинки нет кнопки ↻ — перерисовать не выйдет', 'SLAY Images'); return; }
+        if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'SLAY Images'); return; }
+        btn._slayNext = next;
+        close();
+        btn.click();
+    };
+    // The picture is sized to fill the screen, so an open panel used to hang
+    // off the bottom (a tall comic page left the slot chips out of sight).
+    // Shrink the picture by the panel's height while it is open.
+    const lbImg = overlay.querySelector('.iig-lightbox-img');
+    const fitPanel = () => {
+        lbImg.style.maxHeight = panel.hidden ? '' : `max(22vh, calc(100dvh - 200px - ${panel.offsetHeight + 8}px))`;
+    };
+    const openPanel = (kind) => {
+        if (!panel.hidden && panel.dataset.kind === kind) { panel.hidden = true; fitPanel(); return; }
+        panel.dataset.kind = kind;
+        const esc = sanitizeForHtml;
+        if (kind === 'edit') {
+            panel.innerHTML = `<div class="iig-lb-panel-t">Что поменять?</div>
+                <div class="iig-lb-panel-hint">Картинка уйдёт рефом, модель поменяет только то, что напишешь. Это новый платный запрос, как ↻.</div>
+                <div class="iig-lb-chips">${['ночь', 'улыбается', 'без очков', 'крупнее лицо'].map(c => `<button type="button" class="iig-lb-chip" data-chip="${c}">${c}</button>`).join('')}</div>
+                <textarea class="text_pole iig-lb-text" rows="2" placeholder="например: сделай ночь, сними очки"></textarea>
+                <div class="iig-lb-row"><button type="button" class="iig-lb-go" data-act="edit">Перерисовать с правкой</button></div>`;
+        } else if (kind === 'prompt') {
+            panel.innerHTML = `<div class="iig-lb-panel-t">Промпт этой картинки</div>
+                <div class="iig-lb-panel-hint">Поправь текст — новый промпт запишется в тег, следующий ↻ возьмёт его.</div>
+                <textarea class="text_pole iig-lb-text" rows="6">${esc(instrPrompt())}</textarea>
+                <div class="iig-lb-row"><button type="button" class="iig-lb-btn" data-act="reset">Вернуть как было</button><button type="button" class="iig-lb-go" data-act="prompt">↻ Перерисовать</button></div>`;
+        } else {
+            const keys = [['char', '{{char}}'], ['user', '{{user}}'], ...[0, 1, 2, 3].map(i => [`npc-${i}`, `NPC ${i + 1}`]), ...[...Array(LOC_SLOTS).keys()].map(i => [`loc-${i}`, `Локация ${i + 1}`])];
+            panel.innerHTML = `<div class="iig-lb-panel-t">В какой слот?</div>
+                <div class="iig-lb-panel-hint">Картинка сожмётся и встанет рефом. Имя в слоте останется прежним — проверь его.</div>
+                <div class="iig-lb-chips">${keys.map(([k, l]) => `<button type="button" class="iig-lb-chip" data-slot="${k}">${esc(l)}</button>`).join('')}</div>`;
+        }
+        panel.hidden = false;
+        fitPanel();
+        panel.querySelector('textarea')?.focus();
+    };
+    panel.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const t = e.target.closest('[data-chip],[data-act],[data-slot]');
+        if (!t) return;
+        const ta = panel.querySelector('.iig-lb-text');
+        if (t.dataset.chip && ta) { ta.value = ta.value.trim() ? `${ta.value.trim()}, ${t.dataset.chip}` : t.dataset.chip; ta.focus(); return; }
+        if (t.dataset.act === 'reset' && ta) { ta.value = instrPrompt(); return; }
+        if (t.dataset.act === 'edit') {
+            const text = (ta?.value || '').trim();
+            if (!text) { toastr.info('Напиши, что поменять', 'SLAY Images'); return; }
+            runRegen({ editText: text, editSource: chatSrc() });
+            return;
+        }
+        if (t.dataset.act === 'prompt') {
+            const text = (ta?.value || '').trim();
+            if (!text) { toastr.info('Промпт пустой', 'SLAY Images'); return; }
+            runRegen({ prompt: text });
+            return;
+        }
+        if (t.dataset.slot) {
+            const src = chatSrc();
+            const slots = findAllSlotsByKey(t.dataset.slot);
+            if (!src || src.startsWith('data:')) { toastr.warning('Картинка ещё не сохранена', 'SLAY Images'); return; }
+            if (!slots.length) { toastr.warning('Не нашла слоты рефов — открой настройки SLAY один раз', 'SLAY Images'); return; }
+            if (await slayImageToSlot(src, t.dataset.slot, t.textContent)) { panel.hidden = true; fitPanel(); }
+        }
+    });
+    // Typing in the panel must not reach the chat's hotkeys.
+    panel.addEventListener('keydown', (e) => e.stopPropagation());
+    editBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel('edit'); });
+    promptBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel('prompt'); });
+    asRefBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel('asref'); });
+    overlay.addEventListener('slay-lightbox-open', () => {
+        panel.hidden = true;
+        fitPanel();
+        const hasInstr = !!overlay._chatImg?.getAttribute?.('data-iig-instruction');
+        const hasRegen = !!regenBtnOf();
+        editBtn.style.display = hasInstr && hasRegen && slayCanEditImage() ? '' : 'none';
+        promptBtn.style.display = hasInstr && hasRegen ? '' : 'none';
+        const src = chatSrc();
+        asRefBtn.style.display = overlay._chatImg && src && !src.startsWith('data:') ? '' : 'none';
+    });
     overlay.addEventListener('slay-lightbox-open', () => {
         const src = lbSrc();
         let name = '';
@@ -12124,7 +13901,6 @@ function initLightbox() {
         }
         if (!img || !isOurImage(img)) return;
         if (!img.closest('#chat')) return; // only chat images
-        console.log('[IIG-LB] OPEN', (img.getAttribute('src') || '').slice(-60));
         e.preventDefault(); e.stopPropagation();
         overlay._chatImg = img;
         overlay.querySelector('.iig-lightbox-img').src = img.src;
@@ -12137,7 +13913,7 @@ function initLightbox() {
 
 function updateHeaderStatusDot() {
     const settings = getSettings();
-    const header = document.querySelector('.inline-drawer-header');
+    const header = document.querySelector('.slay-hd')?.closest('.inline-drawer-header');
     if (!header) return;
     let dot = header.querySelector('.iig-header-dot');
     if (!dot) { dot = document.createElement('span'); dot.className = 'iig-header-dot'; const chevron = header.querySelector('.inline-drawer-icon'); if (chevron) header.insertBefore(dot, chevron); else header.appendChild(dot); }
@@ -12185,6 +13961,7 @@ function updateHeaderStatusDot() {
         createSettingsUI();
         addButtonsToExistingMessages();
         initLightbox();
+        setTimeout(slayInjectStudioBtn, 600);
         updateHeaderStatusDot();
         initMobileSaveListeners();
         // Attach regen buttons to pre-existing generated images in chat
@@ -12214,6 +13991,7 @@ function updateHeaderStatusDot() {
             restoreRefsFromLocalStorage();
             addButtonsToExistingMessages();
             renderRefSlots();
+            slayInjectStudioBtn();
             attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true });
             // Pictures that finished while another chat was open (P6).
             iigApplyPendingResults().catch(e => iigLog('WARN', 'pending results apply failed:', e?.message));

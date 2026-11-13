@@ -2064,6 +2064,7 @@
 .iig-slot-options-row {
     display: flex;
     gap: 6px;
+    flex-wrap: wrap;
 }
 .iig-slot-option-btn {
     flex: 1;
@@ -3819,3 +3820,196 @@
 .slay-orph-lbmeta { font-size: 12.5px; opacity: 0.8; text-align: center; line-height: 1.5; word-break: break-all; }
 .slay-orph-lbrow { display: flex; gap: 8px; width: 100%; }
 .slay-orph-lbrow .slay-choose-b { flex: 1; }
+
+/* exp.10: lightbox «Правка» / «Промпт» / «Сделать рефом» */
+.iig-lightbox-edit, .iig-lightbox-prompt, .iig-lightbox-asref {
+    display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px;
+    border-radius: 18px; background: rgba(244, 114, 182, 0.2); border: 1px solid rgba(244, 114, 182, 0.3);
+    color: #f9a8d4; font-size: 0.85em; line-height: 1; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.iig-lightbox-edit:hover, .iig-lightbox-prompt:hover, .iig-lightbox-asref:hover { background: rgba(244, 114, 182, 0.35); }
+.iig-lb-panel { width: min(520px, 90vw); box-sizing: border-box; background: rgba(20, 18, 26, 0.96); border: 1px solid rgba(244, 114, 182, 0.3); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 2; color: #eee; }
+.iig-lb-panel[hidden] { display: none; }
+.iig-lb-panel-t { font-weight: 600; color: #f9a8d4; font-size: 0.95em; }
+.iig-lb-panel-hint { font-size: 0.78em; opacity: 0.7; line-height: 1.45; }
+.iig-lb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.iig-lb-chip { border: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.05); color: inherit; border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 0.82em; cursor: pointer; }
+.iig-lb-chip:hover { border-color: rgba(244, 114, 182, 0.6); }
+.iig-lb-panel .iig-lb-text { width: 100%; box-sizing: border-box; resize: vertical; font-size: 0.88em; line-height: 1.45; margin: 0; }
+.iig-lb-row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.iig-lb-btn, .iig-lb-go { border-radius: 9px; padding: 7px 14px; font: inherit; font-size: 0.85em; cursor: pointer; border: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: inherit; }
+.iig-lb-go { background: rgba(244, 114, 182, 0.85); border-color: rgba(244, 114, 182, 0.9); color: #17171d; font-weight: 600; }
+
+/* exp.10: location ref slots + library tabs */
+.iig-ref-slot-loc .iig-ref-thumb { object-fit: cover; }
+.iig-refs-loc-hint { font-size: 0.72em; opacity: 0.6; margin: 4px 0 0; text-align: center; }
+.iig-lib-kinds { display: flex; gap: 6px; margin: 2px 0 8px; }
+.iig-lib-kind { flex: 1; padding: 6px; border-radius: 9px; font: inherit; font-size: 0.85em; cursor: pointer; color: inherit; background: rgba(255,255,255,0.05); border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.15)); }
+.iig-lib-kind.on { border-color: var(--slay-pink); background: color-mix(in srgb, var(--slay-pink) 18%, transparent); }
+
+/* exp.11: Студия */
+#slay-studio-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 8px; color: rgba(255,255,255,0.35); cursor: pointer; font-size: 14px; flex-shrink: 0; margin: 0 2px; transition: all var(--slay-transition); }
+#slay-studio-btn:hover { background: var(--slay-pink-soft); color: var(--slay-pink); }
+.slay-studio-ov { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; z-index: 100000; background: rgba(6, 6, 10, 0.88); display: flex; align-items: flex-start; justify-content: center; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
+.slay-studio { width: 100%; max-width: 980px; margin: auto; background: #16161c; border: 1px solid color-mix(in srgb, var(--slay-pink) 26%, transparent); border-radius: 14px; color: var(--SmartThemeBodyColor, #e8e8ee); font-size: 13.5px; overflow: hidden; }
+.slay-studio-top { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.slay-studio-top b { color: var(--slay-pink); font-size: 1.05em; }
+.slay-studio-sub { opacity: 0.6; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slay-studio-x { margin-left: auto; background: none; border: 0; color: inherit; opacity: 0.6; font-size: 1.1em; cursor: pointer; padding: 4px 8px; }
+.slay-studio-cols { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); }
+.slay-studio-left { padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; border-right: 1px solid rgba(255,255,255,0.08); min-width: 0; }
+.slay-studio-right { padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+@media (max-width: 760px) { .slay-studio-cols { grid-template-columns: 1fr; } .slay-studio-left { border-right: 0; border-bottom: 1px solid rgba(255,255,255,0.08); } }
+.slay-studio-lbl { font-size: 0.72em; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; font-weight: 700; margin-top: 2px; }
+.slay-studio-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.slay-studio-chip { border: 1px solid rgba(255,255,255,0.16); background: transparent; color: inherit; border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 0.9em; cursor: pointer; }
+.slay-studio-chip.on { background: color-mix(in srgb, var(--slay-pink) 22%, transparent); border-color: var(--slay-pink); }
+.slay-studio-note { font-size: 0.82em; opacity: 0.65; line-height: 1.45; }
+.slay-studio-left textarea { width: 100%; box-sizing: border-box; resize: vertical; margin: 0; font-size: 0.95em; line-height: 1.45; }
+.slay-studio-check { display: flex; gap: 6px; align-items: center; font-size: 0.86em; opacity: 0.85; cursor: pointer; }
+.slay-studio-left [data-zone="rw"] { display: flex; flex-direction: column; gap: 9px; }
+.slay-studio-left [data-zone="rw"][hidden] { display: none; }
+.slay-studio-seg { display: flex; flex-wrap: wrap; gap: 3px; background: rgba(255,255,255,0.05); border-radius: 9px; padding: 3px; }
+.slay-studio-seg button { flex: 1; border: 0; background: transparent; color: inherit; opacity: 0.7; font: inherit; font-size: 0.86em; padding: 6px 8px; border-radius: 7px; cursor: pointer; min-width: 0; }
+.slay-studio-seg button.on { background: var(--slay-pink); color: #17171d; opacity: 1; font-weight: 600; }
+.slay-studio-btn { border-radius: 9px; padding: 9px 12px; font: inherit; cursor: pointer; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: inherit; }
+.slay-studio-btn.ai { border-color: rgba(92, 194, 141, 0.6); background: rgba(92, 194, 141, 0.14); align-self: flex-start; }
+.slay-studio-btn.go { background: var(--slay-pink); border-color: var(--slay-pink); color: #17171d; font-weight: 700; }
+.slay-studio-btn:disabled { opacity: 0.6; cursor: wait; }
+.slay-studio-set { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.slay-studio-set label { display: flex; flex-direction: column; gap: 4px; font-size: 0.78em; opacity: 0.8; }
+.slay-studio-res { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: max-content; gap: 10px; }
+.slay-studio-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 11px; overflow: hidden; display: flex; flex-direction: column; }
+.slay-studio-card img { width: 100%; display: block; background: #000; min-height: 80px; }
+.slay-studio-cap { font-size: 0.75em; opacity: 0.65; padding: 6px 8px 0; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.slay-studio-acts { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; }
+.slay-studio-acts button { flex: 1 1 auto; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.06); color: inherit; border-radius: 7px; padding: 5px 6px; font: inherit; font-size: 0.75em; cursor: pointer; white-space: nowrap; }
+.slay-studio-spin { aspect-ratio: 1; display: grid; place-items: center; opacity: 0.7; font-size: 0.85em; }
+.slay-studio-empty { grid-column: 1 / -1; border: 1px dashed rgba(255,255,255,0.15); border-radius: 11px; padding: 22px; text-align: center; opacity: 0.65; line-height: 1.5; }
+
+/* exp.12: Студия as a floating window on PC */
+.slay-studio-mode { background: none; border: 0; color: inherit; opacity: 0.6; font-size: 1.1em; cursor: pointer; padding: 4px 6px; margin-left: auto; }
+.slay-studio-mode[hidden] { display: none; }
+.slay-studio-mode:not([hidden]) + .slay-studio-x { margin-left: 0; }
+.slay-studio-ov.slay-studio-float { background: transparent; pointer-events: none; overflow: hidden; z-index: 10060; padding: 0; } /* above chat and the phone window (10050); ST popups are top-layer dialogs */
+.slay-studio-float .slay-studio { pointer-events: auto; position: fixed; margin: 0; max-width: none; min-width: 340px; min-height: 420px; resize: both; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6); }
+.slay-studio-float .slay-studio-top { cursor: move; user-select: none; touch-action: none; flex: none; }
+.slay-studio-float .slay-studio-cols { grid-template-columns: 1fr; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.slay-studio-float .slay-studio-left { border-right: 0; border-bottom: 1px solid rgba(255,255,255,0.08); }
+
+/* Whose an outfit is: short names under the card title */
+.sw-outfit-owners {
+    display: block;
+    font-size: 10px;
+    color: #f0a0c0;
+    opacity: .8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Locations block folded away */
+.slay-locs-toggle { cursor: pointer; }
+.slay-locs-toggle i { font-size: 9px; margin-left: 4px; transition: transform .15s; }
+.slay-locs-off .slay-locs-toggle i { transform: rotate(-90deg); }
+.slay-locs-off .iig-refs-locs,
+.slay-locs-off .iig-refs-loc-hint { display: none; }
+
+/* Group: where the user photo was taken from */
+.slay-ref-seed-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    line-height: 1.35;
+    border: 1px solid rgba(251, 191, 36, .45);
+    border-radius: 8px;
+    background: rgba(251, 191, 36, .08);
+}
+.slay-ref-seed-note span { flex: 1; }
+.slay-ref-seed-note .menu_button { margin: 0; white-space: nowrap; }
+
+/* iOS draws hairline seams across the veil while the picture is pinch-zoomed:
+   the veil and the picture get their own layers so they are not re-tiled. */
+.iig-lightbox.open { transform: translateZ(0); -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+.iig-lightbox.open .iig-lightbox-img { will-change: transform; -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+
+/* Header in the extensions panel: wordmark instead of emoji */
+.slay-hd { display: inline-flex; align-items: center; white-space: nowrap; }
+.slay-hd-s {
+    font-style: italic;
+    font-weight: 800;
+    letter-spacing: .02em;
+    padding-right: 2px;
+    font-size: 1.15em;
+    /* Themes put a dark text-shadow on headers; over transparent text it
+       paints on top of the gradient and turns it muddy. */
+    text-shadow: none;
+    background: var(--slay-pink-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+.slay-hd-sp { width: .9em; height: .9em; margin: 0 .1em .4em -.3em; color: var(--slay-pink-bright); flex: none; }
+.slay-hd-i { font-size: .7em; font-weight: 600; letter-spacing: .22em; text-transform: uppercase; opacity: .9; }
+
+/* Locations: description, «Сейчас здесь», many-refs plate */
+.iig-ref-slot-loc .iig-ref-thumb-wrap { position: relative; }
+.slay-loc-badge { position: absolute; left: 3px; bottom: 3px; padding: 1px 5px; border-radius: 6px; font-size: 9px; line-height: 1.4; background: rgba(0, 0, 0, .7); color: #fff; pointer-events: none; }
+.slay-loc-badge[hidden] { display: none; }
+.iig-ref-slot.slay-loc-here-on { border-color: var(--slay-pink); box-shadow: 0 0 0 1px var(--slay-pink) inset; }
+.slay-loc-text-only .iig-ref-empty-icon { color: var(--slay-pink-bright); }
+.slay-loc-here { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; margin-top: 8px; font-size: 12px; }
+.slay-loc-here-t { opacity: .7; }
+.slay-loc-here-note { width: 100%; font-size: 11px; opacity: .6; line-height: 1.35; }
+.slay-loc-chip { border: 1px solid rgba(255, 255, 255, .18); background: rgba(255, 255, 255, .05); color: inherit; border-radius: 999px; padding: 4px 11px; font: inherit; font-size: 12px; cursor: pointer; }
+.slay-loc-chip.on { border-color: var(--slay-pink); color: var(--slay-pink-bright); background: var(--slay-pink-soft); }
+.slay-loc-chip:disabled { opacity: .35; cursor: default; }
+.slay-locs-off .slay-loc-here { display: none; }
+.slay-refs-warn { margin-top: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.4; border: 1px solid rgba(251, 191, 36, .45); border-radius: 8px; background: rgba(251, 191, 36, .08); }
+.slay-loc-dialog { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(8, 8, 14, .8); }
+.slay-loc-box { width: min(460px, 100%); max-height: 92dvh; overflow-y: auto; box-sizing: border-box; padding: 14px; border-radius: 14px; background: rgba(24, 22, 30, .98); border: 1px solid rgba(244, 114, 182, .35); color: #eee; }
+.slay-loc-title { font-weight: 700; color: var(--slay-pink-bright); margin-bottom: 4px; }
+.slay-loc-box label { display: block; margin: 10px 0 4px; font-size: 12px; opacity: .7; }
+.slay-loc-box .text_pole { width: 100%; box-sizing: border-box; margin: 0; }
+.slay-loc-box textarea.text_pole { resize: vertical; min-height: 90px; }
+.slay-loc-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.slay-loc-row .menu_button { margin: 0; width: auto; white-space: nowrap; }
+.slay-loc-row .menu_button:disabled { opacity: .4; cursor: default; }
+.slay-loc-note { font-size: 11px; opacity: .65; line-height: 1.35; }
+.slay-loc-mode-note { margin-top: 6px; }
+.slay-loc-foot { margin-top: 12px; }
+
+/* Phone: the style name and its two buttons take the full width under the label */
+@media (max-width: 700px) {
+    #slay_style_row > .flex1 { grid-column: 1 / -1; }
+}
+
+/* «С аватарки» for an NPC slot: pick a character card */
+.slay-av-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 52dvh; overflow-y: auto; }
+.slay-av-item { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 8px; border: 1px solid transparent; background: rgba(255, 255, 255, .04); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.slay-av-item:hover { border-color: var(--slay-pink); }
+.slay-av-item img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex: none; }
+
+/* Ref cards: export / import dialogs */
+.slay-card-looks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.slay-card-look { position: relative; width: 84px; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-size: 11px; text-align: center; }
+button.slay-card-look { cursor: pointer; }
+.slay-card-look img { display: block; width: 84px; height: 104px; object-fit: cover; border-radius: 8px; }
+.slay-card-look.off img { opacity: .28; }
+.slay-card-lbl { display: block; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .8; }
+.slay-card-ck { position: absolute; top: 4px; left: 4px; width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; font-size: 12px; background: rgba(0, 0, 0, .6); border: 1px solid #fff; color: var(--slay-pink-bright); }
+.slay-card-cv { position: absolute; top: 4px; right: 4px; padding: 1px 5px; border-radius: 6px; font-size: 9px; font-weight: 700; background: var(--slay-pink); color: #1a0f16; }
+.slay-card-opt { display: block; width: 100%; margin-top: 6px; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, .18); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.slay-card-opt.on { border-color: var(--slay-pink); background: var(--slay-pink-soft); }
+.slay-card-opt span { display: block; font-size: 11px; opacity: .65; }
+.slay-lib-desc { margin: 6px 0; padding: 7px 9px; border-radius: 8px; font-size: 12px; line-height: 1.4; background: rgba(0, 0, 0, .25); }
+.slay-lib-desc.none { opacity: .55; font-style: italic; }
+
+/* Experimental: the pinned place reaches the bot with generation off */
+.slay-loc-nogen { margin-top: 6px; font-size: 12px; }
+.slay-loc-nogen i { color: var(--slay-pink-bright); margin-right: 2px; }
+.slay-locs-off .slay-loc-nogen { display: none; }

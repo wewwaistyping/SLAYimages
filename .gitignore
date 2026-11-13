@@ -28,3 +28,6 @@ slay-iig-logs-*.txt
 *.orig
 *.rej
 *_DRAFT_*.md
+
+# Local changelog of experimental builds
+CHANGELOG-exp.md
