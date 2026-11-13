@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.18';
+const SLAY_VERSION = '5.2.0-exp.19';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4048,7 +4048,12 @@ function slayUpdateLocationPrompt() {
         ctx.setExtensionPrompt(SLAY_LOC_PROMPT_KEY, text, 1, 0);
     } catch (e) { iigLog('WARN', 'location prompt:', e?.message); }
 }
-const SLAY_LOCATION_NOTE = 'use it ONLY for the place: interior, architecture, furniture, light. Do NOT copy people, pose, camera angle or framing from it';
+const SLAY_LOCATION_NOTE = 'use it ONLY for the place: interior, architecture, furniture, light. Do NOT copy people, pose, camera angle, framing or its art style and rendering from it — draw the place in the style of the prompt';
+// A face reference is often a finished picture: a costume, a background, a
+// caption, a badge. With a short prompt the model copied all of it (a «VIP»
+// star from the reference ended up on a sweater). Only the person carries over.
+const SLAY_FACE_NOTE = 'take ONLY the face, hair and build from it. Do NOT copy its clothing, background, pose, text, captions, logos or badges — clothing comes from the prompt or the outfit reference';
+const SLAY_PERSON_NOTE = 'keep this person\'s appearance. Do NOT copy the background, pose, text, captions, logos or badges of that picture';
 const SLAY_EDIT_NOTE = 'is the CURRENT PICTURE to edit — keep it exactly as it is except for the requested change';
 
 // ── External blocks + context images (from sillyimages-master) ──
@@ -5275,9 +5280,9 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     const refNames = options.refNames || [];
     const imgCount = Math.min(referenceImages.length, MAX_GENERATION_REFERENCE_IMAGES);
     const instructionFor = (n, label, name) => {
-        if (label === 'char_face' || label === 'user_face') return `Image ${n} is ${name}'s FACE — preserve this face exactly.`;
+        if (label === 'char_face' || label === 'user_face') return `Image ${n} is ${name}'s FACE — preserve this face exactly; ${SLAY_FACE_NOTE}.`;
         if (label === 'char_outfit' || label === 'user_outfit') return `Image ${n} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
-        if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') return `Image ${n} is ${name} — preserve this appearance exactly.`;
+        if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') return `Image ${n} is ${name} — ${SLAY_PERSON_NOTE}.`;
         if (label === 'context') return `Image ${n} is style/mood context.`;
         if (label === 'location') return `Image ${n} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
         if (label === 'edit_source') return `Image ${n} ${SLAY_EDIT_NOTE}.`;
@@ -5454,13 +5459,11 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         const name = refNames[i] || '';
 
         let instruction = '';
-        if (label === 'char_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
-        else if (label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly.`;
+        if (label === 'char_face' || label === 'user_face') instruction = `Image ${i + 1} is ${name}'s FACE — preserve this face exactly; ${SLAY_FACE_NOTE}.`;
         else if (label === 'char_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
         else if (label === 'user_outfit') instruction = `Image ${i + 1} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
-        else if (label === 'npc_char') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
-        else if (label === 'npc_user') instruction = `Image ${i + 1} is ${name} — preserve this appearance exactly.`;
-        else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — preserve this appearance exactly.`;
+        else if (label === 'npc_char' || label === 'npc_user') instruction = `Image ${i + 1} is ${name} — ${SLAY_PERSON_NOTE}.`;
+        else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — ${SLAY_PERSON_NOTE}.`;
         else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
         else if (label === 'location') instruction = `Image ${i + 1} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
         else if (label === 'edit_source') instruction = `Image ${i + 1} ${SLAY_EDIT_NOTE}.`;
@@ -7306,12 +7309,12 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         // 1. Character avatar — only if char is mentioned
         if (canPush() && shouldSendCharReference) {
             const u = await getPreferredCharacterReferenceDataUrl(refs, settings);
-            if (u) pushRef(u, `${charDisplayName} (character)`);
+            if (u) pushRef(u, `${charDisplayName} (character: face, hair and build only — not the clothing, background or any text/badges of that picture)`);
         }
         // 2. User avatar — only if user is mentioned
         if (canPush() && shouldSendUserReference) {
             const u = await getPreferredUserReferenceDataUrl(refs, settings);
-            if (u) pushRef(u, `${userDisplayName} (user)`);
+            if (u) pushRef(u, `${userDisplayName} (user: face, hair and build only — not the clothing, background or any text/badges of that picture)`);
         }
         // 3. Wardrobe outfits — only for the character(s) mentioned in the prompt
         if (window.slayWardrobe?.isReady()) {
@@ -7339,21 +7342,21 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         for (const npc of matchedNpcs) {
             if (!canPush()) break;
             const url = await getDataUrl(npc);
-            if (url) { pushRef(url, `${npc.name} (NPC)`); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
+            if (url) { pushRef(url, `${npc.name} (NPC: appearance only — not the background or any text/badges of that picture)`); iigLog('INFO', `NPC (naistera): ${npc.name}`); }
             if (npc._member && canPush() && swS.sendOutfitImageBot !== false && window.slayWardrobe?.isReady()) {
                 const ob64 = await window.slayWardrobe.getActiveOutfitBase64('bot', npc._member);
                 if (ob64) pushRef(`data:image/png;base64,${ob64}`, `${npc._member} outfit`);
             }
         }
-        for (const x of apiRefs) if (!x.place && canPush()) pushRef('data:image/jpeg;base64,' + x.b64, `${x.name} (NPC)`);
+        for (const x of apiRefs) if (!x.place && canPush()) pushRef('data:image/jpeg;base64,' + x.b64, `${x.name} (NPC: appearance only — not the background or any text/badges of that picture)`);
         // 4b. One location, last
         const locN = sceneLocImg;
         if (locN && canPush()) {
             const url = await getDataUrl(locN);
-            if (url && pushRef(url, `${swNameList(locN.name)[0] || locN.name} (location only: setting, not people/pose/camera)`)) { sceneLocImgSent = true; iigLog('INFO', `Location (naistera): ${locN.name}`); }
+            if (url && pushRef(url, `${swNameList(locN.name)[0] || locN.name} (location only: setting, not people/pose/camera, not its art style)`)) { sceneLocImgSent = true; iigLog('INFO', `Location (naistera): ${locN.name}`); }
         } else if (locN) iigLog('INFO', `Location "${locN.name}" skipped — no room left for references`);
         const apiPlaceN = apiRefs.find(x => x.place);
-        if (!locN && apiPlaceN && canPush()) pushRef('data:image/jpeg;base64,' + apiPlaceN.b64, `${apiPlaceN.name} (location only: setting, not people/pose/camera)`);
+        if (!locN && apiPlaceN && canPush()) pushRef('data:image/jpeg;base64,' + apiPlaceN.b64, `${apiPlaceN.name} (location only: setting, not people/pose/camera, not its art style)`);
         // 5. Context refs (previous images)
         if (settings.imageContextEnabled && !studio) {
             const contextRefs = await collectPreviousContextReferences(options.messageId, 'dataUrl', normalizeImageContextCount(settings.imageContextCount));
@@ -13399,6 +13402,9 @@ function openSlayStudio() {
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
         Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false });
     }
+    // A raw idea skips the preset's image rules, so the model fills the gaps
+    // from the references. Every open starts with the rewrite on.
+    _studio.raw = false;
     const esc = sanitizeForHtml;
     const opts = slayStudioWhoOptions();
     if (!_studio.who) _studio.who = new Set(opts.filter(o => o.kind === 'char' || o.kind === 'user' || o.member).map(o => o.key).slice(0, 3));
@@ -13423,6 +13429,7 @@ function openSlayStudio() {
             <div class="slay-studio-lbl">Идея (как хочешь, можно по-русски)</div>
             <textarea class="text_pole slay-studio-idea" rows="3" placeholder="например: они на кухне ночью, она смеётся над его шуткой"></textarea>
             <label class="slay-studio-check"><input type="checkbox" data-zone="raw"> Без переделки — отправить в генерацию как есть</label>
+            <div class="slay-studio-rawnote" data-zone="rawnote" hidden>Правила картинок из пресета не применятся. Опиши одежду, место и кадр сама — иначе модель скопирует их с рефов.</div>
             <div data-zone="rw">
               <div class="slay-studio-lbl">Контекст для переделки</div>
               <div class="slay-studio-seg" data-zone="ctx"></div>
@@ -13467,6 +13474,7 @@ function openSlayStudio() {
         $z('ctx').innerHTML = Object.entries(SLAY_STUDIO_CTX).map(([k, [l]]) => `<button type="button" class="${_studio.ctx === k ? 'on' : ''}" data-ctx="${k}">${l}</button>`).join('');
         $z('ctxnote').textContent = SLAY_STUDIO_CTX[_studio.ctx][1] + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
         $z('rw').hidden = _studio.raw;
+        if ($z('rawnote')) $z('rawnote').hidden = !_studio.raw;
         $z('cost').textContent = slayStudioCostText();
     };
 

@@ -4013,3 +4013,7 @@ button.slay-card-look { cursor: pointer; }
 .slay-loc-nogen { margin-top: 6px; font-size: 12px; }
 .slay-loc-nogen i { color: var(--slay-pink-bright); margin-right: 2px; }
 .slay-locs-off .slay-loc-nogen { display: none; }
+
+/* Studio: what «Без переделки» skips */
+.slay-studio-rawnote { margin: 4px 0 2px; padding: 6px 9px; font-size: 12px; line-height: 1.4; border: 1px solid rgba(251, 191, 36, .45); border-radius: 8px; background: rgba(251, 191, 36, .08); }
+.slay-studio-rawnote[hidden] { display: none; }
