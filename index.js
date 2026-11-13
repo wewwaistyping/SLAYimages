@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.19';
+const SLAY_VERSION = '5.2.0-exp.20';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4014,16 +4014,30 @@ function slayLocMode(l) {
     if (!String(l?.desc || '').trim()) return 'img';
     return ['img', 'desc', 'both'].includes(l.mode) ? l.mode : 'img';
 }
-// «Сейчас здесь»: one pinned place per chat, kept in the chat's metadata by name.
+// «Сейчас здесь»: one pinned place per chat, kept in the chat's metadata.
+// By name AND picture: two slots called «arcade» (the hall, the entrance) are
+// two places, and the one picked is the one that goes. A pin saved by an older
+// build has the name only and falls back to the first place with that name.
+function slayLocKey(l) { return l ? `${l.name || ''}|${l.imagePath || (l.imageBase64 ? 'inline' : '')}` : ''; }
 function slayHereName() {
     try { return String(SillyTavern.getContext().chatMetadata?.slay_loc_here || ''); } catch (_) { return ''; }
 }
-function slaySetHere(name) {
+function slayHereKey() {
+    try { return String(SillyTavern.getContext().chatMetadata?.slay_loc_here_key || ''); } catch (_) { return ''; }
+}
+function slaySetHere(loc) {
     const ctx = SillyTavern.getContext();
     if (!ctx.chatMetadata) return;
-    if (name) ctx.chatMetadata.slay_loc_here = name; else delete ctx.chatMetadata.slay_loc_here;
+    if (loc && loc.name) { ctx.chatMetadata.slay_loc_here = loc.name; ctx.chatMetadata.slay_loc_here_key = slayLocKey(loc); }
+    else { delete ctx.chatMetadata.slay_loc_here; delete ctx.chatMetadata.slay_loc_here_key; }
     try { (ctx.saveMetadataDebounced || ctx.saveMetadata)?.(); } catch (_) { }
     slayUpdateLocationPrompt();
+}
+function slayIsHere(l) {
+    if (!l || !l.name) return false;
+    const key = slayHereKey();
+    if (key) return slayLocKey(l) === key;
+    return l.name === slayHereName();
 }
 // Every location the current chat can use (group: all members').
 function slaySceneLocs() {
@@ -4031,7 +4045,10 @@ function slaySceneLocs() {
 }
 function slayHereLocation(list = slaySceneLocs()) {
     const n = slayHereName();
-    return n ? (list.find(l => l && l.name === n && slayLocUsable(l)) || null) : null;
+    if (!n) return null;
+    const key = slayHereKey();
+    return (key && list.find(l => slayLocUsable(l) && slayLocKey(l) === key))
+        || list.find(l => l && l.name === n && slayLocUsable(l)) || null;
 }
 // The pinned place reaches the chat model the way a worn outfit does.
 const SLAY_LOC_PROMPT_KEY = 'slay_location';
@@ -8819,7 +8836,7 @@ function renderRefSlots() {
             badge.textContent = m === 'desc' ? 'описание' : m === 'both' ? 'фото + описание' : '';
         }
         slot.classList.toggle('slay-loc-text-only', slayLocUsable(locs[i]) && !slayLocHasImage(locs[i]));
-        slot.classList.toggle('slay-loc-here-on', !!locs[i]?.name && locs[i].name === slayHereName());
+        slot.classList.toggle('slay-loc-here-on', !!locs[i] && locs[i] === slayHereLocation(locs));
     }
     slayRenderHereRow();
     slayUpdateLocationPrompt();
@@ -8836,16 +8853,22 @@ function slayRenderHereRow() {
             const b = e.target.closest('[data-here]');
             if (!b) return;
             e.preventDefault();
-            slaySetHere(b.dataset.here === slayHereName() ? '' : b.dataset.here);
+            const all = slaySceneLocs().filter(slayLocUsable);
+            const cur = slayHereLocation(all);
+            const picked = b.dataset.here ? all.find(l => slayLocKey(l) === b.dataset.here) || null : null;
+            slaySetHere(picked && picked !== cur ? picked : null);
             renderRefSlots();
         });
     }
     const esc = sanitizeForHtml;
     const locs = slaySceneLocs().filter(slayLocUsable);
-    const here = locs.some(l => l.name === slayHereName()) ? slayHereName() : '';
+    const here = slayHereLocation(locs);
+    // Same name twice: number them so the two chips can be told apart.
+    const seen = {};
+    const label = (l) => { const n = swNameList(l.name)[0] || l.name; const same = locs.filter(x => (swNameList(x.name)[0] || x.name) === n); if (same.length < 2) return n; seen[n] = (seen[n] || 0) + 1; return `${n} ${seen[n]}`; };
     row.style.display = locs.length ? '' : 'none';
     row.innerHTML = `<span class="slay-loc-here-t">Сейчас здесь:</span><button type="button" class="slay-loc-chip${here ? '' : ' on'}" data-here="">нигде</button>`
-        + locs.map(l => `<button type="button" class="slay-loc-chip${l.name === here ? ' on' : ''}" data-here="${esc(l.name)}">${esc(swNameList(l.name)[0] || l.name)}</button>`).join('')
+        + locs.map(l => `<button type="button" class="slay-loc-chip${l === here ? ' on' : ''}" data-here="${esc(slayLocKey(l))}"${l.imagePath ? ` title="${esc(l.desc || l.name)}"` : ''}>${esc(label(l))}</button>`).join('')
         + '<div class="slay-loc-here-note">Отмеченное идёт на каждую картинку чата, описание видит и бот. Без отметки — место, названное в промпте.</div>';
 }
 
@@ -8952,11 +8975,11 @@ function slayEditLocationDialog(index) {
         const name = nameEl.value.trim();
         const desc = ta.value.trim();
         if (!name && (desc || hasImg)) { toastr.info('Дай месту название — по нему оно находится в промпте', 'SLAY Images'); nameEl.focus(); return; }
-        const wasHere = !!loc.name && loc.name === slayHereName();
+        const wasHere = slayIsHere(loc);
         loc.name = name;
         if (desc) loc.desc = desc; else delete loc.desc;
         loc.mode = mode;
-        if (wasHere) slaySetHere(name);
+        if (wasHere) slaySetHere(name ? loc : null);
         saveSettings();
         renderRefSlots();
         close();
@@ -9377,8 +9400,10 @@ function applyPathToSlot(slotEl, refType, npcIndex, savedPath) {
     else if (refType === 'npc' || refType === 'loc') {
         const list = slayRefList(s, refType);
         if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
+        const wasHere = refType === 'loc' && slayIsHere(list[npcIndex]);
         list[npcIndex].imageBase64 = '';
         list[npcIndex].imagePath = savedPath;
+        if (wasHere) slaySetHere(list[npcIndex]);
     }
     saveSettings();
     if (slotEl) {
@@ -9468,6 +9493,28 @@ let _swLibKind = 'people';
 // while the strip still belongs to the same person.
 let _swLastRenderedChar = null;
 
+// A saved place keeps a description per picture, like a look's label: one
+// «arcade» can hold the hall and the entrance, each with its own text.
+// Places saved before this kept one description on the whole place; it still
+// answers for pictures that have none of their own.
+function slayLookDesc(ch, look) {
+    const own = look && typeof look.desc === 'string' ? look.desc.trim() : '';
+    if (own) return { desc: own, mode: ['img', 'desc', 'both'].includes(look.mode) ? look.mode : 'img' };
+    const old = String(ch?.desc || '').trim();
+    return old ? { desc: old, mode: ['img', 'desc', 'both'].includes(ch.mode) ? ch.mode : 'img' } : { desc: '', mode: '' };
+}
+function slaySetLookDesc(ch, look, desc, mode) {
+    if (!ch || !look) return;
+    const d = String(desc || '').trim();
+    if (d) { look.desc = d; look.mode = ['img', 'desc', 'both'].includes(mode) ? mode : 'img'; }
+    else { delete look.desc; delete look.mode; }
+    // The old place-wide text has been handed down to every picture once one is edited.
+    if (ch.desc !== undefined) {
+        for (const l of ch.looks || []) if (l !== look && !l.desc && ch.desc) { l.desc = ch.desc; l.mode = ch.mode || 'img'; }
+        delete ch.desc; delete ch.mode;
+    }
+}
+
 // ── Ref cards: a saved character or place as one PNG ──
 // The file is the cover look as a normal picture; a tEXt chunk keyed
 // SLAY_REF_CARD_KEY holds base64(UTF-8 JSON):
@@ -9504,11 +9551,10 @@ function slayExportSavedChar(charId) {
     const isPlace = ch.kind === 'place';
     const first = swNameList(ch.names)[0] || 'без имени';
     const picked = new Set(ch.looks.map(l => l.id));
-    const MODES = { img: 'картинку', desc: 'описание', both: 'картинку и описание' };
     const { ov, close } = slayCardOverlay(`
         <div class="slay-loc-title">Экспорт: ${esc(first)}</div>
         <div class="slay-loc-note">${isPlace ? 'Названия' : 'Имена'} в карточке: ${esc(ch.names || '—')}</div>
-        ${isPlace ? `<div class="slay-loc-note">Описание${ch.desc ? ':' : ' пустое — в карточку уйдут картинка и названия.'}</div>${ch.desc ? `<div class="slay-lib-desc">${esc(ch.desc)}</div><div class="slay-loc-note">Отправлять: ${MODES[ch.mode] || MODES.img}</div>` : ''}` : ''}
+        ${isPlace ? '<div class="slay-loc-note">У каждой картинки места своё описание — оно уйдёт вместе с ней.</div>' : ''}
         <div class="slay-loc-note">${ch.looks.length > 1 ? 'Какие образы войдут. Тап — убрать или вернуть. Первый отмеченный станет обложкой файла.' : 'В файл войдёт эта картинка.'}</div>
         <div class="slay-card-looks"></div>
         <div class="slay-loc-note slay-card-count"></div>
@@ -9517,7 +9563,7 @@ function slayExportSavedChar(charId) {
     const go = ov.querySelector('.slay-card-go');
     const draw = () => {
         const cover = ch.looks.find(l => picked.has(l.id));
-        grid.innerHTML = ch.looks.map(l => `<button type="button" class="slay-card-look${picked.has(l.id) ? '' : ' off'}" data-look="${esc(l.id)}"><img alt="" loading="lazy" decoding="async" src="${esc(l.path)}"><span class="slay-card-ck">${picked.has(l.id) ? '✓' : ''}</span>${l === cover && ch.looks.length > 1 ? '<span class="slay-card-cv">обложка</span>' : ''}<span class="slay-card-lbl">${esc(l.label || '—')}</span></button>`).join('');
+        grid.innerHTML = ch.looks.map(l => `<button type="button" class="slay-card-look${picked.has(l.id) ? '' : ' off'}" data-look="${esc(l.id)}" title="${isPlace ? esc(slayLookDesc(ch, l).desc || 'без описания') : ''}"><img alt="" loading="lazy" decoding="async" src="${esc(l.path)}"><span class="slay-card-ck">${picked.has(l.id) ? '✓' : ''}</span>${l === cover && ch.looks.length > 1 ? '<span class="slay-card-cv">обложка</span>' : ''}<span class="slay-card-lbl">${esc(l.label || '—')}</span></button>`).join('');
         ov.querySelector('.slay-card-count').textContent = `Войдёт ${picked.size} из ${ch.looks.length} · один файл`;
         go.disabled = !picked.size;
     };
@@ -9550,9 +9596,10 @@ function slayExportSavedChar(charId) {
             for (const l of looks) {
                 const b64 = await loadRefImageAsBase64(l.path);
                 if (!b64) throw new Error(`образ «${l.label || 'без подписи'}» не загрузился`);
-                payload.looks.push({ label: l.label || '', image: b64 });
+                const entry = { label: l.label || '', image: b64 };
+                if (isPlace) { const ld = slayLookDesc(ch, l); if (ld.desc) { entry.desc = ld.desc; entry.mode = ld.mode; } }
+                payload.looks.push(entry);
             }
-            if (isPlace && ch.desc) { payload.desc = ch.desc; payload.mode = ['img', 'desc', 'both'].includes(ch.mode) ? ch.mode : 'img'; }
             const text = png.enc(JSON.stringify(payload));
             if (text.length > SLAY_REF_CARD_MAX) throw new Error('образов слишком много для одного файла — убери часть');
             const out = new Blob([png.insertText(bytes, SLAY_REF_CARD_KEY, text)], { type: 'image/png' });
@@ -9582,14 +9629,12 @@ function slayParseRefCard(p) {
         const label = String(l?.label || '').slice(0, 80);
         const image = typeof l?.image === 'string' ? l.image.replace(/\s+/g, '') : '';
         const ok = !!image && /^[A-Za-z0-9+/]+=*$/.test(image);
+        const desc = kind === 'place' ? String(l?.desc || p.desc || '').slice(0, 2000).trim() : '';
+        const mode = ['img', 'desc', 'both'].includes(l?.mode) ? l.mode : (['img', 'desc', 'both'].includes(p.mode) ? p.mode : 'img');
         // The cover may come without its file (then the PNG itself is used).
-        if (ok || i === 0) looks.push({ label, image: ok ? image : null });
+        if (ok || i === 0) looks.push({ label, image: ok ? image : null, desc, mode });
     });
-    return {
-        kind, names, looks,
-        desc: kind === 'place' ? String(p.desc || '').slice(0, 2000).trim() : '',
-        mode: ['img', 'desc', 'both'].includes(p.mode) ? p.mode : '',
-    };
+    return { kind, names, looks };
 }
 
 function slayImportRefCard() {
@@ -9635,12 +9680,11 @@ function slayImportRefCardDialog(card, bytes) {
     const same = getSavedChars().find(c => (c.kind === 'place') === isPlace && swNameList(c.names).some(n => want.has(n.toLowerCase()))) || null;
     const coverUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
     let merge = !!same;
-    const MODES = { img: 'картинку', desc: 'описание', both: 'картинку и описание' };
     const { ov, close } = slayCardOverlay(`
         <div class="slay-loc-title">В файле — ${isPlace ? 'локация' : 'персонаж'}</div>
         <div class="slay-loc-note">${isPlace ? 'Названия' : 'Имена'}: ${esc(card.names)}${card.looks.length > 1 ? ` · образов: ${card.looks.length}` : ''}</div>
         <div class="slay-card-looks">${card.looks.map((l, i) => `<div class="slay-card-look"><img alt="" src="${i === 0 ? coverUrl : 'data:image/jpeg;base64,' + l.image}"><span class="slay-card-lbl">${esc(l.label || '—')}</span></div>`).join('')}</div>
-        ${isPlace && card.desc ? `<div class="slay-lib-desc">${esc(card.desc)}</div><div class="slay-loc-note">Отправлять: ${MODES[card.mode] || MODES.img}</div>` : ''}
+        ${isPlace ? card.looks.map((l, i) => l.desc ? `<div class="slay-lib-desc">${card.looks.length > 1 ? `<b>${i + 1}.</b> ` : ''}${esc(l.desc)}</div>` : '').join('') : ''}
         ${same ? `<div class="slay-loc-note">У тебя уже есть «${esc(swNameList(same.names)[0] || same.names)}» (образов: ${same.looks.length}). Что сделать?</div>
             <button type="button" class="slay-card-opt" data-merge="1"><b>Добавить образы к ${isPlace ? 'этой локации' : 'нему'}</b><span>Одинаковые картинки не задвоятся.</span></button>
             <button type="button" class="slay-card-opt" data-merge="0"><b>Создать ${isPlace ? 'отдельную' : 'отдельного'}</b><span>Будет две записи с одним именем.</span></button>` : ''}
@@ -9669,11 +9713,14 @@ function slayImportRefCardDialog(card, bytes) {
                     }
                     if (!path) throw new Error('файл не сохранился');
                     ch = saveLook({ charId: ch ? ch.id : null, names: ch ? '' : card.names, label: card.looks[i].label, path, kind: isPlace ? 'place' : '' }) || ch;
+                    // A picture that already had its own text keeps it.
+                    const lk = ch?.looks?.find(l => l.path === path);
+                    if (isPlace && lk && card.looks[i].desc && !lk.desc) slaySetLookDesc(ch, lk, card.looks[i].desc, card.looks[i].mode);
                     added++;
                 } catch (e) { failed++; iigLog('WARN', `ref card: look ${i} skipped: ${e?.message}`); }
             }
             if (!ch || !added) throw new Error('ни одна картинка не сохранилась');
-            if (isPlace && card.desc && !ch.desc) { ch.desc = card.desc; ch.mode = card.mode || 'img'; saveSettings(); }
+            if (isPlace) saveSettings();
             _swLibKind = isPlace ? 'places' : 'people';
             revealSavedChar(ch.id);
             renderSavedPortraits();
@@ -9805,7 +9852,7 @@ function renderSavedPortraits() {
                 <button class="iig-saved-btn iig-char-folders${inFolders.length ? ' on' : ''}" title="${inFolders.length ? 'Папки: ' + esc(inFolders.map(f => f.name).join(' · ')) : 'Папки'}"><i class="fa-solid fa-folder"></i></button>
                 <button class="iig-saved-btn slay-card-export" title="Экспорт карточкой — один файл, образы на выбор"><i class="fa-solid fa-file-export"></i></button>
             </div>
-            ${sel.kind === 'place' ? `<div class="slay-lib-desc${sel.desc ? '' : ' none'}">${esc(sel.desc || 'Описания нет — оно появится, если сохранить локацию из слота с описанием.')}</div>` : ''}
+            ${sel.kind === 'place' ? (() => { const ld = slayLookDesc(sel, look); return `<div class="slay-lib-desc${ld.desc ? '' : ' none'}">${esc(ld.desc || 'У этой картинки нет описания. Кнопка «Описание» ниже.')}</div>`; })() : ''}
             <div class="iig-look-strip">`;
         for (const l of sel.looks) {
             html += `<div class="iig-look${l.id === look.id ? ' on' : ''}" data-look="${esc(l.id)}" title="${esc(l.label || 'без подписи')}" tabindex="0">
@@ -9821,6 +9868,7 @@ function renderSavedPortraits() {
                 <button class="iig-look-tool" data-act="crop"><i class="fa-solid fa-crop-simple"></i><span>Обрезать</span></button>
                 <button class="iig-look-tool" data-act="replace"><i class="fa-solid fa-image"></i><span>Заменить</span></button>
                 <button class="iig-look-tool" data-act="label"><i class="fa-solid fa-pen"></i><span>Подпись</span></button>
+                ${sel.kind === 'place' ? '<button class="iig-look-tool" data-act="desc"><i class="fa-solid fa-file-lines"></i><span>Описание</span></button>' : ''}
                 <button class="iig-look-tool danger" data-act="remove"><i class="fa-solid fa-trash-can"></i><span>Убрать</span></button>
             </div>
             <div class="iig-look-assign">
@@ -10052,6 +10100,32 @@ function renderSavedPortraits() {
             return;
         }
 
+        if (act === 'desc') {
+            const cur = slayLookDesc(sel, look);
+            const esc = sanitizeForHtml;
+            let mode = cur.mode || 'img';
+            const MODES = [['img', 'Картинку'], ['desc', 'Описание'], ['both', 'Оба']];
+            const { ov, close } = slayCardOverlay(`
+                <div class="slay-loc-title">Описание: ${esc(swNameList(sel.names)[0] || sel.names)}${look.label ? ' — ' + esc(look.label) : ''}</div>
+                <div class="slay-card-looks"><div class="slay-card-look"><img alt="" src="${esc(look.path)}"></div></div>
+                <label class="slay-loc-note" style="display:block;margin-top:8px;">Описание этой картинки (по-английски, 1–3 предложения)</label>
+                <textarea class="text_pole slay-loc-desc" rows="5">${esc(cur.desc)}</textarea>
+                <div class="slay-loc-note" style="margin-top:8px;">Что отправлять на картинку, когда это место в слоте</div>
+                <div class="slay-loc-row">${MODES.map(([k, t]) => `<button type="button" class="slay-loc-chip" data-mode="${k}">${t}</button>`).join('')}</div>
+                <div class="slay-loc-row slay-loc-foot"><button type="button" class="menu_button slay-card-go">Сохранить</button><button type="button" class="menu_button slay-loc-cancel">Отмена</button></div>`);
+            const paint = () => { for (const b of ov.querySelectorAll('[data-mode]')) b.classList.toggle('on', b.dataset.mode === mode); };
+            paint();
+            ov.addEventListener('click', (e) => { const b = e.target.closest('[data-mode]'); if (b) { mode = b.dataset.mode; paint(); } });
+            ov.querySelector('.slay-card-go').addEventListener('click', () => {
+                slaySetLookDesc(sel, look, ov.querySelector('.slay-loc-desc').value, mode);
+                saveSettings();
+                renderSavedPortraits();
+                close();
+            });
+            ov.querySelector('.slay-loc-desc').focus();
+            return;
+        }
+
         if (act === 'label') {
             const next = await slayPromptInput('Подпись образа — чем этот отличается от остальных (Школа, Средневековье)', look.label || '');
             if (next !== null) relabelSavedLook(sel.id, look.id, next.trim());
@@ -10101,7 +10175,8 @@ function renderSavedPortraits() {
             if (refType === 'loc' && sel.kind === 'place') {
                 const l = slayRefList(getCurrentCharacterRefs(), 'loc')[npcIndex];
                 if (l) {
-                    if (sel.desc) { l.desc = sel.desc; l.mode = ['img', 'desc', 'both'].includes(sel.mode) ? sel.mode : 'img'; }
+                    const ld = slayLookDesc(sel, look);
+                    if (ld.desc) { l.desc = ld.desc; l.mode = ld.mode; }
                     else { delete l.desc; delete l.mode; }
                     saveSettings();
                     renderRefSlots();
@@ -10800,7 +10875,8 @@ function bindRefSlotEvents() {
                 const ch = saveLook({ charId: same ? same.id : null, names, path, kind: 'place' });
                 // The description travels with the place; an empty slot field
                 // does not wipe one the library already holds.
-                if (ch && String(ref.desc || '').trim()) { ch.desc = String(ref.desc).trim(); ch.mode = slayLocMode(ref); saveSettings(); }
+                const savedLook = ch?.looks?.find(l => l.path === path);
+                if (savedLook && String(ref.desc || '').trim()) { slaySetLookDesc(ch, savedLook, ref.desc, slayLocMode(ref)); saveSettings(); }
                 if (ch) { _swLibKind = 'places'; revealSavedChar(ch.id); }
                 openSavedPortraits({ scroll: true });
                 toastr.success(`Локация «${swNameList(names)[0]}» сохранена`, 'SLAY Images', { timeOut: 2200 });
@@ -10826,8 +10902,9 @@ function bindRefSlotEvents() {
             else if (refType === 'npc' || refType === 'loc') {
                 const list = slayRefList(s, refType);
                 if (!list[npcIndex]) list[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
-                if (refType === 'loc' && list[npcIndex].name && list[npcIndex].name === slayHereName()) slaySetHere(value);
+                const wasHere = refType === 'loc' && slayIsHere(list[npcIndex]);
                 list[npcIndex].name = value;
+                if (wasHere) slaySetHere(value ? list[npcIndex] : null);
             }
         };
         slot.querySelector('.iig-ref-desc-btn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); slayEditLocationDialog(npcIndex); });
