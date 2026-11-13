@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.20';
+const SLAY_VERSION = '5.2.0-exp.21';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -13186,10 +13186,15 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '') {
         model = typeof ctx.getChatCompletionModel === 'function' && ctx.mainApi === 'openai' ? String(ctx.getChatCompletionModel() || '') : '';
     } catch (_) { }
     let raw;
-    try { raw = await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: 900 }); }
+    // Thinking models spend the answer limit on reasoning first: 900 tokens
+    // ran out before any text (a 400 «output token limit was exhausted by
+    // model reasoning»). Only the tokens actually used are billed.
+    try { raw = await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: 8192 }); }
     catch (e) {
-        iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${e?.message || e}`);
-        if (/no message generated/i.test(String(e?.message || e))) throw new Error('модель вернула пустой ответ');
+        const msg = String(e?.message || e);
+        iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${msg}`);
+        if (/reasoning|token limit|max_tokens|max output tokens/i.test(msg)) throw new Error('модель чата истратила лимит ответа на размышления — снизь в пресете уровень размышлений (reasoning) или возьми модель без них');
+        if (/no message generated/i.test(msg)) throw new Error('модель вернула пустой ответ');
         throw e;
     }
     const { text, hadImage } = slayStudioCleanRewrite(raw);
