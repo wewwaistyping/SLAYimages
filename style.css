@@ -4020,3 +4020,12 @@ button.slay-card-look { cursor: pointer; }
 
 /* Studio: which preset toggle holds the image rules */
 .slay-studio-ruletog { width: 100%; box-sizing: border-box; margin: 2px 0 8px; }
+
+/* Studio keeps its own colours. The window is always dark, but the text
+   and the fields used to follow the chat theme: a light theme gave dark
+   text on the dark window and white fields in it. */
+.slay-studio { color: #e8e8ee; text-shadow: none; }
+.slay-studio .text_pole, .slay-studio select, .slay-studio textarea { background: rgba(255, 255, 255, 0.06) !important; color: #e8e8ee !important; border: 1px solid rgba(255, 255, 255, 0.16) !important; box-shadow: none !important; text-shadow: none; }
+.slay-studio textarea::placeholder { color: rgba(232, 232, 238, 0.45) !important; opacity: 1; }
+.slay-studio select option { background: #16161c; color: #e8e8ee; }
+.slay-studio-check input[type="checkbox"] { accent-color: var(--slay-pink); }
