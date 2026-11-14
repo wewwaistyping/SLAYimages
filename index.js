@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.28';
+const SLAY_VERSION = '5.2.0-exp.40';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -578,12 +578,15 @@ const SLAY_VERSION = '5.2.0-exp.28';
             if (!imagePath || !imagePath.includes('/wardrobe_refs/')) return false;
             const stillUsed = swGetSettings().items.some(o => o.id !== ignoreItemId && o.imagePath === imagePath);
             if (stillUsed) { swLog('INFO', `Not deleting ${imagePath} — another item still uses it`); return false; }
+            // Everything else that can point at the file: saved looks, ref slots, the ribbon.
+            const mine = swGetSettings().items.filter(o => o.imagePath === imagePath).length;
+            if (slayCountPathUses(imagePath) - mine > 0) { swLog('INFO', `Not deleting ${imagePath} — it is used outside the wardrobe`); return false; }
             const ctx = SillyTavern.getContext();
             const r = await fetch('/api/images/delete', {
                 method: 'POST', headers: ctx.getRequestHeaders(),
                 body: JSON.stringify({ path: imagePath.replace(/^\//, '') })
             });
-            if (r.ok) { swLog('INFO', `Deleted wardrobe image: ${imagePath}`); return true; }
+            if (r.ok) { swLog('INFO', `Deleted wardrobe image: ${imagePath}`); slayB64Forget(imagePath); return true; }
             swLog('WARN', `Delete failed (${r.status}) for ${imagePath}`);
             return false;
         } catch (e) { swLog('WARN', 'swDeleteImageFile failed:', e?.message); return false; }
@@ -606,15 +609,19 @@ const SLAY_VERSION = '5.2.0-exp.28';
     // ── Load wardrobe image from server path -> base64 ──
     async function swLoadImageAsBase64(path) {
         try {
+            const hit = slayB64Get(path);
+            if (hit) return hit;
             const response = await fetch(path);
             if (!response.ok) return null;
             const blob = await response.blob();
-            return await new Promise((resolve, reject) => {
+            const b64 = await new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onloadend = () => resolve(reader.result.split(',')[1]);
                 reader.onerror = reject;
                 reader.readAsDataURL(blob);
             });
+            slayB64Put(path, b64);
+            return b64;
         } catch (e) { swLog('WARN', `swLoadImageAsBase64 failed: ${path}`, e.message); return null; }
     }
 
@@ -648,8 +655,8 @@ const SLAY_VERSION = '5.2.0-exp.28';
         return images;
     }
 
-    async function swBuildCollage(type, member) {
-        const images = await swGetPartsImages(type, member);
+    async function swBuildCollage(type, member, loaded = null) {
+        const images = loaded || await swGetPartsImages(type, member);
         if (images.length < 2) return null; // 1 item = send as single ref, not collage
         const collageImages = images.slice(0, 6); // max 6
 
@@ -2184,7 +2191,9 @@ const SLAY_VERSION = '5.2.0-exp.28';
                     // in the bot's prompt, so the user must see (and can defuse)
                     // whatever the card author embedded there.
                     const edited = await swShowDescInput('🧥 Описание из карточки (можете отредактировать)', autoDesc);
-                    if (edited !== null) autoDesc = edited;
+                    // The text goes into the bot's prompt: unseen, it is not taken.
+                    if (edited === null) { toastr.info('Вещь не добавлена', 'Гардероб', { timeOut: 2500 }); return; }
+                    autoDesc = edited;
                 } else if (swGetSettings().autoDescribe !== false) {
                     // The spinner occupies the panel for the whole wait (see
                     // swDescribeWithSpinner). Escape / ✕ cancel the describe AND the
@@ -3093,7 +3102,7 @@ const SLAY_VERSION = '5.2.0-exp.28';
             // 1 item = return as single ref; 2+ = collage
             const images = await swGetPartsImages(type, member);
             if (images.length === 1) return images[0]; // single item, no collage needed
-            if (images.length >= 2) return await swBuildCollage(type, member);
+            if (images.length >= 2) return await swBuildCollage(type, member, images);
             return null;
         },
         // The equipped set for the status line (group-aware, unlike reading
@@ -3242,8 +3251,9 @@ function exportLogs() {
     const blob = new Blob([logsText], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `slay-iig-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`; a.click();
-    URL.revokeObjectURL(url);
+    a.href = url; a.download = `slay-iig-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     toastr.success('Логи экспортированы', 'SLAY Images');
 }
 
@@ -3614,6 +3624,7 @@ function persistRefsToLocalStorage() {
             iigLog('WARN', 'localStorage backup trimmed: ' + e.message);
         } catch (e2) { iigLog('WARN', 'persistRefsToLocalStorage failed:', e2.message); return; }
     }
+    try { localStorage.setItem(LS_KEY + '_at', String(savedAt)); } catch (_) { }
     // Stamp what the backup represents. restoreRefsFromLocalStorage applies a
     // backup only when it is NEWER than this, so a copy taken before the user
     // deleted a ref can no longer bring that ref back on the next chat switch.
@@ -3628,6 +3639,10 @@ function iigRefListEmpty(list) {
 
 function restoreRefsFromLocalStorage() {
     try {
+        // The stamp alone tells whether the backup can hold anything new; the
+        // backup itself (the whole ref store) is parsed only then.
+        const at = Number(localStorage.getItem(LS_KEY + '_at'));
+        if (at && !(at > (Number(getSettings().refsSavedAt) || 0))) return;
         const raw = localStorage.getItem(LS_KEY);
         if (!raw) return;
         const backup = JSON.parse(raw);
@@ -3663,6 +3678,8 @@ function restoreRefsFromLocalStorage() {
 
 function initMobileSaveListeners() {
     const flush = () => {
+        // Nothing waiting to be written: the backup is already up to date.
+        if (!_persistRefsTimer) return;
         // persistRefsToLocalStorage is the only one of these that can still finish
         // on pagehide. The debounced save is scheduled a second out and the page is
         // usually gone by then — harmless to ask for, useless to rely on.
@@ -3791,6 +3808,50 @@ function slaySeedGroupUser(settings, gid) {
     return grp;
 }
 
+// Looking at a character is enough to get it an empty set of ref slots and an
+// empty outfit record, and those stayed in the settings forever. Once per start
+// the wholly empty ones are dropped (they come back by themselves when needed).
+// The character and group on screen are left alone. → how many were dropped.
+function slayPruneEmptyStores() {
+    let n = 0;
+    try {
+        const ctx = SillyTavern.getContext();
+        if (ctx.groupId) return 0;
+        const here = getActiveCharacterName();
+        const settings = getSettings();
+        const hasText = (o, depth = 0) => {
+            if (typeof o === 'string') return o.trim() !== '';
+            if (!o || typeof o !== 'object' || depth > 6) return false;
+            return Object.values(o).some(v => hasText(v, depth + 1));
+        };
+        const store = settings.perCharacterRefs;
+        if (store && typeof store === 'object') {
+            for (const name of Object.keys(store)) {
+                if (name === here) continue;
+                const r = store[name];
+                // The names of the two main slots fill in by themselves; anything else is the user's.
+                const rest = r && typeof r === 'object'
+                    ? { ...r, charRef: { ...(r.charRef || {}), name: '' }, userRef: { ...(r.userRef || {}), name: '' } }
+                    : null;
+                if (!rest || !hasText(rest)) { delete store[name]; n++; }
+            }
+        }
+        const ws = ctx.extensionSettings?.slay_wardrobe;
+        const outfits = ws?.activeOutfits;
+        if (outfits && typeof outfits === 'object') {
+            const worn = (half) => half && typeof half === 'object' && Object.values(half).some(Boolean);
+            for (const key of Object.keys(outfits)) {
+                if (key === here) continue;
+                const co = outfits[key];
+                if (!co || (!worn(co.bot) && !worn(co.user))) { delete outfits[key]; n++; }
+            }
+        }
+        // A one-time safety copy from an old upgrade; the upgraded data has long been in use.
+        if (settings.savedPortraitsBackup !== undefined && Array.isArray(settings.savedChars) && settings.savedChars.length) { delete settings.savedPortraitsBackup; n++; }
+        if (n) { iigLog('INFO', `Swept ${n} empty leftover record(s) from the settings`); saveSettings(); }
+    } catch (e) { iigLog('WARN', 'sweep of empty records failed:', e?.message); }
+    return n;
+}
 function getCurrentCharacterRefs() {
     const settings = getSettings();
     const gid = SillyTavern.getContext().groupId;
@@ -3820,7 +3881,8 @@ function getCurrentCharacterRefs() {
     if (charName) {
         if (!settings.perCharacterRefs[charName]) {
             // Migrate: if old flat refs exist and this is the first time, copy them
-            if (settings.charRef?.imagePath || settings.userRef?.imagePath || settings.npcReferences?.some?.(n => n?.imagePath || n?.imageBase64)) {
+            if (!settings.flatRefsMigrated && (settings.charRef?.imagePath || settings.userRef?.imagePath || settings.npcReferences?.some?.(n => n?.imagePath || n?.imageBase64))) {
+                settings.flatRefsMigrated = true;
                 settings.perCharacterRefs[charName] = {
                     charRef: settings.charRef ? { ...settings.charRef } : EMPTY_REFS().charRef,
                     userRef: settings.userRef ? { ...settings.userRef } : EMPTY_REFS().userRef,
@@ -4188,11 +4250,18 @@ function clearAllContextRefCache() {
 async function collectPreviousContextReferences(messageId, format, requestedCount) {
     const cacheKey = `${messageId}|${format}|${requestedCount}`;
     if (_contextRefCache.has(cacheKey)) return _contextRefCache.get(cacheKey);
-
+    // The promise itself is stored: the tags of one message run in parallel and
+    // each used to start its own download of the same pictures.
+    const job = slayCollectContextRefs(messageId, format, requestedCount);
+    _contextRefCache.set(cacheKey, job);
+    job.catch(() => { if (_contextRefCache.get(cacheKey) === job) _contextRefCache.delete(cacheKey); });
+    return job;
+}
+const _ctxShrunk = new Map();   // «format|url» -> shrunk copy, the last 12
+async function slayCollectContextRefs(messageId, format, requestedCount) {
     const urls = getPreviousGeneratedImageUrls(messageId, requestedCount);
     if (urls.length === 0) return [];
     const convert = format === 'dataUrl' ? imageUrlToDataUrl : imageUrlToBase64;
-    const converted = await Promise.all(urls.map(url => convert(url)));
 
     // These were the only references sent at full size — every other ref path
     // already goes through compressBase64Image. A generated image is ~300-500KB
@@ -4214,10 +4283,18 @@ async function collectPreviousContextReferences(messageId, format, requestedCoun
             return null;
         }
     };
-    const out = (await Promise.all(converted.filter(Boolean).map(shrink))).filter(Boolean);
-
-    _contextRefCache.set(cacheKey, out);
-    return out;
+    const one = async (url) => {
+        const k = format + '|' + url;
+        if (_ctxShrunk.has(k)) return _ctxShrunk.get(k);
+        const raw = await convert(url);
+        const small = raw ? await shrink(raw) : null;
+        if (small) {
+            _ctxShrunk.set(k, small);
+            while (_ctxShrunk.size > 12) _ctxShrunk.delete(_ctxShrunk.keys().next().value);
+        }
+        return small;
+    };
+    return (await Promise.all(urls.map(one))).filter(Boolean);
 }
 
 // ── Image utilities ──
@@ -4536,7 +4613,7 @@ async function slayDeleteStoredImage(path) {
             method: 'POST', headers: SillyTavern.getContext().getRequestHeaders(),
             body: JSON.stringify({ path: path.replace(/^\//, '') })
         });
-        if (r.ok) { iigLog('INFO', `deleted ${path}`); return true; }
+        if (r.ok) { iigLog('INFO', `deleted ${path}`); try { slayThumbForget(path); slayB64Forget(path); } catch (_) { } return true; }
         iigLog('WARN', `delete failed (${r.status}) for ${path}`);
         return false;
     } catch (e) { iigLog('WARN', 'slayDeleteStoredImage failed:', e?.message); return false; }
@@ -4936,7 +5013,38 @@ async function saveRefImageToFile(base64Data, label, opts = {}) {
     return result.path;
 }
 
+// Small pictures (refs, outfit parts) read once and kept: every generation used
+// to download and re-encode the same files again. A file never changes under
+// its name (a crop or a replacement gets a new one), so the path is the key.
+// Big files (generated pictures) are not kept.
+const _b64Cache = new Map();
+let _b64CacheSize = 0;
+function slayB64Get(path) {
+    const v = _b64Cache.get(path);
+    if (v) { _b64Cache.delete(path); _b64Cache.set(path, v); }   // most recent last
+    return v || null;
+}
+function slayB64Put(path, b64) {
+    if (!path || typeof b64 !== 'string' || !b64 || b64.length > 1500000) return;
+    if (_b64Cache.has(path)) return;
+    _b64Cache.set(path, b64); _b64CacheSize += b64.length;
+    while (_b64CacheSize > 12000000 && _b64Cache.size > 1) {
+        const [k, v] = _b64Cache.entries().next().value;
+        _b64Cache.delete(k); _b64CacheSize -= v.length;
+    }
+}
+function slayB64Forget(path) {
+    const v = _b64Cache.get(path);
+    if (v) { _b64Cache.delete(path); _b64CacheSize -= v.length; }
+}
 async function loadRefImageAsBase64(path) {
+    const hit = slayB64Get(path);
+    if (hit) return hit;
+    const b64 = await loadRefImageAsBase64Raw(path);
+    if (b64) slayB64Put(path, b64);
+    return b64;
+}
+async function loadRefImageAsBase64Raw(path) {
     try {
         const response = await fetch(path);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -6099,14 +6207,14 @@ async function slayRecropExisting(path, opts = {}) {
 // Small chooser: a question with several named answers, because slayConfirm's
 // yes/no forces "delete everything or nothing" on a decision that has three
 // sensible outcomes. Returns the chosen key, or null.
-function slayChoose(title, text, options) {
+function slayChoose(title, text, options, o = {}) {
     return new Promise((resolve) => {
         const ov = document.createElement('div');
-        ov.className = 'slay-choose-ov';
+        ov.className = 'slay-choose-ov' + (o.confirm ? ' slay-confirm-ov' : '');
         ov.innerHTML = `
             <div class="slay-choose-box">
                 <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
-                <div class="slay-choose-x">${sanitizeForHtml(text).replace(/@BR@/g, '<br>')}</div>
+                <div class="slay-choose-x">${o.html ? text : sanitizeForHtml(text).replace(/@BR@/g, '<br>')}</div>
                 <div class="slay-choose-btns">
                     ${options.map(o => `<button class="slay-choose-b${o.danger ? ' danger' : ''}${o.primary ? ' primary' : ''}" data-k="${sanitizeForHtml(o.key)}">${sanitizeForHtml(o.label)}</button>`).join('')}
                     <button class="slay-choose-b ghost" data-k="">Отмена</button>
@@ -6136,16 +6244,183 @@ function slayChoose(title, text, options) {
 // all ticked. Tap = keep/delete, long press (right click on PC) = big view.
 // Previews load only when scrolled into view — 350 pictures at once would
 // choke a phone. Returns the paths to delete (after one confirm), or null.
-function slayPickOrphans(found, total) {
+// Previews for the pickers. A grid of full pictures means decoding hundreds of
+// 3–9 MB files; here each one is shrunk once to a small JPEG, kept in memory
+// for the session and in IndexedDB for the next time. Four at a time, the
+// newest request first, and a picture scrolled out of sight gives up its turn.
+const _thumbUrl = new Map();
+const _thumbQueue = [];
+let _thumbBusy = 0, _thumbDbP = null;
+const _thumbMaking = new Map();
+function slayThumbDb() {
+    if (_thumbDbP) return _thumbDbP;
+    _thumbDbP = new Promise((resolve) => {
+        try {
+            const rq = indexedDB.open('slay_thumbs', 1);
+            rq.onupgradeneeded = () => { try { rq.result.createObjectStore('t'); } catch (_) { } };
+            rq.onsuccess = () => resolve(rq.result);
+            rq.onerror = () => resolve(null);
+            rq.onblocked = () => resolve(null);
+        } catch (_) { resolve(null); }
+    });
+    return _thumbDbP;
+}
+function slayThumbStore(mode, fn) {
+    return slayThumbDb().then((db) => new Promise((resolve) => {
+        if (!db) { resolve(null); return; }
+        try {
+            const rq = fn(db.transaction('t', mode).objectStore('t'));
+            rq.onsuccess = () => resolve(rq.result ?? null);
+            rq.onerror = () => resolve(null);
+        } catch (_) { resolve(null); }
+    }));
+}
+// 240 px previews are stored under the path itself, other sizes under «size|path».
+const slayThumbKey = (path, px) => px === 240 ? path : px + '|' + path;
+function slayThumbForget(path) {
+    for (const key of [path, slayThumbKey(path, 480)]) {
+        const u = _thumbUrl.get(key);
+        if (u) { try { URL.revokeObjectURL(u); } catch (_) { } _thumbUrl.delete(key); }
+        slayThumbStore('readwrite', s => s.delete(key));
+    }
+}
+function slayThumbMake(path, px = 240) {
+    const key = slayThumbKey(path, px);
+    if (_thumbUrl.has(key)) return Promise.resolve(_thumbUrl.get(key));
+    if (_thumbMaking.has(key)) return _thumbMaking.get(key);
+    const p = slayThumbBuild(path, px, key).finally(() => _thumbMaking.delete(key));
+    _thumbMaking.set(key, p);
+    return p;
+}
+async function slayThumbShrink(srcBlob, px) {
+    const bmp = await createImageBitmap(srcBlob, { resizeWidth: px, resizeQuality: px > 240 ? 'medium' : 'low' });
+    // A browser that ignores the resize option hands back the full picture.
+    const k = bmp.width > px ? px / bmp.width : 1;
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(bmp.width * k)); cv.height = Math.max(1, Math.round(bmp.height * k));
+    cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+    try { bmp.close(); } catch (_) { }
+    const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', px > 240 ? 0.8 : 0.72));
+    if (!blob) throw new Error('no thumbnail');
+    return blob;
+}
+// A preview from a picture that is already in hand (just generated): the
+// file does not have to be downloaded back for it.
+async function slayThumbSeed(path, dataUrl, px = 480) {
+    try {
+        const key = slayThumbKey(path, px);
+        if (_thumbUrl.has(key)) return;
+        const blob = await slayThumbShrink(await (await fetch(dataUrl)).blob(), px);
+        slayThumbStore('readwrite', s => s.put(blob, key));
+        _thumbUrl.set(key, URL.createObjectURL(blob));
+    } catch (e) { iigLog('WARN', 'preview from the result failed:', e?.message); }
+}
+async function slayThumbBuild(path, px, key) {
+    let blob = await slayThumbStore('readonly', s => s.get(key));
+    if (!(blob instanceof Blob)) {
+        const r = await fetch(path.split('/').map(encodeURIComponent).join('/'));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        blob = await slayThumbShrink(await r.blob(), px);
+        slayThumbStore('readwrite', s => s.put(blob, key));
+    }
+    const u = URL.createObjectURL(blob);
+    _thumbUrl.set(key, u);
+    return u;
+}
+function slayThumbPump() {
+    while (_thumbBusy < (slayThumbCanWarm() ? 6 : 3) && _thumbQueue.length) {
+        const j = _thumbQueue.pop();
+        if (!j.wanted()) { j.done(null); continue; }
+        _thumbBusy++;
+        slayThumbMake(j.path, j.px || 240).then(u => j.done(u), () => j.done('')).finally(() => { _thumbBusy--; slayThumbPump(); });
+    }
+}
+// The warm-up downloads every original once. Fine on the machine the tavern
+// runs on; over a network or on a phone it would be gigabytes of traffic, so
+// there only the previews actually scrolled into view are made.
+function slayThumbCanWarm() {
+    try { return /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && slayStudioIsDesktop(); } catch (_) { return false; }
+}
+// Drops stored previews of pictures that are no longer in the list (deleted
+// or put to use), so the store never outgrows the current «ничьи».
+function slayThumbPrune(keepPaths) {
+    const keep = new Set(keepPaths);
+    const own = (k) => /^\d+\|/.test(String(k));
+    for (const [p, u] of [..._thumbUrl]) if (!own(p) && !keep.has(p)) { try { URL.revokeObjectURL(u); } catch (_) { } _thumbUrl.delete(p); }
+    slayThumbDb().then((db) => {
+        if (!db) return;
+        try {
+            const rq = db.transaction('t', 'readwrite').objectStore('t').openKeyCursor();
+            rq.onsuccess = () => { const c = rq.result; if (!c) return; if (!own(c.key) && !keep.has(c.key)) c.source.delete(c.key); c.continue(); };
+        } catch (_) { }
+    });
+}
+// The Studio's previews are not touched by the cleanup prune, so they get a cap
+// of their own: past 400 of them, only those of the chat on screen stay.
+function slayThumbCap(keepPaths, max = 400) {
+    const keep = new Set(keepPaths.map(p => slayThumbKey(p, 480)));
+    slayThumbDb().then((db) => {
+        if (!db) return;
+        try {
+            const st = db.transaction('t', 'readwrite').objectStore('t');
+            const rq = st.getAllKeys();
+            rq.onsuccess = () => {
+                const own = (rq.result || []).map(String).filter(k => /^\d+\|/.test(k));
+                if (own.length <= max) return;
+                for (const k of own) if (!keep.has(k)) {
+                    st.delete(k);
+                    const u = _thumbUrl.get(k);
+                    if (u) { try { URL.revokeObjectURL(u); } catch (_) { } _thumbUrl.delete(k); }
+                }
+            };
+        } catch (_) { }
+    });
+}
+// Low priority: warms the cache for pictures further down the list, in order.
+function slayThumbWarm(paths, wanted) {
+    for (const path of paths) if (!_thumbUrl.has(path)) _thumbQueue.unshift({ path, wanted, done: () => { } });
+    slayThumbPump();
+}
+// → object URL of the preview; '' = could not make one (show the original);
+// null = `wanted()` said no before its turn came (ask again later).
+function slayThumb(path, wanted = () => true, px = 240) {
+    const key = slayThumbKey(path, px);
+    if (_thumbUrl.has(key)) return Promise.resolve(_thumbUrl.get(key));
+    return new Promise((done) => { _thumbQueue.push({ path, px, wanted, done }); slayThumbPump(); });
+}
+
+// The big view (zoom, download, share) for a picture that is not in the chat.
+function slayLightboxOpen(src) {
+    const lb = document.getElementById('slay_lightbox');
+    if (!lb || !src) return false;
+    lb._chatImg = null;
+    lb.querySelector('.iig-lightbox-img').src = src;
+    lb.querySelector('.iig-lightbox-caption').textContent = '';
+    lb.classList.add('open');
+    lb.dispatchEvent(new Event('slay-lightbox-open'));
+    document.body.style.overflow = 'hidden';
+    return true;
+}
+
+// opts (the disk cleanup): defaultOn, title, text, toastTitle. An item may
+// bring its own tab ('gen' | 'refs' | 'ward'), kind label, date (at) and size.
+function slayPickOrphans(found, total, opts = {}) {
     const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
     const KIND = { char: 'лицо бота', user: 'юзер', npc0: 'NPC 1', npc1: 'NPC 2', npc2: 'NPC 3', npc3: 'NPC 4', look: 'образ', loc0: 'локация 1', loc1: 'локация 2', loc2: 'локация 3' };
     const items = found.map((x, i) => {
         const name = x.path.split('/').pop();
-        const ts = Number((name.match(/(\d{12,14})(?=\.\w+$)/) || [])[1]) || 0;
+        const ts = Number(x.at) || Number((name.match(/(\d{12,14})(?=\.\w+$)/) || [])[1]) || 0;
         const d = ts ? new Date(ts) : null;
         const kindKey = (name.match(/^iig_ref_([a-z]+\d?)_/) || [])[1];
+        if (x.kind) return {
+            i, path: x.path, name, on: opts.defaultOn !== false, tab: x.tab || 'gen', size: Number(x.size) || 0,
+            month: d ? d.getFullYear() * 100 + d.getMonth() : 0,
+            monthLabel: d ? MONTHS[d.getMonth()] + ' ' + d.getFullYear() : 'без даты',
+            day: d ? d.getDate() + ' ' + MONTHS[d.getMonth()] : '',
+            kind: String(x.kind),
+        };
         return {
-            i, path: x.path, name, on: true,
+            i, path: x.path, name, on: opts.defaultOn !== false, size: 0,
             tab: x.folder === 'гардероб' ? 'ward' : 'refs',
             month: d ? d.getFullYear() * 100 + d.getMonth() : 0,
             monthLabel: d ? MONTHS[d.getMonth()] + ' ' + d.getFullYear() : 'без даты',
@@ -6153,7 +6428,9 @@ function slayPickOrphans(found, total) {
             kind: x.folder === 'гардероб' ? 'гардероб' : (KIND[kindKey] || 'реф'),
         };
     });
-    const tabs = [['refs', 'Референсы'], ['ward', 'Гардероб']].filter(([k]) => items.some(x => x.tab === k));
+    const tabs = [['gen', 'Нарисованные'], ['refs', 'Референсы'], ['ward', 'Гардероб']].filter(([k]) => items.some(x => x.tab === k));
+    const sizeOf = (xs) => { const s = xs.reduce((a, x) => a + (x.size || 0), 0); return s ? ' · ' + slayFmtSize(s) : ''; };
+    const toastTitle = opts.toastTitle || 'Гардероб';
     let tab = tabs[0][0];
 
     return new Promise((resolve) => {
@@ -6161,22 +6438,26 @@ function slayPickOrphans(found, total) {
         ov.className = 'slay-choose-ov slay-orph-ov';
         ov.innerHTML = `
             <div class="slay-choose-box slay-orph-box">
-                <div class="slay-choose-t">Ничьи картинки</div>
-                <div class="slay-choose-x">Проверено ${total} картинок. На эти не ссылается ничего: ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате. Отмеченные красным удалятся с диска. Тап — оставить/удалить, долгое нажатие — посмотреть крупно.</div>
+                <div class="slay-choose-t">${sanitizeForHtml(opts.title || 'Ничьи картинки')}</div>
+                <div class="slay-choose-x">${opts.text ? sanitizeForHtml(opts.text) : `Проверено ${total} картинок. На эти не ссылается ничего: ни вещь гардероба, ни сохранённый образ, ни слот персонажа ни в одном чате. Отмеченные красным удалятся с диска. Тап — оставить/удалить, долгое нажатие — посмотреть крупно.`}</div>
                 <div class="slay-orph-tabs"></div>
-                <div class="slay-orph-tools"><button data-all="1">Отметить все</button><button data-all="0">Снять все</button><span class="slay-orph-cnt"></span></div>
+                <div class="slay-orph-tools"><button data-all="1">Отметить открытые</button><button data-all="0">Снять все</button><span class="slay-orph-cnt"></span></div>
                 <div class="slay-orph-body"></div>
-                <div class="slay-orph-foot"><button class="slay-choose-b ghost" data-act="cancel">Отмена</button><button class="slay-choose-b danger" data-act="del"></button></div>
+                <div class="slay-orph-foot"><button class="slay-choose-b ghost" data-act="cancel">${opts.onDelete ? 'Закрыть' : 'Отмена'}</button><button class="slay-choose-b danger" data-act="del"></button></div>
             </div>
             <div class="slay-orph-lb" hidden></div>`;
         document.body.appendChild(ov);
         const body = ov.querySelector('.slay-orph-body');
         const lb = ov.querySelector('.slay-orph-lb');
         let io = null;
+        // Open months, as «tab|month». Each tab starts with its newest month open.
+        const openM = new Set(), seenTab = new Set();
+        const isOpen = (month) => openM.has(tab + '|' + month);
 
         const render = () => {
-            ov.querySelector('.slay-orph-tabs').innerHTML = tabs.length > 1
-                ? tabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-tab="${k}">${l} (${items.filter(x => x.tab === k).length})</button>`).join('')
+            const liveTabs = tabs.filter(([k]) => items.some(x => x.tab === k));
+            ov.querySelector('.slay-orph-tabs').innerHTML = liveTabs.length > 1
+                ? liveTabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-tab="${k}">${l} (${items.filter(x => x.tab === k).length})</button>`).join('')
                 : '';
             const list = items.filter(x => x.tab === tab).sort((a, b) => b.month - a.month || b.i - a.i);
             const groups = [];
@@ -6184,26 +6465,41 @@ function slayPickOrphans(found, total) {
                 const g = groups[groups.length - 1];
                 if (g && g.month === x.month) g.xs.push(x); else groups.push({ month: x.month, label: x.monthLabel, xs: [x] });
             }
+            if (!seenTab.has(tab)) { seenTab.add(tab); if (groups[0]) openM.add(tab + '|' + groups[0].month); }
             const keepTop = body.scrollTop;
-            body.innerHTML = groups.map(g => `
-                <div class="slay-orph-month">
-                    <div class="slay-orph-mhead"><span>${g.label} · ${g.xs.length}</span><button data-month="${g.month}">${g.xs.every(x => x.on) ? 'снять месяц' : 'отметить месяц'}</button></div>
-                    <div class="slay-orph-grid">${g.xs.map(x => `<div class="slay-orph-th${x.on ? ' on' : ''}" data-i="${x.i}"><img alt="" decoding="async" data-src="${sanitizeForHtml(x.path)}"><span class="slay-orph-ck">${x.on ? '✓' : ''}</span><span class="slay-orph-kind">${x.kind}</span></div>`).join('')}</div>
-                </div>`).join('');
+            body.innerHTML = groups.map(g => {
+                const open = isOpen(g.month);
+                const marked = g.xs.filter(x => x.on).length;
+                return `
+                <div class="slay-orph-month${open ? ' open' : ''}">
+                    <div class="slay-orph-mhead"><button class="slay-orph-mfold" data-mfold="${g.month}"><i class="fa-solid fa-chevron-${open ? 'down' : 'right'}"></i> ${g.label} · ${g.xs.length}${sizeOf(g.xs)}${marked ? ` · <b>отмечено ${marked}</b>` : ''}</button>${open ? `<button data-month="${g.month}">${g.xs.every(x => x.on) ? 'снять месяц' : 'отметить месяц'}</button>` : ''}</div>
+                    ${open ? `<div class="slay-orph-grid">${g.xs.map(x => `<div class="slay-orph-th${x.on ? ' on' : ''}" data-i="${x.i}"><img alt="" decoding="async" data-src="${sanitizeForHtml(x.path)}"><span class="slay-orph-ck">${x.on ? '✓' : ''}</span><span class="slay-orph-kind">${sanitizeForHtml(x.kind)}</span></div>`).join('')}</div>` : ''}
+                </div>`;
+            }).join('');
             body.scrollTop = keepTop;
             io?.disconnect();
-            const load = (img) => { if (img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; } };
+            // Small previews, not the 3–9 MB originals: see slayThumb.
+            const load = (img) => {
+                const src = img.dataset.src;
+                if (!src) return;
+                delete img.dataset.src;
+                slayThumb(src, () => img.isConnected && img.dataset.vis === '1').then((u) => {
+                    if (!img.isConnected) return;
+                    if (u === null) { img.dataset.src = src; return; }   // scrolled away before its turn
+                    img.src = u || src;
+                });
+            };
             io = typeof IntersectionObserver === 'function'
-                ? new IntersectionObserver((es, obs) => { for (const e of es) if (e.isIntersecting) { load(e.target); obs.unobserve(e.target); } }, { root: body, rootMargin: '150px 0px' })
+                ? new IntersectionObserver((es) => { for (const e of es) { e.target.dataset.vis = e.isIntersecting ? '1' : '0'; if (e.isIntersecting) load(e.target); } }, { root: body, rootMargin: '300px 0px' })
                 : null;
-            for (const img of body.querySelectorAll('img[data-src]')) io ? io.observe(img) : load(img);
+            for (const img of body.querySelectorAll('img[data-src]')) { if (io) io.observe(img); else { img.dataset.vis = '1'; load(img); } }
             const n = items.filter(x => x.tab === tab && x.on).length;
             ov.querySelector('.slay-orph-cnt').textContent = `отмечено ${n} из ${list.length}`;
-            ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(x => x.on).length})`;
+            ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(x => x.on).length}${sizeOf(items.filter(x => x.on))})`;
         };
 
         const openBig = (x) => {
-            lb.innerHTML = `<div class="slay-orph-lbcard"><img alt="" src="${sanitizeForHtml(x.path)}"><div class="slay-orph-lbmeta">${x.kind}${x.day ? ' · загружено ' + x.day : ''}<br>${sanitizeForHtml(x.name)}</div><div class="slay-orph-lbrow"><button class="slay-choose-b ${x.on ? 'ghost' : 'danger'}" data-lb="toggle">${x.on ? 'Оставить' : 'Удалить'}</button><button class="slay-choose-b ghost" data-lb="close">Закрыть</button></div></div>`;
+            lb.innerHTML = `<div class="slay-orph-lbcard"><img alt="" src="${sanitizeForHtml(x.path)}"><div class="slay-orph-lbmeta">${sanitizeForHtml(x.kind)}${x.day ? ' · загружено ' + x.day : ''}<br>${sanitizeForHtml(x.name)}</div><div class="slay-orph-lbrow"><button class="slay-choose-b ${x.on ? 'ghost' : 'danger'}" data-lb="toggle">${x.on ? 'Оставить' : 'Удалить'}</button><button class="slay-choose-b ghost" data-lb="close">Закрыть</button></div></div>`;
             lb.dataset.i = x.i;
             lb.hidden = false;
         };
@@ -6211,14 +6507,16 @@ function slayPickOrphans(found, total) {
         let done = false;
         const finish = (v) => { if (done) return; done = true; io?.disconnect(); ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
         const onKey = (e) => {
-            if (e.key !== 'Escape') return;
+            if (e.key !== 'Escape' || document.querySelector('.slay-confirm-ov')) return;
             e.stopPropagation();
+            if (busyDel) return;
             if (!lb.hidden) lb.hidden = true; else finish(null);
         };
         document.addEventListener('keydown', onKey, true);
 
-        let pressT = null, pressed = false;
+        let pressT = null, pressed = false, busyDel = false;
         const onClick = async (e) => {
+            if (busyDel) return;
             // The click that ends a long press would land on the big view and
             // close it again at once.
             if (pressed) { pressed = false; return; }
@@ -6230,18 +6528,39 @@ function slayPickOrphans(found, total) {
                 lb.hidden = true; render(); return;
             }
             if (!lb.hidden) { if (t === lb) lb.hidden = true; return; }
-            const b = t.closest('[data-tab],[data-all],[data-month],[data-act],.slay-orph-th');
+            const b = t.closest('[data-tab],[data-all],[data-mfold],[data-month],[data-act],.slay-orph-th');
             if (!b) { if (t === ov) finish(null); return; }
             if (b.dataset.tab) tab = b.dataset.tab;
-            else if (b.dataset.all) items.filter(x => x.tab === tab).forEach(x => { x.on = b.dataset.all === '1'; });
+            else if (b.dataset.mfold) { const k = tab + '|' + b.dataset.mfold; if (openM.has(k)) openM.delete(k); else openM.add(k); }
+            // Only what is on screen can be marked in one go: a folded month
+            // has not been looked at.
+            else if (b.dataset.all === '1') items.filter(x => x.tab === tab && isOpen(x.month)).forEach(x => { x.on = true; });
+            else if (b.dataset.all === '0') items.filter(x => x.tab === tab).forEach(x => { x.on = false; });
             else if (b.dataset.month) {
                 const xs = items.filter(x => x.tab === tab && String(x.month) === b.dataset.month);
                 const v = !xs.every(x => x.on); xs.forEach(x => { x.on = v; });
             } else if (b.dataset.act === 'cancel') { finish(null); return; }
             else if (b.dataset.act === 'del') {
                 const doomed = items.filter(x => x.on);
-                if (!doomed.length) { toastr.info('Ничего не отмечено', 'Гардероб'); return; }
-                if (await slayConfirm(`Удалить ${doomed.length} файлов с диска? Вернуть их будет нельзя.`)) finish(doomed.map(x => ({ path: x.path })));
+                if (!doomed.length) { toastr.info('Ничего не отмечено', toastTitle); return; }
+                if (!(await slayConfirm(`Удалить ${doomed.length} ${slayPlural(doomed.length, 'файл', 'файла', 'файлов')}${sizeOf(doomed)} с диска? Вернуть их будет нельзя.`))) return;
+                if (typeof opts.onDelete !== 'function') { finish(doomed.map(x => ({ path: x.path }))); return; }
+                // Deleting right here: the window stays, the rest can be looked through further.
+                busyDel = true;
+                const delBtn = ov.querySelector('[data-act="del"]');
+                delBtn.disabled = true; delBtn.textContent = 'Проверяю…';
+                let killed = [];
+                try { killed = await opts.onDelete(doomed.map(x => x.path), (i, n, label) => { delBtn.textContent = `${label || 'Удаляю…'} ${i} из ${n}`; }) || []; }
+                catch (err) { iigLog('WARN', 'picker delete failed:', err?.message); }
+                busyDel = false; delBtn.disabled = false;
+                if (!ov.isConnected) return;
+                const gone = new Set(killed);
+                const left = items.filter(x => !gone.has(x.path));
+                left.forEach((x, k) => { x.i = k; x.on = false; });
+                items.length = 0; items.push(...left);
+                if (!items.length) { finish(null); return; }
+                if (!items.some(x => x.tab === tab)) tab = tabs.find(([k]) => items.some(x => x.tab === k))[0];
+                render();
                 return;
             } else if (b.classList.contains('slay-orph-th')) {
                 const x = items[+b.dataset.i]; x.on = !x.on;
@@ -6249,9 +6568,15 @@ function slayPickOrphans(found, total) {
                 b.querySelector('.slay-orph-ck').textContent = x.on ? '✓' : '';
                 const list = items.filter(y => y.tab === tab);
                 ov.querySelector('.slay-orph-cnt').textContent = `отмечено ${list.filter(y => y.on).length} из ${list.length}`;
-                ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(y => y.on).length})`;
+                ov.querySelector('[data-act="del"]').textContent = `Удалить отмеченные (${items.filter(y => y.on).length}${sizeOf(items.filter(y => y.on))})`;
                 const mBtn = b.closest('.slay-orph-month')?.querySelector('[data-month]');
                 if (mBtn) mBtn.textContent = items.filter(y => y.tab === tab && String(y.month) === mBtn.dataset.month).every(y => y.on) ? 'снять месяц' : 'отметить месяц';
+                const fold = b.closest('.slay-orph-month')?.querySelector('[data-mfold]');
+                if (fold) {
+                    const xs = items.filter(y => y.tab === tab && String(y.month) === fold.dataset.mfold);
+                    const mk = xs.filter(y => y.on).length;
+                    fold.innerHTML = fold.innerHTML.replace(/ · <b>отмечено \d+<\/b>$/, '') + (mk ? ` · <b>отмечено ${mk}</b>` : '');
+                }
                 return;
             }
             render();
@@ -6274,6 +6599,475 @@ function slayPickOrphans(found, total) {
         body.addEventListener('scroll', () => clearTimeout(pressT), { passive: true });
         render();
     });
+}
+
+// ╔═════════════════════════════════════════════════════════════╗
+// ║  «Уборка»: what SLAY keeps on disk and what nobody uses     ║
+// ╚═════════════════════════════════════════════════════════════╝
+// Nothing here deletes on its own. The scan only reads; files go away after
+// the user has seen them as previews, picked them and confirmed.
+function slayFmtSize(bytes) {
+    const b = Number(bytes) || 0;
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1).replace('.', ',') + ' ГБ';
+    if (b >= 1048576) return Math.round(b / 1048576) + ' МБ';
+    return Math.max(1, Math.round(b / 1024)) + ' КБ';
+}
+
+// Runs `job` over `list`, `n` at a time.
+async function slayPool(list, n, job) {
+    let i = 0;
+    const next = async () => { while (i < list.length) { const k = i++; await job(list[k], k); } };
+    await Promise.all(Array.from({ length: Math.min(n, list.length) }, next));
+}
+
+// When a SLAY file was made, from its name. 0 = unknown.
+function slayFileTime(name) {
+    const m = String(name).match(/^iig_(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+    if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    const ts = Number((String(name).match(/(\d{12,14})(?=\.\w+$)/) || [])[1]) || 0;
+    return ts > 1e12 && ts < 4e12 ? ts : 0;
+}
+
+// What each chat file held last time: picture names, keyed by the chat and
+// stamped with its size and last change. An unchanged chat is not read again.
+// Kept in the browser (IndexedDB), never on the tavern's disk.
+let _scanDbP = null;
+function slayScanDb() {
+    if (_scanDbP) return _scanDbP;
+    _scanDbP = new Promise((resolve) => {
+        try {
+            const rq = indexedDB.open('slay_scan', 1);
+            rq.onupgradeneeded = () => { try { rq.result.createObjectStore('c'); } catch (_) { } };
+            rq.onsuccess = () => resolve(rq.result);
+            rq.onerror = () => resolve(null);
+            rq.onblocked = () => resolve(null);
+        } catch (_) { resolve(null); }
+    });
+    return _scanDbP;
+}
+function slayScanStore(mode, fn) {
+    return slayScanDb().then((db) => new Promise((resolve) => {
+        if (!db) { resolve(null); return; }
+        try {
+            const rq = fn(db.transaction('c', mode).objectStore('c'));
+            rq.onsuccess = () => resolve(rq.result ?? null);
+            rq.onerror = () => resolve(null);
+        } catch (_) { resolve(null); }
+    }));
+}
+// fetch that gives up: a request the server never answers used to stall the
+// whole scan on its last chat.
+async function slayFetchTimed(url, init, ms, live = null) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), ms);
+    live?.add(ac);
+    try { return await fetch(url, { ...init, signal: ac.signal }); }
+    finally { clearTimeout(t); live?.delete(ac); }
+}
+// Same, but the clock and the abort stay on until the body is read.
+// → { ok, status, text }
+async function slayFetchText(url, init, ms, live = null) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), ms);
+    live?.add(ac);
+    try {
+        const r = await fetch(url, { ...init, signal: ac.signal });
+        return { ok: r.ok, status: r.status, text: r.ok ? await r.text() : '' };
+    } finally { clearTimeout(t); live?.delete(ac); }
+}
+// The record of a chat is dropped as soon as the chat is opened here: whatever
+// is changed in it afterwards (↻, the Studio, edits) will be read anew.
+function slayScanForgetOpenChat() {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (ctx.groupId) return;   // group chats are never remembered
+        const av = ctx.characters?.[ctx.characterId]?.avatar;
+        const id = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : null;
+        if (av && id) slayScanStore('readwrite', st => st.delete('c|' + av + '|' + id));
+    } catch (_) { }
+}
+// Folder names on disk are the character names after the server cleaned them
+// up, so the two are compared loosely.
+const slayLooseName = (n) => String(n || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+// Every picture SLAY made, checked against every place that can show it:
+// all chats of all characters and groups (messages, swipes, Studio lists),
+// the character cards and every extension's settings.
+// progress(text, done, total, canSkip); cancelled() → true stops the scan.
+// ctl.skip() (set here) gives up on the chats being read right now.
+async function slayDiskScan(progress, cancelled, ctl = {}) {
+    const ctx = SillyTavern.getContext();
+    const live = new Set();
+    let skipped = 0;
+    const post = (url, body, ms = 60000) => slayFetchTimed(url, { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body) }, ms, live);
+    const NAME_RE = /[A-Za-z0-9_\-]+\.(?:png|jpe?g|webp|gif|avif)/gi;
+    const SYS = { wardrobe_refs: 'ward', iig_refs: 'refs' };
+
+    // 1. Files.
+    progress('Смотрю папки с картинками…', 0, 0);
+    ctl.skip = null;
+    const fr = await post('/api/images/folders', {});
+    if (!fr.ok) throw new Error(`список папок не открылся (${fr.status})`);
+    const folders = await fr.json();
+    if (!Array.isArray(folders)) throw new Error('список папок пришёл в непонятном виде');
+    const files = [];
+    let fi = 0;
+    for (const f of folders) {
+        if (cancelled()) return null;
+        progress('Смотрю папки с картинками…', ++fi, folders.length);
+        const r = await post('/api/images/list', { folder: f });
+        if (!r.ok) throw new Error(`папка «${f}» не открылась (${r.status})`);
+        const list = await r.json();
+        if (!Array.isArray(list)) continue;
+        for (const raw of list) {
+            const name = String(typeof raw === 'string' ? raw : (raw && raw.name) || '').split('/').pop();
+            if (!name) continue;
+            // Outside SLAY's own folders only SLAY's own files count.
+            if (!SYS[f] && !/^iig_/.test(name)) continue;
+            files.push({ path: `/user/images/${f}/${name}`, name, folder: f, tab: SYS[f] || 'gen', at: slayFileTime(name) });
+        }
+    }
+
+    // 2. Everything already in memory.
+    const used = new Set();
+    const eat = (text) => { if (typeof text !== 'string' || !text) return; for (const m of text.matchAll(NAME_RE)) used.add(m[0]); };
+    // A source that cannot be read must stop the scan, not pass as «no pictures there».
+    const eatObj = (o) => { let t; try { t = JSON.stringify(o); } catch (e) { throw new Error('не получилось прочитать настройки и карточки: ' + (e?.message || e)); } eat(t); };
+    eatObj(ctx.extensionSettings);
+    eatObj(ctx.characters);
+    eatObj(ctx.chat);
+    eatObj(ctx.chatMetadata);
+    eatObj(_studioLate);
+
+    // 3. Every chat on disk.
+    const jobs = [];
+    const okNames = new Set(), noDir = new Set(), noDirKeys = [];
+    const chars = Array.isArray(ctx.characters) ? ctx.characters.filter(c => c && c.avatar) : [];
+    let ci = 0;
+    await slayPool(chars, 4, async (c) => {
+        if (cancelled()) return;
+        progress('Собираю список чатов…', ++ci, chars.length);
+        let list = null;
+        for (let attempt = 0; attempt < 2 && !Array.isArray(list); attempt++) {
+            try { const r = await post('/api/characters/chats', { avatar_url: c.avatar }); list = r.ok ? await r.json() : null; } catch (_) { list = null; }
+        }
+        if (!Array.isArray(list)) { noDir.add(c.name); noDirKeys.push('c|' + c.avatar + '|'); return; }
+        let usable = 0;
+        for (const ch of list) { if (!ch) continue; if (!ch.file_id && ch.file_name) ch.file_id = String(ch.file_name).replace(/\.jsonl$/i, ''); if (ch.file_id) usable++; }
+        // Chats are listed but none can be addressed: as good as not listed.
+        if (list.length && !usable) { noDir.add(c.name); noDirKeys.push('c|' + c.avatar + '|'); return; }
+        okNames.add(c.name);
+        for (const ch of list) if (ch && ch.file_id) jobs.push({ url: '/api/chats/get', body: { ch_name: c.name, file_name: ch.file_id, avatar_url: c.avatar }, label: `${c.name} / ${ch.file_id}`, folders: [c.name], key: 'c|' + c.avatar + '|' + ch.file_id, ver: ch.last_mes && ch.file_size ? `${ch.last_mes}|${ch.file_size}` : '', size: String(ch.file_size || '') });
+    });
+    for (const g of (Array.isArray(ctx.groups) ? ctx.groups : [])) {
+        const members = (Array.isArray(g?.members) ? g.members : []).map(a => chars.find(c => c.avatar === a)?.name).filter(Boolean);
+        for (const id of (Array.isArray(g?.chats) ? g.chats : [])) jobs.push({ url: '/api/chats/group/get', body: { id }, label: `группа ${g.name || ''} / ${id}`, folders: ['generated', ...members], key: 'g|' + id, ver: '' });
+    }
+    if (cancelled()) return null;
+    // → the picture names in the chat, or null (not read); 'abort' when timed out or skipped.
+    let openKey = '';
+    try { const av = ctx.characters?.[ctx.characterId]?.avatar; const id = ctx.getCurrentChatId?.(); if (!ctx.groupId && av && id) openKey = 'c|' + av + '|' + id; } catch (_) { }
+    const readChat = async (j) => {
+        try {
+            const r = await slayFetchText(j.url, { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(j.body) }, 45000, live);
+            // ST answers «{}» when it could not read the file.
+            if (!r.ok || !r.text || /^\s*\{\s*\}\s*$/.test(r.text)) return null;
+            const names = new Set();
+            for (const m of r.text.matchAll(NAME_RE)) names.add(m[0]);
+            if (j.ver && j.key !== openKey) slayScanStore('readwrite', st => st.put({ ver: j.ver, names: [...names] }, j.key));
+            return names;
+        } catch (e) { return e?.name === 'AbortError' ? 'abort' : null; }
+    };
+    const failed = [];
+    let done = 0, fromMemory = 0;
+    const running = new Set();
+    const tick = () => progress('Читаю чаты…', done, jobs.length, running.size > 0);
+    const known = new Map();
+    {
+        // The whole memory in one read, not a request per chat.
+        const db = await slayScanDb();
+        const all = db ? await new Promise((resolve) => {
+            try {
+                const st = db.transaction('c', 'readonly').objectStore('c');
+                const kq = st.getAllKeys(), vq = st.getAll();
+                vq.onsuccess = () => { const m = new Map(); (kq.result || []).forEach((k, i) => m.set(String(k), vq.result[i])); resolve(m); };
+                vq.onerror = () => resolve(new Map());
+            } catch (_) { resolve(new Map()); }
+        }) : new Map();
+        for (const j of jobs) { if (!j.ver || j.key === openKey) continue; const v = all.get(j.key); if (v && v.ver === j.ver && Array.isArray(v.names)) known.set(j.key, v.names); }
+    }
+    // The quick ones first, so the counter moves; the big ones at the end.
+    ctl.skip = () => { for (const ac of [...live]) ac.abort(); };
+    const order = [...jobs].sort((a, b) => (known.has(b.key) ? 1 : 0) - (known.has(a.key) ? 1 : 0));
+    await slayPool(order, 4, async (j) => {
+        if (cancelled()) return;
+        const mem = known.get(j.key);
+        if (mem) {
+            for (const n of mem) used.add(n);
+            fromMemory++;
+            ++done; tick();
+            return;
+        }
+        const tag = j.label + (j.size ? ' (' + j.size + ')' : '');
+        running.add(tag);
+        let ok = false, gaveUp = false;
+        for (let attempt = 0; attempt < 2 && !ok && !gaveUp && !cancelled(); attempt++) {
+            tick();
+            const names = await readChat(j);
+            // Timed out or skipped by the user: no second wait.
+            if (names === 'abort') { gaveUp = true; break; }
+            if (!names) continue;
+            for (const n of names) used.add(n);
+            ok = true;
+        }
+        if (!ok && !cancelled()) { failed.push({ label: j.label, folders: j.folders || [] }); if (gaveUp) skipped++; }
+        running.delete(tag);
+        ++done; tick();
+    });
+    ctl.skip = null;
+    if (cancelled()) return null;
+    // Records of chats that no longer exist are dropped. A character whose
+    // chat list did not load keeps its records.
+    {
+        const keepKeys = new Set(jobs.map(j => j.key));
+        slayScanDb().then((db) => {
+            if (!db) return;
+            try {
+                const rq = db.transaction('c', 'readwrite').objectStore('c').openKeyCursor();
+                rq.onsuccess = () => {
+                    const c = rq.result; if (!c) return;
+                    const k = String(c.key);
+                    if (!keepKeys.has(k) && !noDirKeys.some(p => k.startsWith(p))) c.source.delete(c.key);
+                    c.continue();
+                };
+            } catch (_) { }
+        });
+    }
+
+    // 4. Sort the files out.
+    // A chat that was not read may show pictures from its own folders: those
+    // are not offered. SLAY's own ref and wardrobe folders neither, then.
+    const blind = new Set();
+    for (const f of failed) for (const n of f.folders) blind.add(n);
+    if (failed.length) { blind.add('iig_refs'); blind.add('wardrobe_refs'); }
+    const blindLoose = new Set([...blind, ...noDir].map(slayLooseName));
+    const knownLoose = new Set([...okNames, 'generated', 'iig_refs', 'wardrobe_refs'].map(slayLooseName));
+    const unsure = failed.length > 0 || noDir.size > 0;
+    // Not offered: the folder of a character whose chats were not all read, and,
+    // while anything at all was not read, a folder that belongs to no present
+    // character (a renamed one keeps its old folder).
+    const isBlind = (folder) => { const k = slayLooseName(folder); return blindLoose.has(k) || (unsure && !knownLoose.has(k)); };
+    const dayAgo = Date.now() - 24 * 3600 * 1000;
+    const res = { total: files.length, folders: folders.length, chats: jobs.length, fromMemory, failed, skipped, blind: [...blind], used: 0, fresh: 0, unverified: 0, orphans: [], top: [] };
+    const perFolder = {};
+    for (const f of files) {
+        perFolder[f.folder] = (perFolder[f.folder] || 0) + 1;
+        if (used.has(f.name) || slayCountPathUses(f.path) > 0) { res.used++; continue; }
+        // Younger than a day: may still be on its way into a chat.
+        if (f.at && f.at > dayAgo) { res.fresh++; continue; }
+        // The character exists but its chats could not be listed, or one of
+        // the chats that can hold its pictures was not read.
+        if (isBlind(f.folder)) { res.unverified++; continue; }
+        res.orphans.push(f);
+    }
+    res.top = Object.entries(perFolder).sort((a, b) => b[1] - a[1]).slice(0, 4);
+
+    // 5. How much the unused ones weigh.
+    let si = 0;
+    await slayPool(res.orphans, 8, async (f) => {
+        if (cancelled()) return;
+        try {
+            const r = await slayFetchTimed(f.path.split('/').map(encodeURIComponent).join('/'), { method: 'HEAD' }, 20000);
+            f.size = r.ok ? (Number(r.headers.get('content-length')) || 0) : 0;
+        } catch (_) { f.size = 0; }
+        progress('Считаю, сколько это весит…', ++si, res.orphans.length);
+    });
+    if (cancelled()) return null;
+
+    // Before files are deleted. The memory can be out of date (a picture redrawn
+    // in an old message changes neither the date nor the size the server reports),
+    // so every chat that was not read during this scan and can hold these files is
+    // read now. → { used: Set of names found in a chat, blocked: (folder) => true
+    // when a chat that could hold its pictures did not read }.
+    const stale = new Set(known.keys());
+    res.verify = async (paths, prog = () => { }) => {
+        const foldersOf = new Set(paths.map(p => p.split('/').slice(-2, -1)[0]));
+        const loose = new Set([...foldersOf].map(slayLooseName));
+        const pending = jobs.filter(j => stale.has(j.key));
+        // A folder no chat claims (refs, the wardrobe, a renamed character): every chat is a candidate.
+        const claimed = (k) => jobs.some(j => (j.folders || []).some(n => slayLooseName(n) === k));
+        const everything = [...loose].some(k => !claimed(k));
+        const todo = everything ? pending : pending.filter(j => (j.folders || []).some(n => loose.has(slayLooseName(n))));
+        const found = new Set(), badLoose = new Set();
+        let bad = false, i = 0;
+        await slayPool(todo, 4, async (j) => {
+            const names = await readChat(j);
+            if (names && names !== 'abort') { stale.delete(j.key); for (const n of names) found.add(n); }
+            else { bad = true; for (const n of (j.folders || [])) badLoose.add(slayLooseName(n)); }
+            prog(++i, todo.length);
+        });
+        return { used: found, blocked: (folder) => bad && (everything || badLoose.has(slayLooseName(folder))) };
+    };
+    return res;
+}
+
+// Deletes the given files one by one. → { killed: [path], failed: [{ name, why }] }
+async function slayDeleteFiles(paths, progress = () => { }) {
+    const ctx = SillyTavern.getContext();
+    const killed = [], failed = [];
+    let i = 0;
+    for (const p of paths) {
+        const name = p.split('/').pop();
+        progress(++i, paths.length);
+        try {
+            const res = await fetch('/api/images/delete', { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify({ path: p.replace(/^[/]/, '') }) });
+            if (res.ok || res.status === 404) { killed.push(p); slayThumbForget(p); continue; }
+            failed.push({ name, why: res.status === 403 ? 'нет доступа' : res.status === 423 || res.status === 409 ? 'файл занят' : res.status >= 500 ? 'ошибка сервера' : `сервер ответил ${res.status}` });
+        } catch (e) { failed.push({ name, why: 'нет связи' }); }
+    }
+    return { killed, failed };
+}
+
+let _cleanupOpen = false;
+function openSlayCleanup() {
+    if (_cleanupOpen) return;
+    _cleanupOpen = true;
+    const esc = sanitizeForHtml;
+    const ov = document.createElement('div');
+    ov.className = 'slay-choose-ov slay-clean-ov';
+    ov.setAttribute('data-sbg-in', '');
+    ov.innerHTML = '<div class="slay-choose-box slay-clean-box"><div class="slay-choose-t"><i class="fa-solid fa-broom"></i> Уборка картинок</div><div class="slay-clean-body"></div></div>';
+    document.body.appendChild(ov);
+    const body = ov.querySelector('.slay-clean-body');
+    let cancelled = false, res = null, busy = false;
+    const ctl = {};
+    const onKey = (e) => {
+        if (e.key !== 'Escape' || document.querySelector('.slay-orph-ov')) return;
+        e.stopPropagation(); close();
+    };
+    // Closing drops the chats being downloaded right now as well.
+    const close = () => { cancelled = true; try { ctl.skip?.(); } catch (_) { } ov.remove(); _cleanupOpen = false; document.removeEventListener('keydown', onKey, true); };
+    document.addEventListener('keydown', onKey, true);
+
+    // Drawn once and then only updated: buttons rebuilt many times a second lose taps.
+    const showScan = (text, done, total, canSkip = false) => {
+        if (!ov.isConnected) return;
+        const pct = total ? Math.round(done / total * 100) : 0;
+        const head = body.querySelector('[data-zone="scanhead"]');
+        if (head) {
+            head.innerHTML = `${esc(text)}${total ? ` <b>${done} из ${total}</b>` : ''}`;
+            body.querySelector('.slay-clean-prog i').style.width = pct + '%';
+            const sk = body.querySelector('[data-act="skip"]');
+            if (sk.hidden === canSkip) { sk.hidden = !canSkip; sk.disabled = false; sk.textContent = 'Пропустить зависшие'; }
+            return;
+        }
+        body.innerHTML = `<div class="slay-clean-note" data-zone="scanhead">${esc(text)}${total ? ` <b>${done} из ${total}</b>` : ''}</div>
+            <div class="slay-clean-prog"><i style="width:${pct}%"></i></div>
+            <div class="slay-clean-note">Только читаю: смотрю, какая картинка где используется. Ничего не удаляется. Первая проверка самая долгая: читаются все чаты. В следующий раз — только те, что изменились.</div>
+            <div class="slay-clean-row"><button type="button" class="slay-choose-b ghost" data-act="close">Отмена</button><button type="button" class="slay-choose-b ghost" data-act="skip"${canSkip ? '' : ' hidden'} title="Бросить чаты, которые читаются прямо сейчас. Картинки их персонажей не будут предложены к удалению.">Пропустить зависшие</button></div>`;
+    };
+    const showError = (msg) => {
+        body.innerHTML = `<div class="slay-clean-card warn"><b>Проверка не получилась</b><p>${esc(msg)}</p><p>Ничего не удалено.</p></div>
+            <div class="slay-clean-row"><button type="button" class="slay-choose-b ghost" data-act="close">Закрыть</button><button type="button" class="slay-choose-b primary" data-act="rescan">Проверить заново</button></div>`;
+    };
+    const showResult = () => {
+        const n = res.orphans.length;
+        const size = res.orphans.reduce((s, f) => s + (f.size || 0), 0);
+        const blocked = false;
+        body.innerHTML = `
+            <div class="slay-clean-big">${res.total} ${slayPlural(res.total, 'картинка', 'картинки', 'картинок')}</div>
+            <div class="slay-clean-note">SLAY хранит их в ${res.folders} ${slayPlural(res.folders, 'папке', 'папках', 'папках')}. Прочитано чатов: ${res.chats}${res.fromMemory ? ` (${res.fromMemory} не менялись с прошлой проверки, их не перечитывала)` : ''}.</div>
+            ${res.failed.length ? `<div class="slay-clean-card warn"><b>Не прочитались чаты: ${res.failed.length}${res.skipped ? ` (пропущено или не ответили за 45 с: ${res.skipped})` : ''}</b><p>${esc(res.failed.slice(0, 3).map(f => f.label).join('; '))}${res.failed.length > 3 ? ' и ещё ' + (res.failed.length - 3) : ''}</p><p>Картинки из папок ${esc(res.blind.filter(n => !/^(iig_refs|wardrobe_refs)$/.test(n)).join(', ') || '—')}, а также рефы и гардероб к удалению не предлагаются: они могут стоять как раз в этих чатах. Остальное — можно.</p></div>` : ''}
+            <div class="slay-clean-card ok">
+                <div class="slay-clean-h"><b>Ничьи</b><span>${n} шт${n ? ' · ' + slayFmtSize(size) : ''}</span></div>
+                <p>${n ? 'Их нет ни в одном чате (свайпы тоже проверены), студии, слоте рефов, гардеробе и образах. Обычно это старые версии после ↻ и картинки из удалённых сообщений.' : 'Лишних картинок нет: всё, что лежит на диске, где-то используется.'}</p>
+                ${n ? `<p>Сначала посмотришь их все превьюшками и отметишь, что убрать. Без твоей отметки и подтверждения ничего не удалится.</p>
+                <div class="slay-clean-row"><button type="button" class="slay-choose-b primary" data-act="review"${blocked ? ' disabled' : ''}>Посмотреть картинки</button></div>` : ''}
+            </div>
+            <div class="slay-clean-card">
+                <div class="slay-clean-h"><b>Используются</b><span>${res.used} шт</span></div>
+                <p>Показываются в чатах, лежат в студиях, слотах или гардеробе. Уборка их не трогает.</p>
+                <div class="slay-clean-list">${res.top.map(([f, c]) => `<div><span>${esc(f)}</span><span>${c} шт</span></div>`).join('')}</div>
+            </div>
+            ${res.fresh ? `<div class="slay-clean-card"><div class="slay-clean-h"><b>Свежие</b><span>${res.fresh} шт</span></div><p>Нарисованы меньше суток назад, и в чатах на диске их пока нет. Обычно это то, что рисовалось только что: таверна сохраняет чат с задержкой, и такая картинка выглядит ничьей, хотя стоит в сообщении. Поэтому в список на удаление они не попадают. Если так и останутся ничьими, появятся в уборке через сутки.</p></div>` : ''}
+            ${res.unverified ? `<div class="slay-clean-card"><div class="slay-clean-h"><b>Не проверено</b><span>${res.unverified} шт</span></div><p>Картинки персонажей, чьи чаты не удалось прочитать. Их не предлагаю удалять: они могут стоять как раз в этих чатах.</p></div>` : ''}
+            <div class="slay-clean-row"><button type="button" class="slay-choose-b ghost" data-act="close">Закрыть</button><button type="button" class="slay-choose-b ghost" data-act="rescan">Проверить заново</button></div>`;
+    };
+
+    const scan = async () => {
+        if (busy) return;
+        busy = true; cancelled = false; res = null;
+        showScan('Начинаю…', 0, 0);
+        try {
+            const r = await slayDiskScan(showScan, () => cancelled, ctl);
+            if (cancelled || !r || !ov.isConnected) return;
+            res = r;
+            slayThumbPrune(r.orphans.map(f => f.path));
+            iigLog('INFO', `Cleanup scan: files=${r.total} used=${r.used} orphans=${r.orphans.length} fresh=${r.fresh} unverified=${r.unverified} chats=${r.chats} failed=${r.failed.length}`);
+            showResult();
+        } catch (e) {
+            iigLog('WARN', 'cleanup scan failed:', e?.message);
+            if (ov.isConnected) showError(String(e?.message || e));
+        } finally { busy = false; }
+    };
+
+    const review = async () => {
+        if (!res || !res.orphans.length) return;
+        const KIND = { ward: 'гардероб', refs: 'реф' };
+        const onDelete = async (paths, prog) => {
+            // Between the scan and this click a picture could have been put to use.
+            let now = '';
+            try { const c = SillyTavern.getContext(); now = JSON.stringify([c.chat, c.chatMetadata, _studioLate]); } catch (_) { }
+            const mine = paths.filter(p => slayCountPathUses(p) === 0 && !now.includes(p.split('/').pop()));
+            // And against the chats on disk, read anew: see res.verify.
+            const check = await res.verify(mine, (i, n) => prog(i, n, 'Перепроверяю чаты…'));
+            const folderOf = (p) => p.split('/').slice(-2, -1)[0];
+            const inUse = mine.filter(p => check.used.has(p.split('/').pop()));
+            const unsure = mine.filter(p => !check.used.has(p.split('/').pop()) && check.blocked(folderOf(p)));
+            const safe = mine.filter(p => !inUse.includes(p) && !unsure.includes(p));
+            const skipped = paths.length - mine.length + inUse.length;
+            const out = await slayDeleteFiles(safe, prog);
+            // What turned out to be in use leaves the list too: it is not «ничья».
+            const notOrphan = new Set(inUse);
+            res.orphans = res.orphans.filter(f => !notOrphan.has(f.path));
+            res.used += notOrphan.size;
+            const gone = new Set(out.killed);
+            const freed = res.orphans.filter(f => gone.has(f.path)).reduce((s, f) => s + (f.size || 0), 0);
+            res.orphans = res.orphans.filter(f => !gone.has(f.path));
+            res.total -= gone.size;
+            iigLog('INFO', `Cleanup: deleted ${gone.size} of ${paths.length}, failed ${out.failed.length}, skipped ${skipped}`);
+            if (out.failed.length || skipped || unsure.length) {
+                const byWhy = out.failed.reduce((a, f) => { (a[f.why] = a[f.why] || []).push(f.name); return a; }, {});
+                const lines = Object.entries(byWhy).map(([why, names]) => `· ${why}: ${sanitizeForHtml(names.slice(0, 3).join(', '))}${names.length > 3 ? ` и ещё ${names.length - 3}` : ''}`);
+                if (skipped) lines.push(`· ${skipped} не тронула: картинка где-то используется`);
+                if (unsure.length) lines.push(`· ${unsure.length} не тронула: не получилось перепроверить чаты`);
+                toastr.warning(`Удалено ${gone.size} из ${paths.length} (${slayFmtSize(freed)}). Не вышло:<br>${lines.join('<br>')}`, 'Уборка', { timeOut: 12000, extendedTimeOut: 6000, escapeHtml: false });
+            } else toastr.success(`Удалено ${gone.size} ${slayPlural(gone.size, 'картинка', 'картинки', 'картинок')}, освободилось ${slayFmtSize(freed)}`, 'Уборка', { timeOut: 6000 });
+            return [...out.killed, ...inUse];
+        };
+        // The window stays open after each deletion; it closes by «Отмена» or when nothing is left.
+        await slayPickOrphans(
+            res.orphans.map(f => ({ path: f.path, tab: f.tab, at: f.at, size: f.size || 0, kind: KIND[f.tab] || f.folder })),
+            res.total,
+            { defaultOn: false, title: 'Ничьи картинки', toastTitle: 'Уборка', onDelete,
+              text: 'Этих картинок нет ни в одном чате, студии, слоте и гардеробе. Пока ничего не отмечено. Тап — отметить на удаление (красная рамка), долгое нажатие — посмотреть крупно. Удалится только отмеченное и только после подтверждения.' });
+        if (ov.isConnected) showResult();
+    };
+
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) {
+        ov.addEventListener(type, (e) => {
+            e.stopPropagation();
+            if (type !== 'click') return;
+            const b = e.target.closest('[data-act]');
+            if (!b) { if (e.target === ov && !busy) close(); return; }
+            if (b.disabled) return;
+            if (b.dataset.act === 'close') close();
+            else if (b.dataset.act === 'rescan') scan();
+            else if (b.dataset.act === 'skip') { ctl.skip?.(); b.disabled = true; b.textContent = 'Пропускаю…'; }
+            else if (b.dataset.act === 'review') review();
+        });
+    }
+    scan();
 }
 
 function slayCropEnabled() {
@@ -6471,6 +7265,16 @@ async function slayConfirm(text) {
     // A leftover toast paints above the popup layer and covers the very
     // field the user is meant to type into. Clear the area before showing.
     try { toastr.clear(); } catch (_) {}
+    // SLAY's own box. Over an open ST dialog it would end up underneath (a
+    // dialog sits in the browser's top layer), so there ST's popup is used.
+    if (!document.querySelector('dialog[open]')) {
+        // Callers pass HTML; only line breaks and bold survive.
+        const html = String(text).replace(/<(?!\/?(?:br|b)\s*\/?>)[^>]*>/gi, '');
+        const verb = (html.match(/^\s*(Удалить|Убрать)/) || [])[1];
+        const k = await slayChoose(verb ? 'Удаление' : 'Подтвердите', html,
+            [{ key: 'y', label: verb || 'Да', danger: !!verb, primary: !verb }], { html: true, confirm: true });
+        return k === 'y';
+    }
     const ctx = SillyTavern.getContext();
     try {
         if (typeof ctx.callGenericPopup === 'function') {
@@ -6924,6 +7728,7 @@ function attachRegenButton(imgEl) {
                         timeOut: 15000, extendedTimeOut: 5000,
                         onclick: async () => {
                             try {
+                                if (!SillyTavern.getContext().chat?.includes(message)) { toastr.info('Это было в другом чате: вернитесь в него и перерисуйте заново', 'SLAY Images'); return; }
                                 recordSrcRemap(newPath, origSrcAttr);
                                 replaceImageSrcEverywhere(message, newPath, origSrcAttr);
                                 const live = findLiveImgByInstruction(liveImg) || liveImg;
@@ -7033,7 +7838,7 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
             continue;
         }
         const instr = stale.getAttribute('data-iig-instruction') || '';
-        const errorEl = createErrorPlaceholder(stale.dataset.tagId || `iig-reload-${Date.now()}`, 'Картинка не была сгенерирована', { fullMatch: `data-iig-instruction='${instr}'` });
+        const errorEl = createErrorPlaceholder(stale.dataset.tagId || `iig-reload-${Date.now()}`, 'Картинка не была сгенерирована', { instruction: instr });
         // If the stale img is inside an iig-img-wrap (regen overlay from older build),
         // replace the WHOLE wrap, not just the img — otherwise the overlay circle stays visible.
         const wrap = stale.closest('.iig-img-wrap');
@@ -7054,7 +7859,7 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
             const mid = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : NaN;
             if (Number.isInteger(mid) && iigMessageBusy(mid)) continue;
             const instr = el.getAttribute('data-iig-instruction') || '';
-            const errorEl = createErrorPlaceholder(`iig-interrupted-${Date.now()}`, 'Генерация была прервана — вкладка закрылась или связь оборвалась', { fullMatch: `data-iig-instruction='${instr}'` });
+            const errorEl = createErrorPlaceholder(`iig-interrupted-${Date.now()}`, 'Генерация была прервана — вкладка закрылась или связь оборвалась', { instruction: instr });
             (el.closest('.iig-img-wrap') || el).replaceWith(errorEl);
         }
     }
@@ -7484,7 +8289,9 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             // NOT retry beyond it: a retry is a paid request, and on a timeout the
             // server may well have generated and billed the image already.
             const m = String(error.message || '').toLowerCase();
-            const isRetryable = /\b(429|500|502|503|504)\b/.test(m)
+            const st = Number(error?.status) || 0;
+            const refused = st >= 400 && st < 500 && st !== 408 && st !== 429;
+            const isRetryable = refused ? false : /\b(429|500|502|503|504)\b/.test(m)
                 || m.includes('failed to fetch') || m.includes('load failed')
                 || m.includes('network') || m.includes('networkerror')
                 || m.includes('timed out') || m.includes('timeout')
@@ -7863,8 +8670,19 @@ function iigCooldownKey(messageId, message) {
 function iigStillSameChat(chatIdAtStart, messageId, message) {
     try {
         const ctx = SillyTavern.getContext();
-        return ctx.chatId === chatIdAtStart && ctx.chat?.[messageId] === message;
+        // A message deleted above this one moves it to another index; it is
+        // still the same message of the same chat.
+        return ctx.chatId === chatIdAtStart && !!message && (ctx.chat?.[messageId] === message || !!ctx.chat?.includes(message));
     } catch (_) { return false; }
+}
+// A picture that was generated but would not upload is kept here, by message,
+// so a re-render of that message cannot start a second paid generation.
+const _iigUnsaved = new Map();   // message object -> [{ dataUrl, saver, persist }]
+function iigUnsavedDrop(message, dataUrl) {
+    const list = _iigUnsaved.get(message);
+    if (!list) return;
+    const left = list.filter(x => x.dataUrl !== dataUrl);
+    if (left.length) _iigUnsaved.set(message, left); else _iigUnsaved.delete(message);
 }
 // ↻ on a picture and «Попробовать снова» on a card are IMAGE jobs: several may
 // run in one message at once (each rewrites only its own tag). They must not
@@ -7949,7 +8767,8 @@ async function iigSaveWithRetry(saver, onStatus) {
 }
 // `persist(path)` resolves to true (written; the caller still has to saveChat),
 // 'deferred' (another chat is open, parked in pendingResults) or false.
-function iigMarkUnsaved(el, dataUrl, saver, persist) {
+function iigMarkUnsaved(el, dataUrl, saver, persist, message = null) {
+    if (message) { const list = _iigUnsaved.get(message) || []; list.push({ dataUrl, saver, persist }); _iigUnsaved.set(message, list); }
     if (!el) return;
     el._iigPendingDataUrl = dataUrl;
     let wrap = el.closest?.('.iig-img-wrap');
@@ -7974,6 +8793,7 @@ function iigMarkUnsaved(el, dataUrl, saver, persist) {
             const path = await iigSaveWithRetry(() => saver(el._iigPendingDataUrl));
             el.setAttribute('src', path); el.src = path;
             const r = await persist(path);
+            if (message) iigUnsavedDrop(message, dataUrl);
             delete el._iigPendingDataUrl;
             btn.remove();
             if (r === true) {
@@ -8230,7 +9050,10 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     // Keep instruction on the element so the retry button can parse it, AND so recovery after
     // page reload still has params to regenerate from
     let instructionValue = '';
-    if (tagInfo?.fullMatch) {
+    // Given as a string: taken whole. Cutting it back out of a quoted attribute
+    // stopped at the first apostrophe of the prompt («Anna's hand»).
+    if (typeof tagInfo?.instruction === 'string' && tagInfo.instruction) instructionValue = tagInfo.instruction;
+    else if (tagInfo?.fullMatch) {
         const m = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(?:(['"]))([\s\S]*?)\1/i) || tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*([{][\s\S]*?[}])(?:\s|>)/i);
         if (m) instructionValue = m[2] || m[1];
     }
@@ -8347,8 +9170,8 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
             // block above no-ops. Rewrite those markers to the legacy success
             // form in every store. indexOf guard, NOT .test() — a /g regex's
             // test() advances lastIndex and silently fails on the next call.
-            const legacyRewrite = (str) => (typeof str === 'string' && str.indexOf('[IMG:ERROR:') !== -1)
-                ? str.replace(/\[IMG:ERROR:[^\]]*\]/g, () => `[IMG:✓:${mediaPath}]`)
+            const legacyRewrite = (str) => (!instructionJsonStr && typeof str === 'string' && str.indexOf('[IMG:ERROR:') !== -1)
+                ? str.replace(/\[IMG:ERROR:[^\]]*\]/, () => `[IMG:✓:${mediaPath}]`)
                 : null;
             const tryField = (obj, key) => {
                 const out = legacyRewrite(obj?.[key]);
@@ -8387,7 +9210,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
                 toastr.warning('Не удалось записать картинку в чат', 'SLAY Images');
             }
         } else {
-            iigMarkUnsaved(newEl, dataUrl, saver, persist);
+            iigMarkUnsaved(newEl, dataUrl, saver, persist, message);
         }
     } catch (err) {
         const errorMsg = err?.message || String(err);
@@ -8395,7 +9218,7 @@ async function retryFailedGeneration(errorEl, instructionJsonStr) {
         if (loading._timerInterval) clearInterval(loading._timerInterval);
         // Fall back to a new error placeholder with the same instruction
         const explainedRetry = slayExplainError(err);
-        const newError = createErrorPlaceholder(tagId, explainedRetry, { fullMatch: instructionJsonStr ? `data-iig-instruction='${instructionJsonStr}'` : '' });
+        const newError = createErrorPlaceholder(tagId, explainedRetry, { instruction: instructionJsonStr || '' });
         if (loading.isConnected) loading.replaceWith(newError);
         toastr[explainedRetry.tone === 'warning' ? 'warning' : 'error'](explainedRetry.short, 'SLAY Images', { timeOut: 7000 });
     } finally {
@@ -8420,6 +9243,29 @@ async function processMessageTags(messageId) {
     const lastProcessed = recentlyProcessed.get(cooldownKey);
     if (lastProcessed && (Date.now() - lastProcessed) < REPROCESS_COOLDOWN_MS) return;
 
+    const waiting = _iigUnsaved.get(message);
+    if (waiting && waiting.length) {
+        if (processingMessageObjects.has(message)) return;
+        processingMessageObjects.add(message);
+        try {
+            let wrote = 0;
+            for (const x of [...waiting]) {
+                try {
+                    const path = await x.saver(x.dataUrl);
+                    const r = await x.persist(path);
+                    iigUnsavedDrop(message, x.dataUrl);
+                    if (r === true) wrote++;
+                } catch (e) { iigLog('WARN', 'unsaved picture: upload failed again:', e?.message || e); }
+            }
+            if (wrote) {
+                try { await context.saveChat?.(); } catch (_) { context.saveChatDebounced?.(); }
+                try { context.updateMessageBlock?.(context.chat.indexOf(message), message); } catch (_) { }
+            }
+            if (_iigUnsaved.has(message)) toastr.warning('Картинка этого сообщения получена, но всё ещё не сохранилась в SillyTavern. Заново не рисую, чтобы не платить второй раз.', 'SLAY Images', { timeOut: 8000 });
+        } finally { processingMessageObjects.delete(message); }
+        return;
+    }
+
     const tags = await parseMessageImageTags(message, { checkExistence: true });
     if (tags.length === 0) return;
     if (processingMessageObjects.has(message)) return;   // a second event slipped in during the await
@@ -8435,15 +9281,30 @@ async function processMessageTags(messageId) {
     const mesTextEl = messageElement.querySelector('.mes_text');
     if (!mesTextEl) { iigReleaseInFlight(messageId, message); return; }
 
+    // Old-format tags first, all of them, in one pass: rewriting innerHTML later
+    // would re-create the spinners of the tags already being drawn.
+    tags.forEach((tag, index) => {
+        if (tag.isNewFormat) return;
+        const tagEscaped = tag.fullMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/"/g, '(?:"|&quot;)');
+        const html = mesTextEl.innerHTML;
+        const out = html.replace(new RegExp(tagEscaped), () => `<span data-iig-placeholder="iig-${messageId}-${index}"></span>`);
+        if (out !== html) mesTextEl.innerHTML = out;
+    });
+    const usedEls = new Set();
+    const tagEls = [...mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction]')];
+
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
         const loadingPlaceholder = createLoadingPlaceholder(tagId);
         let targetElement = null;
 
         if (tag.isNewFormat) {
-            const allImgs = mesTextEl.querySelectorAll('img[data-iig-instruction], video[data-iig-instruction]');
+            // By the exact instruction first; the loose search below is only for
+            // what the browser mangled, and never takes an element twice.
+            targetElement = iigPickTargetElement(tag, index, tagEls, usedEls);
+            const allImgs = targetElement ? [] : tagEls.filter(el => !usedEls.has(el) && el.isConnected);
             const searchPrompt = tag.prompt.substring(0, 30);
-            for (const img of allImgs) {
+            if (searchPrompt) for (const img of allImgs) {
                 const instruction = img.getAttribute('data-iig-instruction');
                 if (instruction) {
                     const decoded = iigDecodeInstruction(instruction);
@@ -8457,13 +9318,11 @@ async function processMessageTags(messageId) {
                 for (const img of allImgs) { const src = img.getAttribute('src') || ''; if (src.includes('[IMG:GEN]') || src === '' || src === '#') { targetElement = img; break; } }
             }
             if (!targetElement) {
-                for (const img of mesTextEl.querySelectorAll('img')) { const src = img.getAttribute('src') || ''; if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]')) { targetElement = img; break; } }
+                for (const img of mesTextEl.querySelectorAll('img')) { if (usedEls.has(img)) continue; const src = img.getAttribute('src') || ''; if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]')) { targetElement = img; break; } }
             }
+            if (targetElement) usedEls.add(targetElement);
         } else {
-            const tagEscaped = tag.fullMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/"/g, '(?:"|&quot;)');
-            const before = mesTextEl.innerHTML;
-            mesTextEl.innerHTML = mesTextEl.innerHTML.replace(new RegExp(tagEscaped, 'g'), () => `<span data-iig-placeholder="${tagId}"></span>`);
-            if (before !== mesTextEl.innerHTML) targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
+            targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
             if (!targetElement) { for (const img of mesTextEl.querySelectorAll('img')) { if (img.src?.includes('[IMG:GEN:')) { targetElement = img; break; } } }
         }
 
@@ -8526,10 +9385,10 @@ async function processMessageTags(messageId) {
             } else {
                 // Generated and paid for, but ST would not store the file: show it
                 // from the data URL and let the user retry ONLY the upload.
-                iigMarkUnsaved(el, dataUrl, saver, persist);
+                iigMarkUnsaved(el, dataUrl, saver, persist, message);
             }
         } catch (error) {
-            iigLog('ERROR', `Tag ${index} failed:`, error.message);
+            iigLog('ERROR', `Tag ${index} failed:`, error?.message || error);
             const explained = slayExplainError(error);
             const errorPlaceholder = createErrorPlaceholder(tagId, explained, tag);
             if (loadingPlaceholder._timerInterval) clearInterval(loadingPlaceholder._timerInterval);
@@ -8551,7 +9410,7 @@ async function processMessageTags(messageId) {
                     replaceTagInMessageSource(message, tag, errorTag);
                 }
             } else {
-                replaceTagInMessageSource(message, tag, `[IMG:ERROR:${error.message.substring(0, 50)}]`);
+                replaceTagInMessageSource(message, tag, `[IMG:ERROR:${String(error?.message || error).substring(0, 50)}]`);
             }
             sessionErrorCount++; updateSessionStats();
             toastr[explained.tone === 'warning' ? 'warning' : 'error'](explained.short, 'SLAY Images', { timeOut: 7000 });
@@ -8614,6 +9473,13 @@ async function regenerateMessageImages(messageId) {
             const tag = tags[index];
             const tagId = `iig-regen-${messageId}-${index}`;
             let loadingPlaceholder = null;
+            // The next picture would be built from the refs, outfit and place of
+            // whatever chat is open now, and paid for.
+            if (!iigStillSameChat(chatIdAtStart, messageId, message)) {
+                iigLog('WARN', `Regen of message ${messageId}: chat changed — ${tags.length - index} picture(s) not started`);
+                toastr.info(`Чат сменился: оставшиеся картинки (${tags.length - index}) не перерисовываю`, 'SLAY Images', { timeOut: 6000 });
+                break;
+            }
             try {
                 const existingEl = iigPickTargetElement(tag, index, targetEls, usedEls);
                 if (!existingEl) { iigLog('WARN', `Regen: no on-screen element for tag ${index}, skipped`); continue; }
@@ -8673,10 +9539,10 @@ async function regenerateMessageImages(messageId) {
                     // Paid for and received; only the upload failed. The message
                     // keeps its old picture, the new one is on screen with a
                     // «Сохранить ещё раз» button.
-                    iigMarkUnsaved(el, dataUrl, saver, persist);
+                    iigMarkUnsaved(el, dataUrl, saver, persist, message);
                 }
             } catch (error) {
-                iigLog('ERROR', `Regen failed tag ${index}:`, error.message);
+                iigLog('ERROR', `Regen failed tag ${index}:`, error?.message || error);
                 // Clean up after ourselves. Without this the spinner stayed in the
                 // message forever — the image gone from view, no error card, no retry
                 // button — which is what users described as "it ate my picture".
@@ -8714,7 +9580,8 @@ function addRegenerateButton(messageElement, messageId) {
         e.stopPropagation();
         if (btn.classList.contains('iig-regen-busy')) return;
         btn.classList.add('iig-regen-busy'); btn.style.opacity = '0.5'; btn.style.cursor = 'wait';
-        try { await regenerateMessageImages(messageId); }
+        const now = parseInt(btn.closest('.mes')?.getAttribute('mesid'), 10);
+        try { await regenerateMessageImages(Number.isInteger(now) ? now : messageId); }
         finally { btn.classList.remove('iig-regen-busy'); btn.style.opacity = ''; btn.style.cursor = ''; }
     });
     extraMesButtons.appendChild(btn);
@@ -9272,7 +10139,7 @@ function createSettingsUI() {
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_desc" ${swSettings.sendOutfitDescription !== false ? 'checked' : ''}><span>Отправлять текстовое описание аутфита</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_image_bot" ${swSettings.sendOutfitImageBot !== false ? 'checked' : ''}><span>Отправлять картинку одежды бота</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_send_outfit_image_user" ${swSettings.sendOutfitImageUser !== false ? 'checked' : ''}><span>Отправлять картинку одежды юзера</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 ЭКСПЕРИМЕНТАЛЬНО: склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_sw_collage" ${swSettings.experimentalCollage ? 'checked' : ''}><span>🧪 Склеивать отдельные куски одежды в коллаж (до 6 картинок, может работать некорректно)</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_skip_desc_warn" ${swSettings.skipDescriptionWarning ? 'checked' : ''}><span>Не спрашивать про описание при надевании</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_show_float" ${swSettings.showFloatingBtn ? 'checked' : ''}><span>Иконка гардероба в окне чата</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_sw_quick_mobile" ${swSettings.quickSwapMobile === true ? 'checked' : ''}><span>Использовать быстрый свап (телефон): тап по иконке открывает быстрое меню</span></label>
@@ -9324,6 +10191,12 @@ function createSettingsUI() {
                                 <div class="flex-row ${settings.naisteraVideoTest ? '' : 'iig-hidden'}" id="slay_naistera_video_frequency_row"><label>Каждые N сообщений</label><input type="number" id="slay_naistera_video_every_n" class="text_pole flex1" value="${settings.naisteraVideoEveryN}" min="1" max="999"></div>
                             </div>
                         </div>
+                        <div class="iig-subhead">Студия</div>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_studio_btn_show" ${settings.studioBtnHidden === true ? '' : 'checked'}><span>Кнопка студии (палитра) в окне чата</span></label>
+                        <div id="slay_studio_open" class="menu_button" style="width:100%;"><i class="fa-solid fa-palette"></i> Открыть студию</div>
+                        <div class="iig-subhead">Диск</div>
+                        <div id="slay_cleanup_open" class="menu_button" style="width:100%;"><i class="fa-solid fa-broom"></i> Уборка картинок</div>
+                        <p class="hint">Покажет, сколько картинок SLAY лежит на диске и какие из них больше нигде не используются. Удаляется только то, что вы сами отметите.</p>
                         <div class="iig-subhead">Отладка</div>
                         <div id="slay_export_logs" class="menu_button" style="width:100%;"><i class="fa-solid fa-download"></i> Экспорт логов</div>`;
 
@@ -10459,8 +11332,9 @@ function bindRecentRefsEvents(host) {
         slot.addEventListener('drop', (e) => {
             e.preventDefault();
             slot.classList.remove('iig-slot-drop-hover');
-            const path = e.dataTransfer.getData('text/plain') || window._iigRecentDragPath;
-            if (!path) return;
+            const path = window._iigRecentDragPath || e.dataTransfer.getData('text/plain');
+            // Any dragged text or link used to be stored as the picture's path.
+            if (!path || !/^\/?user\/images\/[^?#]+\.(?:png|jpe?g|webp|gif|avif)$/i.test(String(path))) return;
             const refType = slot.dataset.refType;
             const npcIndex = parseInt(slot.dataset.npcIndex, 10);
             applyPathToSlot(slot, refType, npcIndex, path);
@@ -11014,10 +11888,13 @@ function bindRefSlotEvents() {
         }
         slot.querySelector('.iig-ref-delete-btn')?.addEventListener('click', () => {
             const s = getCurrentCharacterRefs();
+            let wasHere = false;
+            if (refType === 'loc') { try { wasHere = slayIsHere(slayRefList(s, refType)[npcIndex]); } catch (_) { } }
             if (refType === 'char') s.charRef = { name: '', imageBase64: '', imagePath: '' };
             else if (refType === 'user') s.userRef = { name: '', imageBase64: '', imagePath: '' };
             else if (refType === 'npc' || refType === 'loc') slayRefList(s, refType)[npcIndex] = { name: '', imageBase64: '', imagePath: '' };
             saveSettingsNow();
+            if (wasHere) { try { slaySetHere(null); renderRefSlots(); } catch (_) { } }
             const thumb = slot.querySelector('.iig-ref-thumb'); if (thumb) thumb.src = '';
             const tw = slot.querySelector('.iig-ref-thumb-wrap'); if (tw) tw.classList.remove('has-image');
             slot.querySelector('.iig-ref-name').value = '';
@@ -12333,7 +13210,10 @@ function bindSettingsEvents() {
         if (endpointInput) endpointInput.placeholder = getEndpointPlaceholder(apiType);
     };
 
-    document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { window.slayWardrobe?.findOrphanImages?.(); });
+    document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { openSlayCleanup(); });
+    document.getElementById('slay_cleanup_open')?.addEventListener('click', () => { openSlayCleanup(); });
+    document.getElementById('slay_studio_btn_show')?.addEventListener('change', (e) => { settings.studioBtnHidden = !e.target.checked; saveSettings(); slayInjectStudioBtn(); });
+    document.getElementById('slay_studio_open')?.addEventListener('click', () => { openSlayStudio(); });
     document.getElementById('slay_skip_crop')?.addEventListener('change', (e) => { settings.skipCrop = e.target.checked; saveSettings(); });
     // Folding hides the slots only: filled locations keep going to pictures.
     // Folded until the user opens them once; after that their choice is kept.
@@ -12635,9 +13515,19 @@ function bindSettingsEvents() {
         // custom / naistera never return a list, so those users must type.
         iigSyncModelInputMode({ forceManual: _s.apiType === 'custom' || _s.apiType === 'naistera' });
         if (canList && !_s.manualModel) {
-            populateModelDatalist({ silent: true })
-                .then(n => { if (!n) iigSyncModelInputMode({ forceManual: true }); })
-                .catch(() => iigSyncModelInputMode({ forceManual: true }));
+            const root = document.querySelector('.slay-hd')?.closest('.inline-drawer');
+            let asked = false;
+            const ask = () => {
+                if (asked) return;
+                asked = true;
+                root?.removeEventListener('pointerdown', ask, true);
+                root?.removeEventListener('focusin', ask, true);
+                populateModelDatalist({ silent: true })
+                    .then(n => { if (!n) iigSyncModelInputMode({ forceManual: true }); })
+                    .catch(() => iigSyncModelInputMode({ forceManual: true }));
+            };
+            if (root) { root.addEventListener('pointerdown', ask, true); root.addEventListener('focusin', ask, true); }
+            else ask();
         }
     }
     document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); updateVisibility(); iigSyncModelInputMode(); });
@@ -12941,7 +13831,7 @@ function bindSettingsEvents() {
                 // Nothing to choose from — don't strand the user on an empty list.
                 swS.describeManualModel = true;
                 SillyTavern.getContext().saveSettingsDebounced();
-                document.getElementById('slay_sw_describe_manual')?.setAttribute('checked', 'checked');
+                { const cb = document.getElementById('slay_sw_describe_manual'); if (cb) cb.checked = true; }
                 document.getElementById('slay_sw_describe_model')?.classList.remove('iig-hidden');
                 document.getElementById('slay_sw_describe_model_select')?.classList.add('iig-hidden');
             }
@@ -13062,27 +13952,68 @@ const SLAY_STUDIO_CTX = {
 };
 const SLAY_STUDIO_RATIOS = ['1:1', '3:4', '4:3', '2:3', '9:16', '16:9'];
 // Window state, memory only: which chips, task, ratio. Reset per chat.
-const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busy: 0, busyChat: null };
+const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busyBy: {}, idea: '', prompt: '' };
+// The open window's redraw of the results, for jobs started by an earlier window.
+let _studioRedraw = null;
 // The open window's own close (listeners and observers go with it).
 let _studioClose = null;
 // Pictures that finished after their chat was left: kept until that chat is
 // open again (in memory, so until the page reloads).
-const _studioLate = {};
+const _studioLate = (() => { try { const o = JSON.parse(localStorage.getItem('slay_studio_late') || '{}'); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch (_) { return {}; } })();
+function slayStudioLateSave() {
+    try { if (Object.keys(_studioLate).length) localStorage.setItem('slay_studio_late', JSON.stringify(_studioLate)); else localStorage.removeItem('slay_studio_late'); } catch (_) { }
+}
+// While a rewrite through the chat model runs, the provider's own words are read
+// off the response. One wrapper for all rewrites; a streamed reply (the chat
+// itself, used at the same time) is passed on untouched, and with no rewrite
+// running the wrapper does nothing.
+const _rwTaps = new Set();
+let _rwWrapped = null, _rwOrig = null;
+function slayRwTap(fn) {
+    if (!_rwWrapped || window.fetch !== _rwWrapped) {
+        if (!_rwWrapped || !_rwTaps.size) {
+            const orig = window.fetch;
+            _rwOrig = orig;
+            _rwWrapped = async function (...a) {
+                const r = await orig.apply(this, a);
+                try {
+                    if (_rwTaps.size && /chat-completions\/generate/.test(String(a[0]?.url || a[0])) && !/"stream"\s*:\s*true/.test(String(a[1]?.body || ''))) {
+                        const t = (await r.clone().text()).slice(0, 2000);
+                        for (const f of _rwTaps) { try { f(r, t); } catch (_) { } }
+                    }
+                } catch (_) { }
+                return r;
+            };
+            window.fetch = _rwWrapped;
+        }
+    }
+    _rwTaps.add(fn);
+    return () => {
+        _rwTaps.delete(fn);
+        if (!_rwTaps.size && window.fetch === _rwWrapped) { window.fetch = _rwOrig; _rwWrapped = null; }
+    };
+}
 function slayStudioChatKey() {
     const ctx = SillyTavern.getContext();
     return ctx.chatId || ctx.groupId || '';
+}
+// «Sent» is remembered on the item, but the message may have been deleted since.
+function slayStudioInChat(item) {
+    if (!item?.sent) return false;
+    try { return JSON.stringify(SillyTavern.getContext().chat || []).includes(String(item.path).split('/').pop()); } catch (_) { return true; }
 }
 function slayStudioTakeLate() {
     const key = slayStudioChatKey();
     const late = key && _studioLate[key];
     if (!late || !late.length) return;
     delete _studioLate[key];
+    slayStudioLateSave();
     slayStudioItems().push(...late);
     slayStudioSave();
 }
 // Chat switched: the window showed the old chat's chips and results.
 function slayStudioOnChatChanged() {
-    try { _studioClose?.(); } catch (_) { }
+    try { if (_studio.chatId !== slayStudioChatKey()) _studioClose?.(); } catch (_) { }
     try { slayStudioTakeLate(); } catch (e) { iigLog('WARN', 'studio late results:', e?.message); }
 }
 
@@ -13395,21 +14326,9 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
     let why = '';
     const ask = async (len) => {
         if (direct) return slayStudioDirectAsk(conn, system, prompt, len);
-        const orig = window.fetch;
-        let live = true;
-        const tee = async function (...a) {
-            const r = await orig.apply(this, a);
-            try {
-                if (live && /chat-completions\/generate/.test(String(a[0]?.url || a[0]))) {
-                    const t = (await r.clone().text()).slice(0, 2000);
-                    if (!r.ok || /^\s*\{\s*"error"/.test(t)) why = t;
-                }
-            } catch (_) { }
-            return r;
-        };
-        window.fetch = tee;
+        const untap = slayRwTap((r, t) => { if (!r.ok || /^\s*\{\s*"error"/.test(t)) why = t; });
         try { return await ctx.generateRaw({ systemPrompt: system, prompt, responseLength: len }); }
-        finally { live = false; if (window.fetch === tee) window.fetch = orig; }
+        finally { untap(); }
     };
     const byReasoning = (m) => /reasoning|exhausted/i.test(m);
     const limitTooBig = (m) => !byReasoning(m) && /max_tokens|max_completion_tokens|max_output_tokens|max output tokens|maximum (?:allowed )?(?:number of )?(?:output |completion )?tokens/i.test(m);
@@ -13714,17 +14633,18 @@ function slayStudioWindow(ov) {
 function openSlayStudio() {
     const ctx = SillyTavern.getContext();
     if (!ctx.chatId && !ctx.groupId) { toastr.info('Открой чат — студия хранит картинки в нём', 'Студия'); return; }
+    try { slayThumbCap((Array.isArray(ctx.chatMetadata?.slay_studio) ? ctx.chatMetadata.slay_studio : []).map(x => x.path)); } catch (_) { }
     try { _studioClose?.(); } catch (_) { }
     document.querySelector('.slay-studio-ov')?.remove();
     slayStudioTakeLate();
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
-        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false });
+        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '' });
     }
     // A raw idea skips the preset's image rules, so the model fills the gaps
     // from the references. Every open starts with the rewrite on.
     _studio.raw = false;
     const esc = sanitizeForHtml;
-    const opts = slayStudioWhoOptions();
+    let opts = slayStudioWhoOptions();
     if (!_studio.who) _studio.who = new Set(opts.filter(o => o.kind === 'char' || o.kind === 'user' || o.member).map(o => o.key).slice(0, 3));
     const ratios = SLAY_STUDIO_RATIOS.filter(r => VALID_ASPECT_RATIOS.includes(r));
     const title = ctx.groupId ? 'группа' : (ctx.name2 || '');
@@ -13736,7 +14656,7 @@ function openSlayStudio() {
     ov.setAttribute('data-sbg-in', '');
     ov.innerHTML = `
       <div class="slay-studio" role="dialog" aria-label="Студия">
-        <div class="slay-studio-top"><b>🎨 Студия</b><span class="slay-studio-sub">${esc(title)}</span><button type="button" class="slay-studio-mode" data-act="mode" title="Развернуть"></button><button type="button" class="slay-studio-x" data-act="close" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
+        <div class="slay-studio-top"><b>🎨 Студия</b><span class="slay-studio-sub">${esc(title)}</span><button type="button" class="slay-studio-broom" data-act="clean" title="Уборка: какие картинки можно убрать с диска"><i class="fa-solid fa-broom"></i></button><button type="button" class="slay-studio-mode" data-act="mode" title="Развернуть"></button><button type="button" class="slay-studio-x" data-act="close" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
         <div class="slay-studio-cols">
           <div class="slay-studio-left">
             <div class="slay-studio-lbl">Что рисуем</div>
@@ -13773,8 +14693,10 @@ function openSlayStudio() {
             <div class="slay-studio-note" data-zone="cost"></div>
           </div>
           <div class="slay-studio-right">
-            <div class="slay-studio-lbl">Результаты — только здесь, пока сама не отправишь в чат</div>
+            <div class="slay-studio-reshead"><div class="slay-studio-lbl" data-zone="rescount"></div><button type="button" class="slay-studio-mini" data-act="pick">Выбрать</button></div>
+            <div class="slay-studio-chips" data-zone="resfilter"></div>
             <div class="slay-studio-res" data-zone="res"></div>
+            <div class="slay-studio-pickbar" data-zone="pickbar" hidden></div>
           </div>
         </div>
       </div>`;
@@ -13783,12 +14705,20 @@ function openSlayStudio() {
     const $z = (z) => ov.querySelector(`[data-zone="${z}"]`);
     const ideaEl = ov.querySelector('.slay-studio-idea');
     const promptEl = ov.querySelector('.slay-studio-prompt');
+    // The texts outlive the window: closing it to look at the chat loses nothing.
+    ideaEl.value = _studio.idea || '';
+    promptEl.value = _studio.prompt || '';
+    const keepText = () => { _studio.idea = ideaEl.value; _studio.prompt = promptEl.value; };
+    ov.addEventListener('input', (e) => { if (e.target === ideaEl || e.target === promptEl) keepText(); });
     $z('ar').value = ratios.includes(_studio.ar) ? _studio.ar : (ratios[0] || '1:1');
     $z('n').value = String(_studio.n);
     $z('raw').checked = _studio.raw;
     $z('style').value = _studio.noStyle ? 'none' : '';
 
     const drawLeft = () => {
+        // Refs and places may have changed in the settings while the window was open.
+        opts = slayStudioWhoOptions();
+        keepText();
         $z('tasks').innerHTML = Object.entries(SLAY_STUDIO_TASKS).map(([k, t]) => `<button type="button" class="slay-studio-chip${_studio.task === k ? ' on' : ''}" data-task="${k}">${esc(t.label)}</button>`).join('');
         $z('who').innerHTML = opts.length
             ? opts.map(o => `<button type="button" class="slay-studio-chip${o.kind === 'loc' ? ' loc' : ''}${_studio.who.has(o.key) ? ' on' : ''}" data-who="${esc(o.key)}">${o.kind === 'loc' ? '📍 ' : ''}${esc(o.label)}</button>`).join('')
@@ -13799,8 +14729,12 @@ function openSlayStudio() {
             : 'Никого не выбрано — рисуется только по тексту.';
         {
             const xr = slayStudioXRefs(false);
-            $z('xrefs').innerHTML = xr.map(x => `<span class="slay-studio-xref${x.on ? ' on' : ''}" data-xref="${esc(x.id)}" title="${x.on ? 'Уйдёт рефом. Нажми — выключить' : 'Выключен. Нажми — включить'}"><img src="${esc(x.path)}" alt="" loading="lazy"><span class="slay-studio-xref-n">${esc(x.name)}</span><button type="button" data-xact="name" title="Переименовать: это имя увидит модель">✎</button><button type="button" data-xact="del" title="Убрать">×</button></span>`).join('')
+            $z('xrefs').innerHTML = xr.map(x => `<span class="slay-studio-xref${x.on ? ' on' : ''}" data-xref="${esc(x.id)}" title="${x.on ? 'Уйдёт рефом. Нажми — выключить' : 'Выключен. Нажми — включить'}"><img data-thumb="${esc(x.path)}" alt=""><span class="slay-studio-xref-n">${esc(x.name)}</span><button type="button" data-xact="name" title="Переименовать: это имя увидит модель">✎</button><button type="button" data-xact="del" title="Убрать">×</button></span>`).join('')
                 + '<button type="button" class="slay-studio-mini" data-act="addref" title="Своя картинка рефом: поза, вещь, место, человек">＋ Свой реф</button>';
+            for (const img of $z('xrefs').querySelectorAll('img[data-thumb]')) {
+                const p = img.dataset.thumb;
+                slayThumb(p, () => img.isConnected).then((u) => { if (img.isConnected) img.src = u || p; });
+            }
             const onX = xr.filter(x => x && x.on).map(x => x.name);
             if (onX.length) $z('refline').textContent = picked.length
                 ? `${$z('refline').textContent} Свои рефы: ${onX.join(', ')}.`
@@ -13842,36 +14776,87 @@ function openSlayStudio() {
         $z('cost').textContent = slayStudioCostText();
     };
 
-    const drawResults = () => {
-        const items = slayStudioItems(false);
-        const busyN = _studio.busyChat === slayStudioChatKey() ? _studio.busy : 0;
+    // Results: a filter by «в чате», and a pick mode for deleting many at once.
+    let pickMode = false, resFilter = 'all';
+    const pickedIds = new Set();
+    // The grid shows small previews (480 px), made as a card scrolls into
+    // view; the picture itself opens on a click. Until the preview is ready
+    // the card keeps the picture's proportions, so the grid does not jump.
+    const cardRatio = (it) => { const m = String(it.ar || '').match(/^(\d+):(\d+)$/); return m ? ` style="aspect-ratio:${m[1]}/${m[2]}"` : ''; };
+    let cardIo = null;
+    const loadCards = () => {
+        cardIo?.disconnect();
+        const load = (img) => {
+            const full = img.dataset.full;
+            slayThumb(full, () => img.isConnected, 480).then((u) => { if (img.isConnected) { img.src = u || full; img.style.removeProperty('aspect-ratio'); } });
+        };
+        cardIo = typeof IntersectionObserver === 'function'
+            ? new IntersectionObserver((es, obs) => { for (const e of es) if (e.isIntersecting) { obs.unobserve(e.target); load(e.target); } }, { rootMargin: '300px 0px' })
+            : null;
+        for (const img of $z('res').querySelectorAll('img[data-full]')) cardIo ? cardIo.observe(img) : load(img);
+    };
+    const drawResults = () => { drawResultsHtml(); loadCards(); };
+    const drawResultsHtml = () => {
+        const all = slayStudioItems(false);
+        const busyN = _studio.busyBy[slayStudioChatKey()] || 0;
         const busy = Array.from({ length: busyN }, () => '<div class="slay-studio-card busy"><div class="slay-studio-spin"><i class="fa-solid fa-spinner fa-spin"></i> рисую…</div></div>').join('');
+        const sentN = all.filter(x => x.sent).length;
+        if (!all.length) { pickMode = false; resFilter = 'all'; }
+        for (const id of [...pickedIds]) if (!all.some(x => x.id === id)) pickedIds.delete(id);
+        $z('rescount').textContent = all.length
+            ? `Результаты · ${all.length} ${slayPlural(all.length, 'картинка', 'картинки', 'картинок')} · в чат уходят только по кнопке`
+            : 'Результаты — только здесь, пока сама не отправишь в чат';
+        ov.querySelector('[data-act="pick"]').hidden = !all.length;
+        ov.querySelector('[data-act="pick"]').textContent = pickMode ? 'Отмена' : 'Выбрать';
+        $z('resfilter').hidden = !all.length || (!sentN || sentN === all.length);
+        $z('resfilter').innerHTML = [['all', `Все ${all.length}`], ['free', `Не в чате ${all.length - sentN}`], ['sent', `В чате ${sentN}`]]
+            .map(([k, l]) => `<button type="button" class="slay-studio-chip${resFilter === k ? ' on' : ''}" data-rf="${k}">${l}</button>`).join('');
+        const bar = $z('pickbar');
+        bar.hidden = !pickMode;
+        if (pickMode) bar.innerHTML = `
+            <div class="slay-studio-chips"><button type="button" class="slay-studio-chip" data-pk="all">Все</button><button type="button" class="slay-studio-chip" data-pk="free">Все, кроме тех, что в чате</button><button type="button" class="slay-studio-chip" data-pk="none">Снять</button></div>
+            <div class="slay-studio-pickrow"><span>Выбрано: <b>${pickedIds.size}</b></span><button type="button" class="slay-studio-btn del" data-pk="del"><i class="fa-solid fa-trash"></i> Удалить</button></div>`;
+        const items = all.filter(x => resFilter === 'all' || (resFilter === 'sent') === !!x.sent);
         if (!items.length && !busyN) {
-            $z('res').innerHTML = '<div class="slay-studio-empty">Здесь появятся картинки.<br>Они хранятся в студии этого чата, пока не удалишь.</div>';
+            $z('res').innerHTML = all.length
+                ? '<div class="slay-studio-empty">В этом фильтре пусто.</div>'
+                : '<div class="slay-studio-empty">Здесь появятся картинки.<br>Они хранятся в студии этого чата, пока не удалишь.</div>';
+            return;
+        }
+        if (pickMode) {
+            $z('res').innerHTML = busy + items.slice().reverse().map(it => `
+            <div class="slay-studio-card pick${pickedIds.has(it.id) ? ' on' : ''}" data-pickid="${esc(it.id)}">
+              <img decoding="async" alt="" data-full="${esc(it.path)}"${cardRatio(it)}>
+              <span class="slay-studio-ck">${pickedIds.has(it.id) ? '✓' : ''}</span>
+              <div class="slay-studio-cap">${it.sent ? '✓ в чате · ' : ''}${esc(it.idea || it.prompt || '')}</div>
+            </div>`).join('');
             return;
         }
         $z('res').innerHTML = busy + items.slice().reverse().map(it => `
             <div class="slay-studio-card" data-id="${esc(it.id)}">
-              <img loading="lazy" decoding="async" alt="" src="${esc(it.path)}">
+              <img decoding="async" alt="" data-full="${esc(it.path)}"${cardRatio(it)}>
               <div class="slay-studio-cap" title="${esc(it.prompt || '')}">${it.sent ? '✓ в чате · ' : ''}${esc(it.idea || it.prompt || '')}</div>
               <div class="slay-studio-acts">
                 <button type="button" data-card="chat">В чат</button>
                 <button type="button" data-card="ref">Сделать рефом</button>
-                ${slayCanEditImage() ? '<button type="button" data-card="edit">🪄 Правка</button>' : ''}
+                ${slayCanEditImage() ? '<button type="button" data-card="edit"><i class="fa-solid fa-wand-magic-sparkles"></i> Правка</button>' : ''}
                 <button type="button" data-card="again" title="Нарисовать ещё раз по этому же промпту (платный запрос)"><i class="fa-solid fa-rotate-right"></i></button>
                 <button type="button" data-card="reuse" title="Вернуть идею и промпт в поля слева (и скопировать промпт)"><i class="fa-solid fa-copy"></i></button>
-                <button type="button" data-card="dl" title="Скачать">⬇</button>
-                <button type="button" data-card="del" title="Удалить">🗑</button>
+                <button type="button" data-card="dl" title="Скачать"><i class="fa-solid fa-download"></i></button>
+                <button type="button" class="del" data-card="del" title="Удалить из студии и с диска"><i class="fa-solid fa-trash"></i> Удалить</button>
               </div>
             </div>`).join('');
     };
 
-    const close = () => { win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; };
+    const close = () => { keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
     _studioClose = close;
+    _studioRedraw = drawResults;
     // Escape only while focus is inside the Studio: in window mode the chat
     // stays usable and its own Escape must keep working.
     const onKey = (e) => {
         if (e.key !== 'Escape' || document.querySelector('.slay-choose-ov:not(.slay-studio-ov)')) return;
+        const lb = document.getElementById('slay_lightbox');
+        if (lb?.classList.contains('open')) { e.stopPropagation(); lb.classList.remove('open'); document.body.style.overflow = ''; return; }
         if (!ov.contains(document.activeElement)) return;
         e.stopPropagation(); close();
     };
@@ -13880,20 +14865,26 @@ function openSlayStudio() {
     const runGenerate = async ({ prompt, idea, who, ar, n, noStyle, editSource, editText }) => {
         if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'Студия'); return; }
         const chatKey = slayStudioChatKey();
-        _studio.busy += n; _studio.busyChat = chatKey; drawResults();
+        _studio.busyBy[chatKey] = (_studio.busyBy[chatKey] || 0) + n; drawResults();
         let late = 0;
         const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
             studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText, extraRefs: slayStudioXRefsOn(),
         }).then(async (res) => {
             if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
             const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
+            await slayThumbSeed(path, res, 480);
             const item = { id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false };
             if (slayStudioChatKey() === chatKey) { slayStudioItems().push(item); slayStudioSave(); }
-            else { (_studioLate[chatKey] = _studioLate[chatKey] || []).push(item); late++; }
-        }).finally(() => { _studio.busy = Math.max(0, _studio.busy - 1); if (ov.isConnected) drawResults(); }));
+            else { (_studioLate[chatKey] = _studioLate[chatKey] || []).push(item); slayStudioLateSave(); late++; }
+        }).finally(() => {
+            const left = (_studio.busyBy[chatKey] || 1) - 1;
+            if (left > 0) _studio.busyBy[chatKey] = left; else delete _studio.busyBy[chatKey];
+            // Whichever window is open now: the one that started the job may be closed.
+            try { _studioRedraw?.(); } catch (_) { }
+        }));
         const out = await Promise.allSettled(jobs);
         const bad = out.filter(r => r.status === 'rejected');
-        if (late) toastr.info('Картинка дорисовалась, пока был открыт другой чат. Она появится в студии того чата, когда вернёшься (до перезагрузки страницы).', 'Студия', { timeOut: 8000 });
+        if (late) toastr.info('Картинка дорисовалась, пока был открыт другой чат. Она появится в студии того чата, когда вернёшься.', 'Студия', { timeOut: 8000 });
         if (bad.length) toastr.error(`Не нарисовалось ${bad.length} из ${n}: ${bad[0].reason?.message || bad[0].reason}`, 'Студия', { timeOut: 8000 });
         else toastr.success('Готово. В чат ничего не ушло.', 'Студия', { timeOut: 2500 });
     };
@@ -13915,7 +14906,9 @@ function openSlayStudio() {
         for (const f of list) {
             try {
                 const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error || new Error('файл не прочитался')); r.readAsDataURL(f); });
-                const path = await saveImageToFile(dataUrl);
+                let small = dataUrl;
+                try { const b = await compressBase64Image(String(dataUrl).split(',')[1], 1024, 0.85); if (b) small = 'data:image/jpeg;base64,' + b; } catch (e) { iigLog('WARN', 'studio own ref: not shrunk:', e?.message); }
+                const path = await saveImageToFile(small);
                 if (SillyTavern.getContext().chatMetadata !== md) { slayDeleteStoredImage(path).catch(() => { }); continue; }
                 const name = (one || String(f.name || '').replace(/\.[a-z0-9]+$/i, '') || 'реф').slice(0, 60);
                 slayStudioXRefs().push({ id: swUid('sr'), path, name, on: true });
@@ -13927,10 +14920,67 @@ function openSlayStudio() {
         if (fail) toastr.error(`Не добавилось ${list.length - ok} из ${list.length}: ${fail}`, 'Студия', { timeOut: 8000 });
     };
 
+    // Many pictures at once: out of the Studio now, off the disk when the
+    // «вернуть» toast is gone. A picture already in the chat keeps its file.
+    const bulkDelete = async () => {
+        const items = slayStudioItems(false);
+        const doomed = items.filter(x => pickedIds.has(x.id));
+        if (!doomed.length) { toastr.info('Ничего не выбрано', 'Студия'); return; }
+        const sentN = doomed.filter(x => x.sent).length;
+        const n = doomed.length;
+        const what = `${n} ${slayPlural(n, 'картинку', 'картинки', 'картинок')}`;
+        if (!(await slayConfirm(`Удалить из студии ${what}?<br><br>Файлы удалятся с диска.${sentN ? ` ${sentN} из них уже в чате: они пропадут только из студии, а в чате и на диске останутся.` : ''}`))) return;
+        const chatKey = slayStudioChatKey();
+        const inChat = new Set(doomed.filter(x => slayStudioInChat(x)));
+        for (const x of doomed) { const i = items.indexOf(x); if (i >= 0) items.splice(i, 1); }
+        slayStudioSave();
+        pickedIds.clear(); pickMode = false;
+        if (ov.isConnected) drawResults();
+        let state = 'wait';
+        const finalize = () => {
+            if (state !== 'wait') return;
+            state = 'gone';
+            for (const x of doomed) if (!inChat.has(x)) slayDeleteStoredImage(x.path).catch(() => { });
+        };
+        const undo = () => {
+            if (state !== 'wait') return;
+            if (slayStudioChatKey() !== chatKey) { toastr.warning('Чат уже другой, вернуть не получится', 'Студия'); return; }
+            state = 'undone';
+            const list = slayStudioItems();
+            list.push(...doomed);
+            list.sort((a, b) => (a.at || 0) - (b.at || 0));
+            slayStudioSave();
+            if (ov.isConnected) drawResults();
+            toastr.success('Вернула на место', 'Студия', { timeOut: 2000 });
+        };
+        toastr.info(`Убрано: ${what}. Нажми сюда, чтобы вернуть — есть 8 секунд.`, 'Студия', { timeOut: 8000, extendedTimeOut: 0, onclick: undo, onHidden: finalize });
+        setTimeout(finalize, 15000);
+    };
+
     const onClick = async (e) => {
-        const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-card]');
+        const big = e.target.closest?.('.slay-studio-card:not(.pick) > img[data-full]');
+        if (big) { slayLightboxOpen(big.dataset.full); return; }
+        const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-rf],[data-pk],[data-pickid],[data-card]');
         if (!t) { if (e.target === ov) close(); return; }
         if (t.dataset.act === 'close') { close(); return; }
+        if (t.dataset.act === 'clean') { openSlayCleanup(); return; }
+        if (t.dataset.act === 'pick') { pickMode = !pickMode; pickedIds.clear(); drawResults(); return; }
+        if (t.dataset.rf) { resFilter = t.dataset.rf; drawResults(); return; }
+        if (t.dataset.pickid) {
+            const id = t.dataset.pickid;
+            if (pickedIds.has(id)) pickedIds.delete(id); else pickedIds.add(id);
+            t.classList.toggle('on', pickedIds.has(id));
+            const ck = t.querySelector('.slay-studio-ck'); if (ck) ck.textContent = pickedIds.has(id) ? '✓' : '';
+            const cnt = $z('pickbar').querySelector('b'); if (cnt) cnt.textContent = String(pickedIds.size);
+            return;
+        }
+        if (t.dataset.pk) {
+            const all = slayStudioItems(false);
+            if (t.dataset.pk === 'del') { await bulkDelete(); return; }
+            pickedIds.clear();
+            if (t.dataset.pk !== 'none') for (const x of all) if (t.dataset.pk === 'all' || !x.sent) pickedIds.add(x.id);
+            drawResults(); return;
+        }
         if (t.dataset.act === 'addref') { $z('file').click(); return; }
         if (t.dataset.xact || t.dataset.xref) {
             const id = t.closest('[data-xref]')?.dataset.xref;
@@ -14000,7 +15050,13 @@ function openSlayStudio() {
                 const names = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
                 for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
-                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset(), outfits: slayStudioOutfits(opts, _studio.who) });
+                const chatKey = slayStudioChatKey();
+                const text = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset(), outfits: slayStudioOutfits(opts, _studio.who) });
+                if (slayStudioChatKey() === chatKey) {
+                    _studio.prompt = text;
+                    const live = document.querySelector('.slay-studio-ov .slay-studio-prompt');
+                    if (live) live.value = text;
+                }
             } catch (err) { toastr.error('Переделка не вышла: ' + (err?.message || err), 'Студия'); }
             finally { t.disabled = false; t.textContent = was; }
             return;
@@ -14042,8 +15098,8 @@ function openSlayStudio() {
                 const i = items.indexOf(item);
                 if (i >= 0) items.splice(i, 1);
                 slayStudioSave();
-                // A picture already in the chat keeps its file.
-                if (!item.sent) slayDeleteStoredImage(item.path).catch(() => { });
+                // A picture still standing in the chat keeps its file.
+                if (!slayStudioInChat(item)) slayDeleteStoredImage(item.path).catch(() => { });
                 drawResults(); return;
             }
             if (act === 'chat') {
@@ -14096,7 +15152,7 @@ function openSlayStudio() {
 
 // Button next to the wardrobe icon. Shown while generation is on.
 function slayInjectStudioBtn() {
-    const on = getSettings().enabled !== false;
+    const on = getSettings().enabled !== false && getSettings().studioBtnHidden !== true;
     let btn = document.getElementById('slay-studio-btn');
     if (!on) { btn?.remove(); return; }
     if (btn) return;
@@ -14124,6 +15180,12 @@ function initLightbox() {
         if (e) { e.preventDefault(); e.stopPropagation(); }
         overlay.classList.remove('open');
         document.body.style.overflow = '';
+        // Later, so the handlers of this very click still see what was open.
+        setTimeout(() => {
+            if (overlay.classList.contains('open')) return;
+            try { overlay.querySelector('.iig-lightbox-img').removeAttribute('src'); } catch (_) { }
+            _iigPreparedMedia.clear();
+        }, 400);
     };
     overlay.querySelector('.iig-lightbox-backdrop').addEventListener('click', close);
     overlay.querySelector('.iig-lightbox-close').addEventListener('click', close);
@@ -14433,6 +15495,8 @@ function updateHeaderStatusDot() {
 
     context.eventSource.on(context.event_types.APP_READY, () => {
         restoreRefsFromLocalStorage();
+        // After the first chat (if any) has had time to open.
+        setTimeout(slayPruneEmptyStores, 4000);
         createSettingsUI();
         addButtonsToExistingMessages();
         initLightbox();
@@ -14445,12 +15509,25 @@ function updateHeaderStatusDot() {
         // (swipes, edits, MESSAGE_UPDATED, etc.)
         const chatEl = document.getElementById('chat');
         if (chatEl && !chatEl.dataset.iigRegenObserverBound) {
+            // While a reply is streaming the message is re-rendered on every
+            // chunk; the pass used to run for each new node of each chunk.
+            const waiting = new Set();
+            let waitT = null;
+            const flush = () => {
+                waitT = null;
+                const roots = [...waiting]; waiting.clear();
+                for (const el of roots) if (el.isConnected) attachRegenButtonsInRoot(el);
+            };
             const obs = new MutationObserver((mutations) => {
                 for (const m of mutations) {
                     for (const node of m.addedNodes) {
-                        if (node.nodeType === 1) attachRegenButtonsInRoot(node);
+                        if (node.nodeType !== 1) continue;
+                        // Our own wrappers and buttons need no second look.
+                        if (node.classList?.contains('iig-img-wrap') || node.classList?.contains('iig-regen-btn')) continue;
+                        waiting.add(node.closest?.('.mes') || node);
                     }
                 }
+                if (waiting.size && !waitT) waitT = setTimeout(flush, 40);
             });
             obs.observe(chatEl, { childList: true, subtree: true });
             chatEl.dataset.iigRegenObserverBound = '1';
@@ -14462,6 +15539,7 @@ function updateHeaderStatusDot() {
         // Before the timeout, not inside it: a generation can start during those
         // 300 ms and would read the previous chat's entry on the way past.
         clearAllContextRefCache();
+        slayScanForgetOpenChat();
         setTimeout(() => {
             restoreRefsFromLocalStorage();
             addButtonsToExistingMessages();
@@ -14514,8 +15592,10 @@ function updateHeaderStatusDot() {
         if (!evType) continue;
         context.eventSource.on(evType, (messageId) => {
             setTimeout(() => {
-                const mesEl = (Number.isInteger(messageId))
-                    ? document.querySelector(`#chat .mes[mesid="${messageId}"]`)
+                // The id may arrive as a string; that used to mean a pass over the whole chat.
+                const mid = (messageId === null || messageId === undefined || messageId === '') ? NaN : Number(messageId);
+                const mesEl = Number.isInteger(mid)
+                    ? document.querySelector(`#chat .mes[mesid="${mid}"]`)
                     : null;
                 attachRegenButtonsInRoot(mesEl || document.getElementById('chat') || document.body);
             }, 50);

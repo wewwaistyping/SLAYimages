@@ -4050,3 +4050,57 @@ button.slay-card-look { cursor: pointer; }
 .slay-studio-xref-n { min-width: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slay-studio-xref button { flex: none; border: 0; background: none; color: inherit; opacity: 0.7; cursor: pointer; padding: 0 3px; font: inherit; }
 .slay-studio-xref button:hover { opacity: 1; }
+
+/* «Уборка»: the disk cleanup window. */
+.slay-clean-box { max-width: 520px; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
+.slay-clean-box .slay-choose-t i { color: var(--slay-pink); margin-right: 6px; }
+.slay-clean-body { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; }
+.slay-clean-big { font-size: 1.7em; font-weight: 800; line-height: 1.1; }
+.slay-clean-note { font-size: 0.88em; opacity: 0.75; line-height: 1.45; }
+.slay-clean-note b { opacity: 1; }
+.slay-clean-prog { height: 8px; border-radius: 99px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.slay-clean-prog i { display: block; height: 100%; background: var(--slay-pink); transition: width 0.2s; }
+.slay-clean-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.slay-clean-row .slay-choose-b { flex: 1; }
+.slay-clean-row .slay-choose-b:disabled { opacity: 0.45; cursor: not-allowed; }
+.slay-clean-card { border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 11px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background: rgba(255, 255, 255, 0.04); }
+.slay-clean-card.ok { border-color: rgba(92, 194, 141, 0.6); background: rgba(92, 194, 141, 0.1); }
+.slay-clean-card.warn { border-color: rgba(232, 182, 92, 0.7); background: rgba(232, 182, 92, 0.1); }
+.slay-clean-card p { margin: 0; font-size: 0.86em; opacity: 0.8; line-height: 1.45; }
+.slay-clean-h { display: flex; align-items: baseline; gap: 8px; }
+.slay-clean-h span { margin-left: auto; font-weight: 700; white-space: nowrap; }
+.slay-clean-list { display: flex; flex-direction: column; font-size: 0.86em; }
+.slay-clean-list div { display: flex; gap: 8px; padding: 3px 0; border-top: 1px dashed rgba(255, 255, 255, 0.12); }
+.slay-clean-list div span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slay-clean-list div span:last-child { margin-left: auto; opacity: 0.7; white-space: nowrap; }
+
+/* Studio: the broom in the header, the results head, the pick mode. */
+.slay-studio-broom { background: none; border: 0; color: inherit; opacity: 0.6; font-size: 1em; cursor: pointer; padding: 4px 6px; margin-left: auto; }
+.slay-studio-broom:hover { opacity: 1; color: var(--slay-pink); }
+.slay-studio-broom + .slay-studio-mode, .slay-studio-broom ~ .slay-studio-x { margin-left: 0; }
+.slay-studio-reshead { display: flex; align-items: center; gap: 8px; }
+.slay-studio-reshead .slay-studio-lbl { flex: 1; min-width: 0; }
+.slay-studio-chips[hidden], .slay-studio-mini[hidden], .slay-studio-pickbar[hidden] { display: none; }
+.slay-studio-card.pick { cursor: pointer; position: relative; }
+.slay-studio-card.pick.on { border-color: var(--slay-pink); box-shadow: 0 0 0 2px var(--slay-pink); }
+.slay-studio-ck { position: absolute; right: 6px; top: 6px; width: 22px; height: 22px; border-radius: 7px; border: 2px solid #fff; background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; font-size: 14px; font-weight: 700; color: #17171d; }
+.slay-studio-card.pick.on .slay-studio-ck { background: var(--slay-pink); border-color: var(--slay-pink); }
+.slay-studio-pickbar { position: sticky; bottom: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 11px; border: 1px solid rgba(255, 255, 255, 0.16); background: #1b1b22; }
+.slay-studio-pickrow { display: flex; align-items: center; gap: 10px; }
+.slay-studio-pickrow span { flex: 1; }
+.slay-studio-btn.del, .slay-studio-acts button.del { border-color: rgba(220, 38, 38, 0.55); background: rgba(220, 38, 38, 0.14); color: #fca5a5; }
+.slay-studio-acts button.del { flex-basis: 100%; }
+
+/* Studio cards: a preview that opens the picture on click. */
+.slay-studio-card:not(.pick) > img[data-full] { cursor: zoom-in; }
+
+/* «Ничьи картинки»: months fold; a folded one loads nothing. */
+.slay-orph-mfold { border: 0; background: none; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; padding: 6px 0; text-align: left; flex: 1; min-width: 0; }
+.slay-orph-mfold i { width: 1em; color: var(--slay-pink); }
+.slay-orph-mfold b { color: var(--slay-pink); font-weight: 700; }
+.slay-orph-month:not(.open) .slay-orph-mhead { margin-bottom: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.slay-orph-month.open .slay-orph-mhead { opacity: 1; }
+
+/* Yes/no question in SLAY's look: above every other SLAY window. */
+.slay-confirm-ov { z-index: 200001; }
+.slay-orph-foot .slay-choose-b:disabled { opacity: 0.6; cursor: default; }
