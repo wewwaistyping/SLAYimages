@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.27';
+const SLAY_VERSION = '5.2.0-exp.28';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -13858,6 +13858,8 @@ function openSlayStudio() {
                 <button type="button" data-card="chat">В чат</button>
                 <button type="button" data-card="ref">Сделать рефом</button>
                 ${slayCanEditImage() ? '<button type="button" data-card="edit">🪄 Правка</button>' : ''}
+                <button type="button" data-card="again" title="Нарисовать ещё раз по этому же промпту (платный запрос)"><i class="fa-solid fa-rotate-right"></i></button>
+                <button type="button" data-card="reuse" title="Вернуть идею и промпт в поля слева (и скопировать промпт)"><i class="fa-solid fa-copy"></i></button>
                 <button type="button" data-card="dl" title="Скачать">⬇</button>
                 <button type="button" data-card="del" title="Удалить">🗑</button>
               </div>
@@ -14017,6 +14019,25 @@ function openSlayStudio() {
             if (!item) return;
             const act = t.dataset.card;
             if (act === 'dl') { iigSaveMedia(item.path, { mode: 'download' }); return; }
+            if (act === 'again') {
+                if (!item.prompt) { toastr.info('У этой картинки нет промпта', 'Студия'); return; }
+                runGenerate({ prompt: item.prompt, idea: item.idea || '', who: item.who || {}, ar: item.ar || $z('ar').value, n: 1, noStyle: _studio.noStyle });
+                return;
+            }
+            if (act === 'reuse') {
+                const idea = String(item.idea || '').replace(/^🪄\s*/, '');
+                const raw = !!item.prompt && item.prompt === item.idea;
+                _studio.raw = raw;
+                $z('raw').checked = raw;
+                ideaEl.value = raw ? item.prompt : (item.idea && !/^🪄/.test(item.idea) ? idea : ideaEl.value);
+                if (!raw) promptEl.value = item.prompt || '';
+                drawLeft();
+                (raw ? ideaEl : promptEl).scrollIntoView({ block: 'nearest' });
+                let copied = false;
+                try { if (item.prompt && navigator.clipboard?.writeText) { await navigator.clipboard.writeText(item.prompt); copied = true; } } catch (_) { }
+                toastr.success(copied ? 'Промпт в полях и в буфере' : 'Промпт в полях', 'Студия', { timeOut: 2000 });
+                return;
+            }
             if (act === 'del') {
                 const i = items.indexOf(item);
                 if (i >= 0) items.splice(i, 1);
