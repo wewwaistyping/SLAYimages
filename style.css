@@ -4104,3 +4104,12 @@ button.slay-card-look { cursor: pointer; }
 /* Yes/no question in SLAY's look: above every other SLAY window. */
 .slay-confirm-ov { z-index: 200001; }
 .slay-orph-foot .slay-choose-b:disabled { opacity: 0.6; cursor: default; }
+
+/* The style gallery opened from the Studio: above the Studio window. */
+.slay-style-overlay.slay-style-over-studio { z-index: 100002; }
+
+/* From the Studio the pick never goes into the preset: no switch for it there. */
+.slay-style-over-studio .slay-style-switch { display: none !important; }
+
+/* The location dialog opened from the Studio: above the Studio window. */
+.slay-loc-dialog.slay-loc-over { z-index: 100003; }

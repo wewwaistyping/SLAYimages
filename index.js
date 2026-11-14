@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.40';
+const SLAY_VERSION = '5.2.0-exp.42';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -9797,23 +9797,27 @@ function slayFitDialog(ov) {
 }
 
 // Editor of one location slot: names, description, what goes to the picture.
-function slayEditLocationDialog(index) {
+// opts.desc: a description to offer instead of the stored one (from the prompt
+// of the picture just put into the slot); opts.over: above the Studio window.
+function slayEditLocationDialog(index, opts = {}) {
     const list = slayRefList(getCurrentCharacterRefs(), 'loc');
     if (!list[index]) list[index] = { name: '', imageBase64: '', imagePath: '' };
     const loc = list[index];
     document.getElementById('slay_loc_dialog')?.remove();
+    const offered = typeof opts.desc === 'string' && opts.desc.trim() ? opts.desc.trim() : null;
     const esc = sanitizeForHtml;
     const hasImg = slayLocHasImage(loc);
     let mode = hasImg ? (['img', 'desc', 'both'].includes(loc.mode) ? loc.mode : 'img') : 'desc';
     const ov = document.createElement('div');
     ov.id = 'slay_loc_dialog';
-    ov.className = 'slay-loc-dialog';
+    ov.className = 'slay-loc-dialog' + (opts.over ? ' slay-loc-over' : '');
     ov.innerHTML = `<div class="slay-loc-box">
         <div class="slay-loc-title">Локация ${index + 1}</div>
+        ${offered ? '<div class="slay-loc-note">Картинка уже в слоте. Описание взято из промпта этой картинки (без стиля, камеры и «Avoid») — поправь или сотри. «Отмена» оставит в слоте только картинку, имя и описание не изменятся.</div>' : ''}
         <label>Названия через запятую — по ним место находится в промпте</label>
         <input type="text" class="text_pole slay-loc-name" value="${esc(loc.name || '')}" placeholder="кухня, kitchen">
         <label>Описание места (по-английски, 1–3 предложения)</label>
-        <textarea class="text_pole slay-loc-desc" rows="5" placeholder="Dim garage bar, neon beer signs, concrete floor…">${esc(loc.desc || '')}</textarea>
+        <textarea class="text_pole slay-loc-desc" rows="5" placeholder="Dim garage bar, neon beer signs, concrete floor…">${esc(offered ?? (loc.desc || ''))}</textarea>
         <div class="slay-loc-row"><button type="button" class="menu_button slay-loc-ai"${hasImg ? '' : ' disabled'}><i class="fa-solid fa-wand-magic-sparkles"></i> Описать по картинке</button><span class="slay-loc-note">${hasImg ? 'тем же подключением, что описывает одежду' : 'картинки нет — опиши руками'}</span></div>
         <label>Что отправлять на картинку</label>
         <div class="slay-loc-row slay-loc-modes">
@@ -12084,6 +12088,29 @@ function slayStyleFromPrompt(prompt) {
     return { style: style.join(' '), avoid, guessed };
 }
 
+function slayPlaceFromPrompt(prompt) {
+    let text = String(prompt || '').replace(/^\s*\[[^\]]*\]\s*/g, '').trim();
+    const { style, guessed } = slayStyleFromPrompt(text);
+    const cut = text.search(/\bAvoid\s*:/i);
+    if (cut >= 0) text = text.slice(0, cut).trim();
+    // A style found verbatim in a known style text is cut whole; a guessed one
+    // is not trusted (camera and light words look like style words).
+    if (style && !guessed && text.endsWith(style) && text.length > style.length) text = text.slice(0, -style.length).trim();
+    const STYLE = /\b(painting|painted|in the manner of|in the style of|style|rendered|render|illustration|watercolou?r|gouache|oil|impasto|anime|manga|cel[- ]shad\w*|artstation|artwork|brushwork|linework|palette|full-?frame|full-?bleed|canvas)\b/i;
+    const CAMERA = /\b(shot|angle|lens|\d+\s?mm|f\/\d|close-?up|framing|composition|camera|dutch|tilt|bokeh|depth of field|aspect ratio|key action)\b/i;
+    const PEOPLE = /\b(no people|nobody|no one|empty of people)\b/i;
+    const sentences = text.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+    // Style sentences from the end, never the first one: that is the scene.
+    while (sentences.length > 1 && STYLE.test(sentences[sentences.length - 1])) sentences.pop();
+    const kept = [];
+    for (const sn of sentences) {
+        const parts = sn.replace(/[.!?]+$/, '').split(/\s*,\s*/).filter(p => p && !CAMERA.test(p) && !PEOPLE.test(p));
+        if (parts.length) kept.push(parts.join(', ') + '.');
+    }
+    let out = kept.join(' ');
+    if (out.length > 700) out = out.slice(0, 700).replace(/[,;\s][^,;\s]*$/, '') + '…';
+    return out;
+}
 function slayStyleMap(key) {
     const s = getSettings();
     if (!s[key] || typeof s[key] !== 'object' || Array.isArray(s[key])) s[key] = {};
@@ -12604,11 +12631,15 @@ const SLAY_STYLES_CACHE_KEY = 'slay_styles_cache_v3';
 // rp in Latin read as a bogus «гр» chip — it is the site's «Для ролплея».
 const SLAY_STYLE_TAG_LABELS = { rp: 'Для ролплея', painting: 'Живопись', illustration: 'Иллюстрация', film: 'Кино/фото', game: 'Игры', cartoon: 'Мульты', anime: 'Аниме', print: 'Графика', '3d': '3D' };
 
-async function openStylePickerModal() {
+// The site's styles as the gallery last had them (the cache may be unwritable).
+let _slayStylesSeen = [];
+// onPick({ name, text }): the Studio's own choice. Nothing in the settings or
+// the preset changes; the picker only says what was tapped.
+async function openStylePickerModal({ onPick = null } = {}) {
     const BASE = SLAY_STYLES_BASE;
 
     const overlay = document.createElement('div');
-    overlay.className = 'slay-style-overlay';
+    overlay.className = 'slay-style-overlay' + (onPick ? ' slay-style-over-studio' : '');
     overlay.innerHTML = `
       <div class="slay-style-modal">
         <div class="slay-style-modal-head">
@@ -12726,7 +12757,7 @@ async function openStylePickerModal() {
     let backgroundRefresh = null;
 
     if (cached) {
-        styles = cached.styles;
+        styles = cached.styles; _slayStylesSeen = styles;
         iigLog('INFO', `Styles loaded from cache: ${styles.length}, age=${Math.round(cacheAge/1000)}s`);
         // If cache is stale (>24h) or just always — background-validate with ETag.
         backgroundRefresh = fetchStyles(cached, { force: !cacheFresh });
@@ -12734,7 +12765,7 @@ async function openStylePickerModal() {
         // No cache — must fetch foreground
         const result = await fetchStyles(null, { force: true });
         if (result.status === 'updated') {
-            styles = result.styles;
+            styles = result.styles; _slayStylesSeen = styles;
             writeCache({ styles, etag: result.etag, lastModified: result.lastModified, ts: Date.now() });
         } else {
             const msg = result.error?.message || 'неизвестная ошибка';
@@ -12991,6 +13022,13 @@ async function openStylePickerModal() {
                 const picked = idx >= 0 ? visible[idx] : null;
                 const swallow = (e) => iigLog('ERROR', 'style → preset failed:', e?.message || e);
                 const nameEl = document.getElementById('slay_style_name');
+                if (onPick) {
+                    // An own style has no picture-side text of its own: its description is used.
+                    const text = picked?.custom ? slayCustomStyleDesc(picked) : prompt;
+                    try { onPick(picked ? { name: picked.name || name, text } : { name: '', text: '' }); } catch (e) { iigLog('WARN', 'style pick:', e?.message); }
+                    setTimeout(() => closeOverlay(), 0);
+                    return;
+                }
                 if (picked?.custom) {
                     // Own styles live only in the preset toggle — nothing goes to the picture.
                     if (!settings.slayStyleToPreset) {
@@ -13046,7 +13084,7 @@ async function openStylePickerModal() {
     const applyFreshStyles = (result, { silent = false } = {}) => {
         if (!result || result.status !== 'updated') return;
         const oldCount = styles.length;
-        styles = result.styles;
+        styles = result.styles; _slayStylesSeen = styles;
         writeCache({ styles, etag: result.etag, lastModified: result.lastModified, ts: Date.now() });
         // Re-derive tag list (new styles might add new categories)
         const newTags = [...new Set(styles.flatMap(s => s.tags))];
@@ -13952,7 +13990,32 @@ const SLAY_STUDIO_CTX = {
 };
 const SLAY_STUDIO_RATIOS = ['1:1', '3:4', '4:3', '2:3', '9:16', '16:9'];
 // Window state, memory only: which chips, task, ratio. Reset per chat.
-const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busyBy: {}, idea: '', prompt: '' };
+const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busyBy: {}, idea: '', prompt: '', style: null };
+// The Studio's own style: { name, text } or null («как в настройках»). Kept
+// for the session, for every chat; the settings and the preset are untouched.
+// Favourites and own styles, for the Studio's «Стиль» list.
+function slayStudioStyleChoices() {
+    const out = [];
+    const seen = new Set();
+    let cache = [];
+    try { cache = JSON.parse(localStorage.getItem(SLAY_STYLES_CACHE_KEY) || '{}').styles || []; } catch (_) { }
+    if (!cache.length) cache = _slayStylesSeen;
+    const customs = slayCustomStyles();
+    for (const name of slayStyleFavs()) {
+        const c = customs.find(x => x && x.name === name);
+        const site = c ? null : cache.find(x => x && x.name === name);
+        const text = c ? slayCustomStyleDesc(c) : String(site?.prompt || '');
+        if (!text.trim() || seen.has(name)) continue;
+        seen.add(name); out.push({ name, text, group: 'fav' });
+    }
+    for (const c of customs) {
+        if (!c?.name || seen.has(c.name)) continue;
+        const text = slayCustomStyleDesc(c);
+        if (!text.trim()) continue;
+        seen.add(c.name); out.push({ name: c.name, text, group: 'own' });
+    }
+    return out;
+}
 // The open window's redraw of the results, for jobs started by an earlier window.
 let _studioRedraw = null;
 // The open window's own close (listeners and observers go with it).
@@ -14262,6 +14325,16 @@ async function slayStudioDirectAsk(conn, system, prompt, len) {
 // What the people in frame wear now, from the wardrobe. The rewrite has to
 // know it: preset rules ask for clothes, and a model left in the dark invents
 // them, so the prompt fought the outfit pictures.
+// The place picked in the Studio: { name, desc, hasImg } or null.
+function slayStudioPickedPlace(opts, picked) {
+    const o = opts.find(x => x.kind === 'loc' && picked.has(x.key));
+    if (!o) return null;
+    let list = [];
+    try { list = SillyTavern.getContext().groupId ? (slayGroupRefs('').locReferences || []) : slayRefList(getCurrentCharacterRefs(), 'loc'); } catch (_) { }
+    const l = list.find(x => x && slayLocKey(x) === o.locKey) || list.find(x => x && x.name === o.name);
+    if (!l) return null;
+    return { name: swNameList(l.name)[0] || l.name, desc: String(l.desc || '').trim(), hasImg: slayLocHasImage(l) };
+}
 function slayStudioOutfits(opts, picked) {
     const w = window.slayWardrobe;
     const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
@@ -14281,7 +14354,7 @@ function slayStudioOutfits(opts, picked) {
     return out;
 }
 
-async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false, outfits = [] } = {}) {
+async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false, outfits = [], place = null } = {}) {
     const ctx = SillyTavern.getContext();
     if (typeof ctx.generateRaw !== 'function') throw new Error('эта версия таверны не умеет тихую генерацию');
     const rules = slayStudioPresetRules();
@@ -14298,11 +14371,13 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
         // so with a SLAY style the rewrite writes none.
         + (styleAdded ? '\n\nIMPORTANT: the art style is added separately by the image tool. Do NOT write any art style, medium, rendering technique, artist or studio names, or a style suffix — even if the rules above ask for one. Describe only camera, characters, action, place, light and composition, plus the Avoid list if the rules have one.' : '')
         + (outfits.length ? '\n\nIMPORTANT: the current outfits are given below. Dress these people exactly in them (you may shorten the wording); never replace them with other clothes, even if the rules above or the context suggest different ones.' : '')
+        + (place ? '\n\nIMPORTANT: the scene takes place in the location given below. Set it there and describe that place; never move the scene to another location, even if the context or the idea suggests one.' : '')
         + '\n\nReturn ONLY the final prompt text in English, one paragraph. No tags, no JSON, no comments.';
     const prompt = [
         context ? 'Context:\n' + context : '',
         whoNames.length ? 'In frame: ' + whoNames.join(', ') + '.' : '',
         outfits.length ? 'Current outfits (from the wardrobe):\n' + outfits.join('\n') : '',
+        place ? `Location: ${place.name}${place.desc ? ' — ' + place.desc : (place.hasImg ? ' (a reference picture of this place goes to the image tool; describe it only in general words that fit the name)' : '')}` : '',
         'Idea: ' + idea,
         'Write the image prompt as plain text.',
     ].filter(Boolean).join('\n\n');
@@ -14639,6 +14714,7 @@ function openSlayStudio() {
     slayStudioTakeLate();
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
         Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '' });
+        // The style picked in the Studio stays: it is a choice of look, not of this chat.
     }
     // A raw idea skips the preset's image rules, so the model fills the gaps
     // from the references. Every open starts with the rewrite on.
@@ -14685,7 +14761,7 @@ function openSlayStudio() {
               <textarea class="text_pole slay-studio-prompt" rows="6" placeholder="Нажми «Переделать по пресету» — здесь появится промпт для генерации"></textarea>
             </div>
             <div class="slay-studio-set">
-              <label>Стиль<select data-zone="style"><option value="">Как в настройках SLAY</option><option value="none">Без добавки стиля</option></select></label>
+              <label>Стиль<select data-zone="style"></select></label>
               <label>Соотношение<select data-zone="ar">${ratios.map(r => `<option value="${r}">${r}</option>`).join('')}</select></label>
               <label>Сколько<select data-zone="n"><option>1</option><option>2</option><option>4</option></select></label>
             </div>
@@ -14713,7 +14789,22 @@ function openSlayStudio() {
     $z('ar').value = ratios.includes(_studio.ar) ? _studio.ar : (ratios[0] || '1:1');
     $z('n').value = String(_studio.n);
     $z('raw').checked = _studio.raw;
-    $z('style').value = _studio.noStyle ? 'none' : '';
+    // «Стиль»: as in the settings, none, favourites and own styles, or any from the gallery.
+    const drawStyle = () => {
+        const cur = getSettings().slayStyleName || 'Как в пресете';
+        const list = slayStudioStyleChoices();
+        const picked = _studio.style;
+        const opt = (v, l, on) => `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(l)}</option>`;
+        const favs = list.filter(x => x.group === 'fav'), own = list.filter(x => x.group === 'own');
+        const inList = picked && list.some(x => x.name === picked.name);
+        $z('style').innerHTML = opt('', `Как в настройках (${cur})`, !picked && !_studio.noStyle)
+            + opt('none', 'Без добавки стиля', _studio.noStyle)
+            + (picked && !inList ? opt('s:' + picked.name, picked.name, true) : '')
+            + (favs.length ? `<optgroup label="★ Избранные">${favs.map(x => opt('s:' + x.name, x.name, picked?.name === x.name)).join('')}</optgroup>` : '')
+            + (own.length ? `<optgroup label="Свои">${own.map(x => opt('s:' + x.name, x.name, picked?.name === x.name)).join('')}</optgroup>` : '')
+            + opt('pick', 'Выбрать из галереи…', false);
+    };
+    drawStyle();
 
     const drawLeft = () => {
         // Refs and places may have changed in the settings while the window was open.
@@ -14735,6 +14826,8 @@ function openSlayStudio() {
                 const p = img.dataset.thumb;
                 slayThumb(p, () => img.isConnected).then((u) => { if (img.isConnected) img.src = u || p; });
             }
+            const pl = slayStudioPickedPlace(opts, _studio.who);
+            if (pl && !pl.desc && !_studio.raw) $z('refline').textContent += ` У места «${pl.name}» нет описания: переделка видит только название, картинку она не видит. Допиши пару слов в слоте локации (✎ → «Описать по картинке»).`;
             const onX = xr.filter(x => x && x.on).map(x => x.name);
             if (onX.length) $z('refline').textContent = picked.length
                 ? `${$z('refline').textContent} Свои рефы: ${onX.join(', ')}.`
@@ -14863,12 +14956,13 @@ function openSlayStudio() {
     document.addEventListener('keydown', onKey, true);
 
     const runGenerate = async ({ prompt, idea, who, ar, n, noStyle, editSource, editText }) => {
+        const styleOverride = !noStyle && _studio.style?.text ? _studio.style.text : undefined;
         if (!getSettings().enabled) { toastr.info('Генерация выключена в настройках SLAY Images', 'Студия'); return; }
         const chatKey = slayStudioChatKey();
         _studio.busyBy[chatKey] = (_studio.busyBy[chatKey] || 0) + n; drawResults();
         let late = 0;
         const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
-            studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText, extraRefs: slayStudioXRefsOn(),
+            studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText, extraRefs: slayStudioXRefsOn(), styleOverride,
         }).then(async (res) => {
             if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
             const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
@@ -15051,7 +15145,7 @@ function openSlayStudio() {
                 for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
                 const chatKey = slayStudioChatKey();
-                const text = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset(), outfits: slayStudioOutfits(opts, _studio.who) });
+                const text = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && (!!_studio.style?.text || (!!st.slayStyle && !slayStyleInPreset())), outfits: slayStudioOutfits(opts, _studio.who), place: slayStudioPickedPlace(opts, _studio.who) });
                 if (slayStudioChatKey() === chatKey) {
                     _studio.prompt = text;
                     const live = document.querySelector('.slay-studio-ov .slay-studio-prompt');
@@ -15113,7 +15207,16 @@ function openSlayStudio() {
             }
             if (act === 'ref') {
                 const key = await slayChoose('Сделать рефом', 'В какой слот? Картинка сожмётся и встанет рефом, имя в слоте останется прежним.', slayRefSlotChoices().map(([k, l]) => ({ key: k, label: l })));
-                if (key) await slayImageToSlot(item.path, key, slayRefSlotChoices().find(([k]) => k === key)?.[1]);
+                if (!key) return;
+                const done = await slayImageToSlot(item.path, key, slayRefSlotChoices().find(([k]) => k === key)?.[1]);
+                // A place: the slot also gets a name and the place part of this picture's prompt.
+                const li = /^loc-(\d+)$/.exec(key);
+                if (done && li) {
+                    slayEditLocationDialog(+li[1], { desc: slayPlaceFromPrompt(item.prompt || ''), over: true });
+                    // The window refreshes its chips once the dialog is closed.
+                    const dlg = document.getElementById('slay_loc_dialog');
+                    if (dlg) new MutationObserver((ms, obs) => { if (!dlg.isConnected) { obs.disconnect(); if (ov.isConnected) drawLeft(); } }).observe(document.body, { childList: true });
+                }
                 return;
             }
             if (act === 'edit') {
@@ -15134,7 +15237,25 @@ function openSlayStudio() {
         if (z === 'raw') { _studio.raw = e.target.checked; drawLeft(); }
         else if (z === 'n') { _studio.n = parseInt(e.target.value, 10) || 1; drawLeft(); }
         else if (z === 'ar') _studio.ar = e.target.value;
-        else if (z === 'style') _studio.noStyle = e.target.value === 'none';
+        else if (z === 'style') {
+            const v = e.target.value;
+            if (v === 'pick') {
+                drawStyle();   // the list shows the current choice until a new one is made
+                openStylePickerModal({
+                    onPick: (p) => {
+                        if (p && p.text) { _studio.style = { name: p.name, text: p.text }; _studio.noStyle = false; }
+                        else { _studio.style = null; _studio.noStyle = false; }
+                        if (ov.isConnected) { drawStyle(); drawLeft(); }
+                        toastr.success(p && p.text ? `Стиль студии: «${p.name}». Настройки и пресет не менялись.` : 'Стиль студии — как в настройках', 'Студия', { timeOut: 3000 });
+                    },
+                });
+                return;
+            }
+            _studio.noStyle = v === 'none';
+            _studio.style = v.startsWith('s:') ? (slayStudioStyleChoices().find(x => x.name === v.slice(2)) || _studio.style) : null;
+            if (_studio.style) _studio.style = { name: _studio.style.name, text: _studio.style.text };
+            drawLeft();
+        }
         else if (z === 'file') addRefs(e.target.files);
         else if (z === 'rwmodel') { getSettings().studioRewriteModel = e.target.value; saveSettings(); }
         else if (z === 'ruletog') {
