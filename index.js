@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.26';
+const SLAY_VERSION = '5.2.0-exp.27';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -13118,7 +13118,7 @@ function slayStudioWhoOptions() {
         out.push({ key: 'user', kind: 'user', label: first(getDefaultUserRefName(refs)) || '{{user}}' });
         for (const n of refs.npcReferences || []) {
             if (!n?.name) continue;
-            out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name), member: !!n._member });
+            out.push({ key: 'npc:' + n.name, kind: 'npc', name: n.name, label: first(n.name), member: !!n._member, memberName: n._member || '' });
         }
         for (const l of refs.locReferences || []) if (slayLocUsable(l)) out.push({ key: 'loc:' + slayLocKey(l), kind: 'loc', name: l.name, locKey: slayLocKey(l), label: first(l.name) });
         return slayStudioNumberLocs(out);
@@ -13328,7 +13328,29 @@ async function slayStudioDirectAsk(conn, system, prompt, len) {
     return text;
 }
 
-async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false } = {}) {
+// What the people in frame wear now, from the wardrobe. The rewrite has to
+// know it: preset rules ask for clothes, and a model left in the dark invents
+// them, so the prompt fought the outfit pictures.
+function slayStudioOutfits(opts, picked) {
+    const w = window.slayWardrobe;
+    const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
+    if (swS.sendOutfitDescription === false || !w?.isReady?.() || typeof w.getActiveOutfitDescription !== 'function') return [];
+    const sel = opts.filter(o => picked.has(o.key));
+    const firstMember = SillyTavern.getContext().groupId ? (sel.find(o => o.memberName)?.memberName || undefined) : undefined;
+    const out = [];
+    for (const o of sel) {
+        let d = '';
+        try {
+            if (o.kind === 'char') d = w.getActiveOutfitDescription('bot');
+            else if (o.kind === 'npc' && o.memberName) d = w.getActiveOutfitDescription('bot', o.memberName);
+            else if (o.kind === 'user') d = w.getActiveOutfitDescription('user', firstMember);
+        } catch (_) { }
+        if (d && String(d).trim()) out.push(`${o.label}: ${String(d).trim()}`);
+    }
+    return out;
+}
+
+async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false, outfits = [] } = {}) {
     const ctx = SillyTavern.getContext();
     if (typeof ctx.generateRaw !== 'function') throw new Error('эта версия таверны не умеет тихую генерацию');
     const rules = slayStudioPresetRules();
@@ -13344,10 +13366,12 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
         // the prompt from the preset wins over it (the model obeys the prompt),
         // so with a SLAY style the rewrite writes none.
         + (styleAdded ? '\n\nIMPORTANT: the art style is added separately by the image tool. Do NOT write any art style, medium, rendering technique, artist or studio names, or a style suffix — even if the rules above ask for one. Describe only camera, characters, action, place, light and composition, plus the Avoid list if the rules have one.' : '')
+        + (outfits.length ? '\n\nIMPORTANT: the current outfits are given below. Dress these people exactly in them (you may shorten the wording); never replace them with other clothes, even if the rules above or the context suggest different ones.' : '')
         + '\n\nReturn ONLY the final prompt text in English, one paragraph. No tags, no JSON, no comments.';
     const prompt = [
         context ? 'Context:\n' + context : '',
         whoNames.length ? 'In frame: ' + whoNames.join(', ') + '.' : '',
+        outfits.length ? 'Current outfits (from the wardrobe):\n' + outfits.join('\n') : '',
         'Idea: ' + idea,
         'Write the image prompt as plain text.',
     ].filter(Boolean).join('\n\n');
@@ -13974,7 +13998,7 @@ function openSlayStudio() {
                 const names = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
                 for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
-                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset() });
+                promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset(), outfits: slayStudioOutfits(opts, _studio.who) });
             } catch (err) { toastr.error('Переделка не вышла: ' + (err?.message || err), 'Студия'); }
             finally { t.disabled = false; t.textContent = was; }
             return;
