@@ -4036,3 +4036,17 @@ button.slay-card-look { cursor: pointer; }
 .slay-loc-dialog.slay-vv { inset: auto; right: auto; bottom: auto; box-sizing: border-box; }
 .slay-loc-dialog.slay-vv .slay-loc-box { max-height: 100%; }
 .slay-loc-box .slay-loc-foot { position: sticky; bottom: -14px; margin-bottom: -14px; padding: 10px 0 14px; background: rgb(24, 22, 30); z-index: 1; }
+
+/* Studio: the rewrite model row and the own extra references. */
+.slay-studio-viarow { display: flex; gap: 6px; align-items: center; }
+.slay-studio-viarow[hidden] { display: none; }
+.slay-studio-viarow select { flex: 1; min-width: 0; margin: 0; }
+.slay-studio-mini { flex: none; border-radius: 8px; padding: 5px 9px; font: inherit; font-size: 0.85em; cursor: pointer; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.06); color: inherit; }
+.slay-studio-mini:disabled { opacity: 0.6; cursor: wait; }
+.slay-studio-xrefs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.slay-studio-xref { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 4px 3px 3px; border-radius: 9px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.04); cursor: pointer; opacity: 0.55; font-size: 0.85em; }
+.slay-studio-xref.on { opacity: 1; border-color: var(--slay-pink); background: rgba(240, 98, 146, 0.14); }
+.slay-studio-xref img { width: 30px; height: 30px; object-fit: cover; border-radius: 6px; flex: none; }
+.slay-studio-xref-n { min-width: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slay-studio-xref button { flex: none; border: 0; background: none; color: inherit; opacity: 0.7; cursor: pointer; padding: 0 3px; font: inherit; }
+.slay-studio-xref button:hover { opacity: 1; }

@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.25';
+const SLAY_VERSION = '5.2.0-exp.26';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -4070,6 +4070,7 @@ const SLAY_LOCATION_NOTE = 'use it ONLY for the place: interior, architecture, f
 // caption, a badge. With a short prompt the model copied all of it (a «VIP»
 // star from the reference ended up on a sweater). Only the person carries over.
 const SLAY_FACE_NOTE = 'take ONLY the face, hair and build from it. Do NOT copy its clothing, background, pose, text, captions, logos or badges — clothing comes from the prompt or the outfit reference';
+const SLAY_EXTRA_NOTE = 'take from it only what its name and the prompt point to (an object, outfit, pose, person or detail). Do NOT copy its background, framing, text or art style unless the prompt asks for that';
 const SLAY_PERSON_NOTE = 'keep this person\'s appearance. Do NOT copy the background, pose, text, captions, logos or badges of that picture';
 const SLAY_EDIT_NOTE = 'is the CURRENT PICTURE to edit — keep it exactly as it is except for the requested change';
 
@@ -5301,6 +5302,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         if (label === 'char_outfit' || label === 'user_outfit') return `Image ${n} shows ${name}'s OUTFIT — preserve this clothing exactly.`;
         if (label === 'npc_char' || label === 'npc_user' || label === 'npc_matched') return `Image ${n} is ${name} — ${SLAY_PERSON_NOTE}.`;
         if (label === 'context') return `Image ${n} is style/mood context.`;
+        if (label === 'extra_ref') return `Image ${n} is an extra reference "${name}" — ${SLAY_EXTRA_NOTE}.`;
         if (label === 'location') return `Image ${n} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
         if (label === 'edit_source') return `Image ${n} ${SLAY_EDIT_NOTE}.`;
         return '';
@@ -5482,6 +5484,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         else if (label === 'npc_char' || label === 'npc_user') instruction = `Image ${i + 1} is ${name} — ${SLAY_PERSON_NOTE}.`;
         else if (label === 'npc_matched') instruction = `Image ${i + 1} is NPC "${name}" — ${SLAY_PERSON_NOTE}.`;
         else if (label === 'context') instruction = `Image ${i + 1} is style/mood context.`;
+        else if (label === 'extra_ref') instruction = `Image ${i + 1} is an extra reference "${name}" — ${SLAY_EXTRA_NOTE}.`;
         else if (label === 'location') instruction = `Image ${i + 1} shows the LOCATION "${name}" — ${SLAY_LOCATION_NOTE}.`;
         else if (label === 'edit_source') instruction = `Image ${i + 1} ${SLAY_EDIT_NOTE}.`;
 
@@ -7217,7 +7220,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             try {
                 const b64raw = src.startsWith('data:') ? (src.split(',')[1] || null) : await loadRefImageAsBase64(src);
                 const b64 = b64raw ? await compressBase64Image(b64raw, 1024, 0.85) : null;
-                if (b64) apiRefs.push({ name: String(r.name || '').trim() || 'reference', place: r.kind === 'place', b64 });
+                if (b64) apiRefs.push({ name: String(r.name || '').trim() || 'reference', place: r.kind === 'place', extra: r.kind === 'extra', b64 });
             } catch (e) { iigLog('WARN', 'extension ref skipped:', e?.message); }
         }
         iigLog('INFO', `Extension refs: ${apiRefs.length} of ${options.extraRefs.length}`);
@@ -7279,7 +7282,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 if (ob64) pushRef(ob64, 'char_outfit', npc._member);
             }
         }
-        for (const x of apiRefs) if (!x.place && canPush()) pushRef(x.b64, 'npc_matched', x.name);
+        for (const x of apiRefs) if (!x.place && canPush()) pushRef(x.b64, x.extra ? 'extra_ref' : 'npc_matched', x.name);
         // 4b. One location, last: dropped first when the slots run out.
         const loc = sceneLocImg;
         if (loc && canPush()) {
@@ -7366,7 +7369,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
                 if (ob64) pushRef(`data:image/png;base64,${ob64}`, `${npc._member} outfit`);
             }
         }
-        for (const x of apiRefs) if (!x.place && canPush()) pushRef('data:image/jpeg;base64,' + x.b64, `${x.name} (NPC: appearance only — not the background or any text/badges of that picture)`);
+        for (const x of apiRefs) if (!x.place && canPush()) pushRef('data:image/jpeg;base64,' + x.b64, x.extra ? `${x.name} (extra reference: ${SLAY_EXTRA_NOTE})` : `${x.name} (NPC: appearance only — not the background or any text/badges of that picture)`);
         // 4b. One location, last
         const locN = sceneLocImg;
         if (locN && canPush()) {
@@ -13090,6 +13093,16 @@ function slayStudioItems(create = true) {
     if (!Array.isArray(md.slay_studio)) { if (!create) return []; md.slay_studio = []; }
     return md.slay_studio;
 }
+// The Studio's own extra references (pictures from the device), per chat.
+function slayStudioXRefs(create = true) {
+    const md = SillyTavern.getContext().chatMetadata;
+    if (!md || typeof md !== 'object') return [];
+    if (!Array.isArray(md.slay_studio_refs)) { if (!create) return []; md.slay_studio_refs = []; }
+    return md.slay_studio_refs;
+}
+function slayStudioXRefsOn() {
+    return slayStudioXRefs(false).filter(x => x && x.on && x.path).map(x => ({ name: x.name || 'reference', image: x.path, kind: 'extra' }));
+}
 function slayStudioSave() {
     const ctx = SillyTavern.getContext();
     try { (ctx.saveMetadataDebounced || ctx.saveMetadata)?.(); } catch (e) { iigLog('WARN', 'studio save failed:', e?.message); }
@@ -13253,6 +13266,68 @@ function slayStudioCleanRewrite(raw) {
     return { text: out, hadImage };
 }
 
+// «Переделать по пресету» runs on the chat model or straight on an API: the
+// same address and key as the wardrobe's descriptions (its own connection if
+// that is on, else the main «Подключение»), with a model picked in the Studio.
+let _studioRwModels = null;
+function slayStudioRewriteVia() { return getSettings().studioRewriteVia === 'direct' ? 'direct' : 'chat'; }
+function slayStudioRwModel() {
+    const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
+    return String(getSettings().studioRewriteModel || (slaySwOwnConnection(swS) ? swS.describeModel : '') || '').trim();
+}
+function slayStudioDirectConn({ needModel = true } = {}) {
+    const iigS = getSettings();
+    const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe || {};
+    const ownOn = slaySwOwnConnection(swS);
+    const own = ownOn && !!swS.describeEndpoint;
+    const endpoint = normalizeApiEndpoint((own ? swS.describeEndpoint : iigS.endpoint) || '');
+    const apiKey = own ? (swS.describeKey || '') : (iigS.apiKey || '');
+    if (own && !apiKey) throw new Error('у своего адреса описаний в Гардеробе нет ключа — основной ключ туда не отправляется');
+    if (!endpoint || !apiKey) throw new Error('нет адреса или ключа: они берутся из «Подключения» или из своего подключения описаний в Гардеробе');
+    const model = slayStudioRwModel();
+    if (needModel && !model) throw new Error('выбери модель для переделки (🔄 — загрузить список)');
+    const fmt = ownOn ? (swS.describeApiFormat || 'auto') : 'auto';
+    const gemini = fmt === 'gemini' || (fmt === 'auto' && /gemini|gemma/i.test(model));
+    return { endpoint, apiKey, model, gemini };
+}
+async function slayStudioDirectModels() {
+    const { endpoint, apiKey, gemini } = slayStudioDirectConn({ needModel: false });
+    const url = slayModelsUrl(gemini ? 'gemini' : 'openai', endpoint);
+    const r = await robustFetch(url, { method: 'GET', headers: buildAuthHeaders(apiKey, {}, { gemini, url }) });
+    if (!r.ok) throw slayHttpError(r.status, (await r.text().catch(() => '')).slice(0, 300), url);
+    // Text models only: picture, video and voice models cannot write a prompt.
+    return slayParseModelList(await r.json())
+        .filter(m => !/image|imagen|banana|veo|video|tts|audio|embed|whisper|dall-e|flux|seedance|seedream/i.test(m))
+        .sort();
+}
+async function slayStudioDirectAsk(conn, system, prompt, len) {
+    const { endpoint, apiKey, model, gemini } = conn;
+    let url, body;
+    if (gemini) {
+        url = `${endpoint}/v1beta/models/${model}:generateContent`;
+        body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: len } };
+    } else {
+        url = `${endpoint}/v1/chat/completions`;
+        body = { model, max_tokens: len, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] };
+    }
+    const r = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }, { gemini, url }), body: JSON.stringify(body) });
+    const t = await r.text().catch(() => '');
+    if (!r.ok) throw slayHttpError(r.status, t.slice(0, 1500), url);
+    let data;
+    try { data = JSON.parse(t); } catch (_) { throw new Error('адрес ответил не JSON — проверь адрес подключения'); }
+    if (data?.error) throw new Error(`API Error: ${JSON.stringify(data.error).slice(0, 1500)}`);
+    if (gemini) {
+        const c = data?.candidates?.[0];
+        const text = (c?.content?.parts || []).filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('');
+        if (!text.trim() && /MAX_TOKENS/.test(String(c?.finishReason || ''))) throw new Error('output token limit was exhausted by model reasoning');
+        return text;
+    }
+    const ch = data?.choices?.[0];
+    const text = slayResponseText(ch?.message?.content);
+    if (!text && ch?.finish_reason === 'length') throw new Error('output token limit was exhausted by model reasoning');
+    return text;
+}
+
 async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styleAdded = false } = {}) {
     const ctx = SillyTavern.getContext();
     if (typeof ctx.generateRaw !== 'function') throw new Error('эта версия таверны не умеет тихую генерацию');
@@ -13281,6 +13356,10 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
         source = ctx.mainApi === 'openai' ? String(ctx.chatCompletionSettings?.chat_completion_source || '') : String(ctx.mainApi || '');
         model = typeof ctx.getChatCompletionModel === 'function' && ctx.mainApi === 'openai' ? String(ctx.getChatCompletionModel() || '') : '';
     } catch (_) { }
+    const direct = slayStudioRewriteVia() === 'direct';
+    const conn = direct ? slayStudioDirectConn() : null;
+    if (direct) { source = 'direct'; model = conn.model; }
+    const mName = direct ? 'модель переделки' : 'модель чата';
     let raw;
     // Thinking models spend the answer limit on reasoning first: 900 tokens
     // ran out before any text (a 400 «output token limit was exhausted by
@@ -13291,6 +13370,7 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
     // words in a toast, so the reason is read off the response on its way past.
     let why = '';
     const ask = async (len) => {
+        if (direct) return slayStudioDirectAsk(conn, system, prompt, len);
         const orig = window.fetch;
         let live = true;
         const tee = async function (...a) {
@@ -13320,8 +13400,8 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
         }
         if (err) {
             iigLog('WARN', `Studio rewrite failed: source=${source || '?'} model=${model || '?'}: ${msg}`);
-            if (limitTooBig(msg)) throw new Error('модель чата не принимает такой длинный ответ — возьми для переделки другую модель');
-            if (byReasoning(msg) || /token limit/i.test(msg)) throw new Error('модель чата истратила лимит ответа на размышления — снизь в пресете уровень размышлений (reasoning) или возьми модель без них');
+            if (limitTooBig(msg)) throw new Error(`${mName} не принимает такой длинный ответ — возьми для переделки другую модель`);
+            if (byReasoning(msg) || /token limit/i.test(msg)) throw new Error(direct ? 'модель переделки истратила лимит ответа на размышления — возьми модель без размышлений' : 'модель чата истратила лимит ответа на размышления — снизь в пресете уровень размышлений (reasoning) или возьми модель без них');
             if (/no message generated/i.test(msg)) throw new Error('модель вернула пустой ответ');
             throw err;
         }
@@ -13330,7 +13410,7 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
     iigLog('INFO', `Studio rewrite: source=${source || '?'} model=${model || '?'} context=${mode} answer=${String(raw || '').length} chars, clean=${text.length}${hadImage ? ', had image' : ''}`);
     // Fewer than a dozen letters left = there was no prompt, only a picture/link.
     if ((text.match(/\p{L}/gu) || []).length < 12) {
-        if (hadImage) throw new Error('модель чата вернула картинку вместо текста — проверь, что в подключении чата выбрана текстовая модель');
+        if (hadImage) throw new Error(direct ? 'модель переделки вернула картинку вместо текста — выбери текстовую модель' : 'модель чата вернула картинку вместо текста — проверь, что в подключении чата выбрана текстовая модель');
         throw new Error('модель вернула пустой ответ');
     }
     return text;
@@ -13369,7 +13449,8 @@ async function slayStudioToChat(item, where) {
 
 function slayStudioCostText() {
     const n = _studio.n;
-    return `${_studio.raw ? '' : '1 запрос к модели чата (переделка) + '}${n} ${slayPlural(n, 'запрос', 'запроса', 'запросов')} к провайдеру картинок.`;
+    const rw = slayStudioRewriteVia() === 'direct' ? '1 запрос к модели переделки + ' : '1 запрос к модели чата (переделка) + ';
+    return `${_studio.raw ? '' : rw}${n} ${slayPlural(n, 'запрос', 'запроса', 'запросов')} к провайдеру картинок.`;
 }
 
 function slayStudioFill(opts) {
@@ -13639,6 +13720,8 @@ function openSlayStudio() {
             <div class="slay-studio-lbl">Кто и где в кадре</div>
             <div class="slay-studio-chips" data-zone="who"></div>
             <div class="slay-studio-note" data-zone="refline"></div>
+            <div class="slay-studio-xrefs" data-zone="xrefs"></div>
+            <input type="file" accept="image/*" multiple hidden data-zone="file">
             <div class="slay-studio-lbl">Идея (как хочешь, можно по-русски)</div>
             <textarea class="text_pole slay-studio-idea" rows="3" placeholder="например: они на кухне ночью, она смеётся над его шуткой"></textarea>
             <label class="slay-studio-check"><input type="checkbox" data-zone="raw"> Без переделки — отправить в генерацию как есть</label>
@@ -13649,6 +13732,10 @@ function openSlayStudio() {
               <div class="slay-studio-note" data-zone="ctxnote"></div>
               <div class="slay-studio-lbl">Тогл из пресета с правилами картинок</div>
               <select class="text_pole slay-studio-ruletog" data-zone="ruletog"></select>
+              <div class="slay-studio-lbl">Чем переделывать</div>
+              <div class="slay-studio-seg" data-zone="via"></div>
+              <div class="slay-studio-viarow" data-zone="viarow"><select class="text_pole" data-zone="rwmodel"></select><button type="button" class="slay-studio-mini" data-act="rwmodels" title="Загрузить список моделей">🔄</button><button type="button" class="slay-studio-mini" data-act="rwhand" title="Вписать название модели вручную">✎</button></div>
+              <div class="slay-studio-note" data-zone="vianote"></div>
               <button type="button" class="slay-studio-btn ai" data-act="rewrite">✨ Переделать по пресету</button>
               <div class="slay-studio-lbl">Готовый промпт (можно поправить)</div>
               <textarea class="text_pole slay-studio-prompt" rows="6" placeholder="Нажми «Переделать по пресету» — здесь появится промпт для генерации"></textarea>
@@ -13686,6 +13773,15 @@ function openSlayStudio() {
         $z('refline').textContent = picked.length
             ? `Рефы уйдут: ${picked.join(', ')} (+ одежда из гардероба). Имена в промпте не нужны: выбрала кнопкой — значит в кадре. Локация — максимум одна.`
             : 'Никого не выбрано — рисуется только по тексту.';
+        {
+            const xr = slayStudioXRefs(false);
+            $z('xrefs').innerHTML = xr.map(x => `<span class="slay-studio-xref${x.on ? ' on' : ''}" data-xref="${esc(x.id)}" title="${x.on ? 'Уйдёт рефом. Нажми — выключить' : 'Выключен. Нажми — включить'}"><img src="${esc(x.path)}" alt="" loading="lazy"><span class="slay-studio-xref-n">${esc(x.name)}</span><button type="button" data-xact="name" title="Переименовать: это имя увидит модель">✎</button><button type="button" data-xact="del" title="Убрать">×</button></span>`).join('')
+                + '<button type="button" class="slay-studio-mini" data-act="addref" title="Своя картинка рефом: поза, вещь, место, человек">＋ Свой реф</button>';
+            const onX = xr.filter(x => x && x.on).map(x => x.name);
+            if (onX.length) $z('refline').textContent = picked.length
+                ? `${$z('refline').textContent} Свои рефы: ${onX.join(', ')}.`
+                : `Из рефов уйдут только свои: ${onX.join(', ')}.`;
+        }
         $z('ctx').innerHTML = Object.entries(SLAY_STUDIO_CTX).map(([k, [l]]) => `<button type="button" class="${_studio.ctx === k ? 'on' : ''}" data-ctx="${k}">${l}</button>`).join('');
         $z('ctxnote').textContent = SLAY_STUDIO_CTX[_studio.ctx][1] + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
         $z('rw').hidden = _studio.raw;
@@ -13699,6 +13795,24 @@ function openSlayStudio() {
             const picked = slayStudioPickedToggle();
             sel.innerHTML = '<option value="">Авто — SLAY найдёт сам</option>' + list.map(p => `<option value="${esc(p.identifier)}"${p.identifier === picked ? ' selected' : ''}>${on.has(p.identifier) ? '● ' : '○ '}${esc(String(p.name || p.identifier).replace(/^[\s·]+/, '').slice(0, 60))}</option>`).join('');
             sel.disabled = !list.length;
+        }
+        {
+            const via = slayStudioRewriteVia();
+            $z('via').innerHTML = [['chat', 'Модель чата'], ['direct', 'Прямой API']].map(([k, l]) => `<button type="button" class="${via === k ? 'on' : ''}" data-via="${k}">${l}</button>`).join('');
+            $z('viarow').hidden = via !== 'direct';
+            if (via === 'direct') {
+                const cur = slayStudioRwModel();
+                const list = (_studioRwModels || []).slice();
+                if (cur && !list.includes(cur)) list.unshift(cur);
+                $z('rwmodel').innerHTML = list.length
+                    ? list.map(m => `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('')
+                    : '<option value="">— нажми 🔄, чтобы загрузить модели —</option>';
+                $z('vianote').textContent = 'Адрес и ключ — как у описаний в Гардеробе (своё подключение, если включено, иначе «Подключение»). Модель чата не тратится.';
+            } else {
+                let m = '';
+                try { const c = SillyTavern.getContext(); m = c.mainApi === 'openai' && typeof c.getChatCompletionModel === 'function' ? String(c.getChatCompletionModel() || '') : ''; } catch (_) { }
+                $z('vianote').textContent = `Через подключение чата${m ? ` (сейчас: ${m})` : ''}. Сменишь модель чата — сменится и переделка.`;
+            }
         }
         if ($z('rawnote')) $z('rawnote').hidden = !_studio.raw;
         $z('cost').textContent = slayStudioCostText();
@@ -13743,7 +13857,7 @@ function openSlayStudio() {
         _studio.busy += n; _studio.busyChat = chatKey; drawResults();
         let late = 0;
         const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
-            studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText,
+            studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText, extraRefs: slayStudioXRefsOn(),
         }).then(async (res) => {
             if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
             const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
@@ -13758,10 +13872,75 @@ function openSlayStudio() {
         else toastr.success('Готово. В чат ничего не ушло.', 'Студия', { timeOut: 2500 });
     };
 
+    // Own pictures from the device as extra references of this chat's Studio:
+    // a copy is saved next to the generated pictures, × deletes that copy.
+    const addRefs = async (files) => {
+        const list = Array.from(files || []).filter(f => /^image\//.test(f.type || ''));
+        try { $z('file').value = ''; } catch (_) { }
+        if (!list.length) return;
+        let one = '';
+        if (list.length === 1) {
+            const v = await slayPromptInput('Что на картинке? Это имя увидит модель (например: поза, кот, его куртка)', String(list[0].name || '').replace(/\.[a-z0-9]+$/i, '').slice(0, 60));
+            if (v === null || v === undefined) return;
+            one = String(v).trim();
+        }
+        const md = SillyTavern.getContext().chatMetadata;
+        let ok = 0, fail = '';
+        for (const f of list) {
+            try {
+                const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error || new Error('файл не прочитался')); r.readAsDataURL(f); });
+                const path = await saveImageToFile(dataUrl);
+                if (SillyTavern.getContext().chatMetadata !== md) { slayDeleteStoredImage(path).catch(() => { }); continue; }
+                const name = (one || String(f.name || '').replace(/\.[a-z0-9]+$/i, '') || 'реф').slice(0, 60);
+                slayStudioXRefs().push({ id: swUid('sr'), path, name, on: true });
+                ok++;
+            } catch (err) { fail = String(err?.message || err); iigLog('WARN', 'studio own ref:', fail); }
+        }
+        if (ok) slayStudioSave();
+        if (ov.isConnected) drawLeft();
+        if (fail) toastr.error(`Не добавилось ${list.length - ok} из ${list.length}: ${fail}`, 'Студия', { timeOut: 8000 });
+    };
+
     const onClick = async (e) => {
-        const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-card]');
+        const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-card]');
         if (!t) { if (e.target === ov) close(); return; }
         if (t.dataset.act === 'close') { close(); return; }
+        if (t.dataset.act === 'addref') { $z('file').click(); return; }
+        if (t.dataset.xact || t.dataset.xref) {
+            const id = t.closest('[data-xref]')?.dataset.xref;
+            const list = slayStudioXRefs(false);
+            const x = list.find(r => r.id === id);
+            if (!x) return;
+            if (t.dataset.xact === 'del') {
+                list.splice(list.indexOf(x), 1);
+                slayStudioSave();
+                slayDeleteStoredImage(x.path).catch(() => { });
+            } else if (t.dataset.xact === 'name') {
+                const v = await slayPromptInput('Что на картинке? Это имя увидит модель', x.name);
+                if (v !== null && v !== undefined && String(v).trim()) { x.name = String(v).trim().slice(0, 60); slayStudioSave(); }
+            } else { x.on = !x.on; slayStudioSave(); }
+            if (ov.isConnected) drawLeft();
+            return;
+        }
+        if (t.dataset.via) { getSettings().studioRewriteVia = t.dataset.via; saveSettings(); drawLeft(); return; }
+        if (t.dataset.act === 'rwmodels') {
+            if (t.disabled) return;
+            t.disabled = true;
+            try {
+                _studioRwModels = await slayStudioDirectModels();
+                if (!_studioRwModels.length) toastr.warning('Адрес не вернул ни одной текстовой модели — впиши название вручную (✎)', 'Студия', { timeOut: 7000 });
+                else if (!slayStudioRwModel()) { getSettings().studioRewriteModel = _studioRwModels[0]; saveSettings(); }
+            } catch (err) { const ex = slayExplainError(err); toastr.error('Список моделей не загрузился: ' + (ex?.short || err?.message || err), 'Студия', { timeOut: 8000 }); }
+            finally { t.disabled = false; if (ov.isConnected) drawLeft(); }
+            return;
+        }
+        if (t.dataset.act === 'rwhand') {
+            const v = await slayPromptInput('Название модели для переделки', slayStudioRwModel());
+            if (v === null || v === undefined) return;
+            getSettings().studioRewriteModel = String(v).trim(); saveSettings();
+            if (ov.isConnected) drawLeft();
+            return;
+        }
         if (t.dataset.act === 'mode') { win.toggle(); return; }
         if (t.dataset.task) {
             _studio.task = t.dataset.task;
@@ -13793,6 +13972,7 @@ function openSlayStudio() {
             t.disabled = true; const was = t.textContent; t.textContent = 'Переделываю…';
             try {
                 const names = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc').map(o => o.label);
+                for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
                 promptEl.value = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && !!st.slayStyle && !slayStyleInPreset() });
             } catch (err) { toastr.error('Переделка не вышла: ' + (err?.message || err), 'Студия'); }
@@ -13854,6 +14034,8 @@ function openSlayStudio() {
         else if (z === 'n') { _studio.n = parseInt(e.target.value, 10) || 1; drawLeft(); }
         else if (z === 'ar') _studio.ar = e.target.value;
         else if (z === 'style') _studio.noStyle = e.target.value === 'none';
+        else if (z === 'file') addRefs(e.target.files);
+        else if (z === 'rwmodel') { getSettings().studioRewriteModel = e.target.value; saveSettings(); }
         else if (z === 'ruletog') {
             const st = getSettings();
             if (!st.studioRuleToggle || typeof st.studioRuleToggle !== 'object') st.studioRuleToggle = {};
