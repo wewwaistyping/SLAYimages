@@ -4029,3 +4029,10 @@ button.slay-card-look { cursor: pointer; }
 .slay-studio textarea::placeholder { color: rgba(232, 232, 238, 0.45) !important; opacity: 1; }
 .slay-studio select option { background: #16161c; color: #e8e8ee; }
 .slay-studio-check input[type="checkbox"] { accent-color: var(--slay-pink); }
+
+/* Dialogs under a phone keyboard: the overlay follows the visible part of
+   the screen (slayFitDialog), the box fills it and scrolls inside, and the
+   buttons stay in sight at the bottom. */
+.slay-loc-dialog.slay-vv { inset: auto; right: auto; bottom: auto; box-sizing: border-box; }
+.slay-loc-dialog.slay-vv .slay-loc-box { max-height: 100%; }
+.slay-loc-box .slay-loc-foot { position: sticky; bottom: -14px; margin-bottom: -14px; padding: 10px 0 14px; background: rgb(24, 22, 30); z-index: 1; }

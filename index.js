@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.24';
+const SLAY_VERSION = '5.2.0-exp.25';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -8905,6 +8905,27 @@ function slayUpdateRefsWarn() {
     if (many) warn.textContent = `⚠️ До ${n} рефов на картинку — модель будет путать лица и одежду. Лучше 2–4.`;
 }
 
+// Phone keyboard: the browser slides the page up and the dialog, fixed to the
+// full screen, loses its top and its buttons under the keys. Keep the dialog
+// inside the part of the screen that is actually visible.
+function slayFitDialog(ov) {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const fit = () => {
+        if (!ov.isConnected) { vv.removeEventListener('resize', fit); vv.removeEventListener('scroll', fit); return; }
+        ov.classList.add('slay-vv');
+        ov.style.top = vv.offsetTop + 'px';
+        ov.style.left = vv.offsetLeft + 'px';
+        ov.style.width = vv.width + 'px';
+        ov.style.height = vv.height + 'px';
+        const f = document.activeElement;
+        if (f && ov.contains(f) && /^(INPUT|TEXTAREA)$/.test(f.tagName)) { try { f.scrollIntoView({ block: 'nearest' }); } catch (_) { } }
+    };
+    vv.addEventListener('resize', fit);
+    vv.addEventListener('scroll', fit);
+    fit();
+}
+
 // Editor of one location slot: names, description, what goes to the picture.
 function slayEditLocationDialog(index) {
     const list = slayRefList(getCurrentCharacterRefs(), 'loc');
@@ -8986,6 +9007,7 @@ function slayEditLocationDialog(index) {
         close();
     });
     document.body.appendChild(ov);
+    slayFitDialog(ov);
     (loc.name ? ta : nameEl).focus();
 }
 
@@ -9542,6 +9564,7 @@ function slayCardOverlay(html, onClose) {
     ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
     ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('.slay-loc-cancel')) close(); });
     document.body.appendChild(ov);
+    slayFitDialog(ov);
     return { ov, close };
 }
 
@@ -10704,6 +10727,7 @@ function slayPickAvatarSource() {
         input.addEventListener('input', draw);
         draw();
         document.body.appendChild(ov);
+        slayFitDialog(ov);
         input.focus();
     });
 }
