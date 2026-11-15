@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.43';
+const SLAY_VERSION = '5.2.0-exp.44';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -14881,11 +14881,11 @@ function openSlayStudio() {
         {
             const cs = slayStudioCtxSel();
             const grp = !!SillyTavern.getContext().groupId;
-            const row = (k, title, sub, extra = '') => `<label class="slay-studio-ck${cs[k] ? ' on' : ''}"><input type="checkbox" data-zone="ctxck" data-k="${k}"${cs[k] ? ' checked' : ''}><span><b>${title}</b><small>${sub}</small></span>${extra}</label>`;
+            const row = (k, title, sub, extra = '') => `<label class="slay-studio-cx${cs[k] ? ' on' : ''}"><input type="checkbox" data-zone="ctxck" data-k="${k}"${cs[k] ? ' checked' : ''}><span><b>${title}</b><small>${sub}</small></span>${extra}</label>`;
             $z('ctx').innerHTML = row('card', 'Карточка бота', (grp ? 'Вся, у каждого участника группы' : 'Вся') + ': описание, личность, сценарий, первое сообщение, примеры диалогов.')
                 + row('persona', 'Персона', 'Описание твоей персоны.')
                 + row('lore', 'Лорбуки', 'Все активные: глобальные, персонажа, чата, персоны. Ключи ищутся только в том, что уходит: в идее и отмеченном здесь. Постоянные записи идут всегда.')
-                + row('last', 'Последние сообщения', 'Переписка чата. Ключи лорбука ищутся и в ней.', `<span class="slay-studio-ckn"><input type="number" min="1" max="50" data-zone="ctxn" value="${cs.lastN}"${cs.last ? '' : ' disabled'}> шт</span>`);
+                + row('last', 'Последние сообщения', 'Переписка чата. Ключи лорбука ищутся и в ней.', `<span class="slay-studio-cxn"><input type="number" min="1" max="50" data-zone="ctxn" value="${cs.lastN}"${cs.last ? '' : ' disabled'}> шт</span>`);
             const on = ['card', 'persona', 'lore', 'last'].filter(k => cs[k]);
             const names = { card: 'карточка', persona: 'персона', lore: 'лорбук', last: cs.lastN + ' сообщ.' };
             $z('sctx').textContent = on.length ? on.map(k => names[k]).join(' · ') : 'только идея';

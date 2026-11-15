@@ -4124,13 +4124,13 @@ button.slay-card-look { cursor: pointer; }
 .slay-studio-fold > .slay-studio-fb { display: none; padding: 0 11px 11px; flex-direction: column; gap: 6px; }
 .slay-studio-fold.open > .slay-studio-fb { display: flex; }
 .slay-studio-ctxs { display: flex; flex-direction: column; gap: 4px; }
-.slay-studio-ck { display: flex; align-items: flex-start; gap: 9px; padding: 7px 9px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer; margin: 0; }
-.slay-studio-ck.on { border-color: color-mix(in srgb, var(--slay-pink) 55%, transparent); background: color-mix(in srgb, var(--slay-pink) 8%, transparent); }
-.slay-studio-ck input[type=checkbox] { margin-top: 3px; accent-color: var(--slay-pink); flex: none; }
-.slay-studio-ck > span:not(.slay-studio-ckn) { display: flex; flex-direction: column; min-width: 0; }
-.slay-studio-ck small { opacity: 0.6; font-size: 0.82em; line-height: 1.35; }
-.slay-studio-ckn { margin-left: auto; display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 0.85em; opacity: 0.8; flex: none; }
-.slay-studio-ckn input { width: 56px; text-align: center; padding: 3px 4px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid rgba(255,255,255,0.15); border-radius: 7px; font: inherit; }
+.slay-studio-cx { display: flex; align-items: flex-start; gap: 9px; padding: 7px 9px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer; margin: 0; }
+.slay-studio-cx.on { border-color: color-mix(in srgb, var(--slay-pink) 55%, transparent); background: color-mix(in srgb, var(--slay-pink) 8%, transparent); }
+.slay-studio-cx input[type=checkbox] { margin-top: 3px; accent-color: var(--slay-pink); flex: none; }
+.slay-studio-cx > span:not(.slay-studio-cxn) { display: flex; flex-direction: column; min-width: 0; }
+.slay-studio-cx small { opacity: 0.6; font-size: 0.82em; line-height: 1.35; }
+.slay-studio-cxn { margin-left: auto; display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 0.85em; opacity: 0.8; flex: none; }
+.slay-studio-cxn input { width: 56px; text-align: center; padding: 3px 4px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid rgba(255,255,255,0.15); border-radius: 7px; font: inherit; }
 .slay-studio-conn { display: flex; flex-direction: column; gap: 6px; }
 .slay-studio-conn .flex-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .slay-studio-conn .flex-row > label { min-width: 80px; font-size: 0.86em; opacity: 0.75; }
