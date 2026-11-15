@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.44';
+const SLAY_VERSION = '5.2.0-exp.45';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -14228,10 +14228,14 @@ async function slayStudioContext(sel, idea) {
     const chat = Array.isArray(ctx.chat) ? ctx.chat.filter(m => m && !m.is_system) : [];
     const parts = [];
     const scan = [String(idea || '')];
+    // sel.inFrame (from the Studio): { char, user, members: [names] } — whose
+    // card and persona may go. Without it (other extensions) everyone's go.
+    const fr = sel.inFrame || null;
     if (sel.card) {
-        const chars = ctx.groupId
+        let chars = ctx.groupId
             ? (ctx.groups?.find?.(g => g.id === ctx.groupId)?.members || []).map(a => ctx.characters?.find?.(c => c.avatar === a)).filter(Boolean)
             : [ctx.characters?.[ctx.characterId]].filter(Boolean);
+        if (fr) chars = ctx.groupId ? chars.filter(c => (fr.members || []).includes(c.name)) : (fr.char ? chars : []);
         for (const c of chars) {
             const fields = [
                 ['Description', c.description], ['Personality', c.personality], ['Scenario', c.scenario],
@@ -14244,7 +14248,7 @@ async function slayStudioContext(sel, idea) {
             scan.push(text);
         }
     }
-    if (sel.persona) {
+    if (sel.persona && (!fr || fr.user)) {
         try {
             const persona = sub('{{persona}}');
             if (persona && persona !== '{{persona}}' && persona.trim()) { const t = `${ctx.name1}:\n${persona.trim()}`.slice(0, 3000); parts.push(t); scan.push(t); }
@@ -14363,6 +14367,11 @@ async function slayStudioDirectAsk(conn, system, prompt, len) {
 // What the people in frame wear now, from the wardrobe. The rewrite has to
 // know it: preset rules ask for clothes, and a model left in the dark invents
 // them, so the prompt fought the outfit pictures.
+// Who is picked in «Кто и где в кадре», for the rewrite's context.
+function slayStudioInFrame(opts, picked) {
+    const sel = opts.filter(o => picked.has(o.key));
+    return { char: sel.some(o => o.kind === 'char'), user: sel.some(o => o.kind === 'user'), members: sel.filter(o => o.memberName).map(o => o.memberName) };
+}
 // The place picked in the Studio: { name, desc, hasImg } or null.
 function slayStudioPickedPlace(opts, picked) {
     const o = opts.find(x => x.kind === 'loc' && picked.has(x.key));
@@ -14882,14 +14891,19 @@ function openSlayStudio() {
             const cs = slayStudioCtxSel();
             const grp = !!SillyTavern.getContext().groupId;
             const row = (k, title, sub, extra = '') => `<label class="slay-studio-cx${cs[k] ? ' on' : ''}"><input type="checkbox" data-zone="ctxck" data-k="${k}"${cs[k] ? ' checked' : ''}><span><b>${title}</b><small>${sub}</small></span>${extra}</label>`;
-            $z('ctx').innerHTML = row('card', 'Карточка бота', (grp ? 'Вся, у каждого участника группы' : 'Вся') + ': описание, личность, сценарий, первое сообщение, примеры диалогов.')
-                + row('persona', 'Персона', 'Описание твоей персоны.')
+            $z('ctx').innerHTML = row('card', 'Карточка бота', (grp ? 'Вся, у тех участников группы, кто выбран в кадре' : 'Вся, если бот выбран в кадре') + ': описание, личность, сценарий, первое сообщение, примеры диалогов.')
+                + row('persona', 'Персона', 'Описание твоей персоны, если ты выбрана в кадре.')
                 + row('lore', 'Лорбуки', 'Все активные: глобальные, персонажа, чата, персоны. Ключи ищутся только в том, что уходит: в идее и отмеченном здесь. Постоянные записи идут всегда.')
                 + row('last', 'Последние сообщения', 'Переписка чата. Ключи лорбука ищутся и в ней.', `<span class="slay-studio-cxn"><input type="number" min="1" max="50" data-zone="ctxn" value="${cs.lastN}"${cs.last ? '' : ' disabled'}> шт</span>`);
             const on = ['card', 'persona', 'lore', 'last'].filter(k => cs[k]);
             const names = { card: 'карточка', persona: 'персона', lore: 'лорбук', last: cs.lastN + ' сообщ.' };
             $z('sctx').textContent = on.length ? on.map(k => names[k]).join(' · ') : 'только идея';
+            const fr = slayStudioInFrame(opts, _studio.who);
+            const skip = [];
+            if (cs.card && !(grp ? fr.members.length : fr.char)) skip.push(grp ? 'карточки (никто из участников не выбран в кадре)' : 'карточка бота (бот не выбран в кадре)');
+            if (cs.persona && !fr.user) skip.push('персона (ты не выбрана в кадре)');
             $z('ctxnote').textContent = (on.length ? '' : 'Ничего не отмечено: переделка видит только идею и правила картинок из пресета.')
+                + (skip.length ? ` Сейчас не уйдёт: ${skip.join(', ')}.` : '')
                 + (cs.lore && !cs.last ? ' Переписка в поиск по лорбуку не идёт, пока не отмечены «Последние сообщения».' : '')
                 + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
         }
@@ -15259,7 +15273,14 @@ function openSlayStudio() {
                 for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
                 const chatKey = slayStudioChatKey();
-                const text = await slayStudioRewrite(idea, { ...slayStudioCtxSel() }, names, '', { styleAdded: !_studio.noStyle && (!!_studio.style?.text || (!!st.slayStyle && !slayStyleInPreset())), outfits: slayStudioOutfits(opts, _studio.who), place: slayStudioPickedPlace(opts, _studio.who) });
+                // Picked by a button = in frame, no name needed in the idea. When the
+                // idea names none of them («она в театральном зале»), it goes with
+                // their names in front, so «она» is the one picked and nobody else.
+                const people = opts.filter(o => _studio.who.has(o.key) && o.kind !== 'loc');
+                const low = idea.toLowerCase();
+                const named = people.some(o => nameIsInPrompt(o.name || o.label, low) || nameIsInPrompt(o.label, low));
+                const ideaFor = people.length && !named ? `${people.map(o => o.label).join(', ')}: ${idea}` : idea;
+                const text = await slayStudioRewrite(ideaFor, { ...slayStudioCtxSel(), inFrame: slayStudioInFrame(opts, _studio.who) }, names, '', { styleAdded: !_studio.noStyle && (!!_studio.style?.text || (!!st.slayStyle && !slayStyleInPreset())), outfits: slayStudioOutfits(opts, _studio.who), place: slayStudioPickedPlace(opts, _studio.who) });
                 if (slayStudioChatKey() === chatKey) {
                     _studio.prompt = text;
                     const live = document.querySelector('.slay-studio-ov .slay-studio-prompt');
