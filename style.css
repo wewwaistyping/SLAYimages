@@ -4113,3 +4113,30 @@ button.slay-card-look { cursor: pointer; }
 
 /* The location dialog opened from the Studio: above the Studio window. */
 .slay-loc-dialog.slay-loc-over { z-index: 100003; }
+
+/* Studio: folding blocks (context, rewrite, image connection). */
+.slay-studio-fold { border: 1px solid rgba(255,255,255,0.1); border-radius: 11px; background: rgba(255,255,255,0.02); }
+.slay-studio-fh { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 11px; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.slay-studio-fh > i { color: var(--slay-pink); width: 1em; transition: transform .15s; flex: none; }
+.slay-studio-fold.open > .slay-studio-fh > i { transform: rotate(90deg); }
+.slay-studio-fh .t { font-size: 0.72em; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; font-weight: 700; white-space: nowrap; }
+.slay-studio-fh .s { margin-left: auto; font-size: 0.8em; color: var(--slay-pink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.slay-studio-fold > .slay-studio-fb { display: none; padding: 0 11px 11px; flex-direction: column; gap: 6px; }
+.slay-studio-fold.open > .slay-studio-fb { display: flex; }
+.slay-studio-ctxs { display: flex; flex-direction: column; gap: 4px; }
+.slay-studio-ck { display: flex; align-items: flex-start; gap: 9px; padding: 7px 9px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer; margin: 0; }
+.slay-studio-ck.on { border-color: color-mix(in srgb, var(--slay-pink) 55%, transparent); background: color-mix(in srgb, var(--slay-pink) 8%, transparent); }
+.slay-studio-ck input[type=checkbox] { margin-top: 3px; accent-color: var(--slay-pink); flex: none; }
+.slay-studio-ck > span:not(.slay-studio-ckn) { display: flex; flex-direction: column; min-width: 0; }
+.slay-studio-ck small { opacity: 0.6; font-size: 0.82em; line-height: 1.35; }
+.slay-studio-ckn { margin-left: auto; display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 0.85em; opacity: 0.8; flex: none; }
+.slay-studio-ckn input { width: 56px; text-align: center; padding: 3px 4px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid rgba(255,255,255,0.15); border-radius: 7px; font: inherit; }
+.slay-studio-conn { display: flex; flex-direction: column; gap: 6px; }
+.slay-studio-conn .flex-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.slay-studio-conn .flex-row > label { min-width: 80px; font-size: 0.86em; opacity: 0.75; }
+.slay-studio-conn .flex-row > .flex1 { flex: 1; min-width: 0; }
+.slay-studio-conn .iig-hidden { display: none !important; }
+.slay-studio-isize { display: flex; align-items: center; gap: 8px; }
+.slay-studio-isize[hidden] { display: none; }
+.slay-studio-isize > span { min-width: 80px; font-size: 0.86em; opacity: 0.75; }
+.slay-studio-isize .slay-studio-seg { flex: 1; }

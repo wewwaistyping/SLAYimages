@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.42';
+const SLAY_VERSION = '5.2.0-exp.43';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -13989,6 +13989,21 @@ const SLAY_STUDIO_CTX = {
     card: ['Карточка + лорбук', 'Без переписки: внешность и места — из карточки и лорбука.'],
 };
 const SLAY_STUDIO_RATIOS = ['1:1', '3:4', '4:3', '2:3', '9:16', '16:9'];
+// What goes into «Переделать по пресету», ticked one by one; kept for the whole Studio.
+function slayStudioCtxSel() {
+    const s = getSettings();
+    const d = { card: true, persona: true, lore: true, last: false, lastN: 6 };
+    if (!s.studioCtx || typeof s.studioCtx !== 'object') s.studioCtx = { ...d };
+    for (const k of Object.keys(d)) if (s.studioCtx[k] === undefined) s.studioCtx[k] = d[k];
+    s.studioCtx.lastN = Math.max(1, Math.min(50, parseInt(s.studioCtx.lastN, 10) || 6));
+    return s.studioCtx;
+}
+// Which of the Studio's folding blocks are open.
+function slayStudioFolds() {
+    const s = getSettings();
+    if (!s.studioFolds || typeof s.studioFolds !== 'object') s.studioFolds = {};
+    return s.studioFolds;
+}
 // Window state, memory only: which chips, task, ratio. Reset per chat.
 const _studio = { chatId: null, task: 'free', ctx: 'off', who: null, raw: false, n: 1, ar: '3:4', noStyle: false, busyBy: {}, idea: '', prompt: '', style: null };
 // The Studio's own style: { name, text } or null («как в настройках»). Kept
@@ -14201,36 +14216,59 @@ function slayStudioPlainText(html) {
     return String(html || '').replace(/<img[^>]*>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function slayStudioContext(mode, idea) {
+// sel: { card, persona, lore, last, lastN }. An old mode word ('off', 'last',
+// 'card') still works for callers from other extensions.
+// The lorebooks are scanned in exactly the text that goes: the idea and what
+// is ticked. Chat messages count only when «Последние сообщения» are ticked.
+async function slayStudioContext(sel, idea) {
+    if (typeof sel === 'string') sel = sel === 'last' ? { last: true, lastN: 6 } : sel === 'card' ? { card: true, persona: true, lore: true } : {};
+    sel = sel || {};
     const ctx = SillyTavern.getContext();
+    const sub = (t) => { try { return ctx.substituteParams ? ctx.substituteParams(String(t)) : String(t); } catch (_) { return String(t); } };
     const chat = Array.isArray(ctx.chat) ? ctx.chat.filter(m => m && !m.is_system) : [];
-    if (mode === 'last') {
-        return chat.slice(-6).map(m => `${m.name}: ${slayStudioPlainText(m.mes).slice(0, 1500)}`).join('\n\n');
-    }
-    if (mode === 'card') {
-        const parts = [];
+    const parts = [];
+    const scan = [String(idea || '')];
+    if (sel.card) {
         const chars = ctx.groupId
             ? (ctx.groups?.find?.(g => g.id === ctx.groupId)?.members || []).map(a => ctx.characters?.find?.(c => c.avatar === a)).filter(Boolean)
             : [ctx.characters?.[ctx.characterId]].filter(Boolean);
         for (const c of chars) {
-            const desc = [c.description, c.scenario].filter(Boolean).join('\n');
-            if (desc) parts.push(`${c.name}:\n${ctx.substituteParams ? ctx.substituteParams(desc) : desc}`.slice(0, 3000));
+            const fields = [
+                ['Description', c.description], ['Personality', c.personality], ['Scenario', c.scenario],
+                ['First message', c.first_mes], ['Example dialogues', c.mes_example],
+                ['Note', c.data?.extensions?.depth_prompt?.prompt],
+            ].filter(([, v]) => typeof v === 'string' && v.trim());
+            if (!fields.length) continue;
+            const text = `${c.name}:\n` + fields.map(([l, v]) => `${l}: ${sub(v).trim()}`).join('\n');
+            parts.push(text.slice(0, 8000));
+            scan.push(text);
         }
+    }
+    if (sel.persona) {
         try {
-            const persona = ctx.substituteParams ? ctx.substituteParams('{{persona}}') : '';
-            if (persona && persona !== '{{persona}}') parts.push(`${ctx.name1}:\n${persona}`.slice(0, 1500));
+            const persona = sub('{{persona}}');
+            if (persona && persona !== '{{persona}}' && persona.trim()) { const t = `${ctx.name1}:\n${persona.trim()}`.slice(0, 3000); parts.push(t); scan.push(t); }
         } catch (_) { }
+    }
+    let msgs = [];
+    if (sel.last) {
+        const n = Math.max(1, Math.min(50, parseInt(sel.lastN, 10) || 6));
+        msgs = chat.slice(-n).map(m => `${m.name}: ${slayStudioPlainText(m.mes).slice(0, 1500)}`);
+        scan.push(...msgs);
+    }
+    if (sel.lore) {
         try {
             if (typeof ctx.getWorldInfoPrompt === 'function') {
-                const scan = [idea, ...chat.slice(-10).reverse().map(m => `${m.name}: ${slayStudioPlainText(m.mes)}`)];
-                const wi = await ctx.getWorldInfoPrompt(scan, 8192, true);
+                // One piece of text: the lorebook scan depth counts pieces, and every
+                // part that goes must be searched, not just the first one or two.
+                const wi = await ctx.getWorldInfoPrompt([scan.join('\n\n')], 8192, true);
                 const text = String(wi?.worldInfoString || '').trim();
-                if (text) parts.push('Lorebook:\n' + text.slice(0, 4000));
+                if (text) parts.push('Lorebook:\n' + text.slice(0, 6000));
             }
         } catch (e) { iigLog('WARN', 'studio lorebook:', e?.message); }
-        return parts.join('\n\n');
     }
-    return '';
+    if (msgs.length) parts.push('Last messages:\n' + msgs.join('\n\n'));
+    return parts.join('\n\n');
 }
 
 // Idea → finished image prompt, written by the chat model with the preset's
@@ -14371,7 +14409,7 @@ async function slayStudioRewrite(idea, mode, whoNames, givenContext = '', { styl
         // so with a SLAY style the rewrite writes none.
         + (styleAdded ? '\n\nIMPORTANT: the art style is added separately by the image tool. Do NOT write any art style, medium, rendering technique, artist or studio names, or a style suffix — even if the rules above ask for one. Describe only camera, characters, action, place, light and composition, plus the Avoid list if the rules have one.' : '')
         + (outfits.length ? '\n\nIMPORTANT: the current outfits are given below. Dress these people exactly in them (you may shorten the wording); never replace them with other clothes, even if the rules above or the context suggest different ones.' : '')
-        + (place ? '\n\nIMPORTANT: the scene takes place in the location given below. Set it there and describe that place; never move the scene to another location, even if the context or the idea suggests one.' : '')
+        + (place ?'\n\nIMPORTANT: the scene takes place in the location given below. Set it there and describe that place; never move the scene to another location, even if the context or the idea suggests one.' : '')
         + '\n\nReturn ONLY the final prompt text in English, one paragraph. No tags, no JSON, no comments.';
     const prompt = [
         context ? 'Context:\n' + context : '',
@@ -14747,15 +14785,17 @@ function openSlayStudio() {
             <label class="slay-studio-check"><input type="checkbox" data-zone="raw"> Без переделки — отправить в генерацию как есть</label>
             <div class="slay-studio-rawnote" data-zone="rawnote" hidden>Правила картинок из пресета не применятся. Опиши одежду, место и кадр сама — иначе модель скопирует их с рефов.</div>
             <div data-zone="rw">
-              <div class="slay-studio-lbl">Контекст для переделки</div>
-              <div class="slay-studio-seg" data-zone="ctx"></div>
-              <div class="slay-studio-note" data-zone="ctxnote"></div>
+              <div class="slay-studio-fold" data-fold="ctx"><button type="button" class="slay-studio-fh" data-act="fold" data-f="ctx"><i class="fa-solid fa-chevron-right"></i><span class="t">Контекст для переделки</span><span class="s" data-zone="sctx"></span></button><div class="slay-studio-fb">
+                <div class="slay-studio-ctxs" data-zone="ctx"></div>
+                <div class="slay-studio-note" data-zone="ctxnote"></div>
+              </div></div>
               <div class="slay-studio-lbl">Тогл из пресета с правилами картинок</div>
               <select class="text_pole slay-studio-ruletog" data-zone="ruletog"></select>
-              <div class="slay-studio-lbl">Чем переделывать</div>
-              <div class="slay-studio-seg" data-zone="via"></div>
-              <div class="slay-studio-viarow" data-zone="viarow"><select class="text_pole" data-zone="rwmodel"></select><button type="button" class="slay-studio-mini" data-act="rwmodels" title="Загрузить список моделей">🔄</button><button type="button" class="slay-studio-mini" data-act="rwhand" title="Вписать название модели вручную">✎</button></div>
-              <div class="slay-studio-note" data-zone="vianote"></div>
+              <div class="slay-studio-fold" data-fold="via"><button type="button" class="slay-studio-fh" data-act="fold" data-f="via"><i class="fa-solid fa-chevron-right"></i><span class="t">Чем переделывать</span><span class="s" data-zone="svia"></span></button><div class="slay-studio-fb">
+                <div class="slay-studio-seg" data-zone="via"></div>
+                <div class="slay-studio-viarow" data-zone="viarow"><select class="text_pole" data-zone="rwmodel"></select><button type="button" class="slay-studio-mini" data-act="rwmodels" title="Загрузить список моделей">🔄</button><button type="button" class="slay-studio-mini" data-act="rwhand" title="Вписать название модели вручную">✎</button></div>
+                <div class="slay-studio-note" data-zone="vianote"></div>
+              </div></div>
               <button type="button" class="slay-studio-btn ai" data-act="rewrite">✨ Переделать по пресету</button>
               <div class="slay-studio-lbl">Готовый промпт (можно поправить)</div>
               <textarea class="text_pole slay-studio-prompt" rows="6" placeholder="Нажми «Переделать по пресету» — здесь появится промпт для генерации"></textarea>
@@ -14765,6 +14805,11 @@ function openSlayStudio() {
               <label>Соотношение<select data-zone="ar">${ratios.map(r => `<option value="${r}">${r}</option>`).join('')}</select></label>
               <label>Сколько<select data-zone="n"><option>1</option><option>2</option><option>4</option></select></label>
             </div>
+            <div class="slay-studio-fold" data-fold="img"><button type="button" class="slay-studio-fh" data-act="fold" data-f="img"><i class="fa-solid fa-chevron-right"></i><span class="t">Подключение SLAY · картинки</span><span class="s" data-zone="simg"></span></button><div class="slay-studio-fb">
+              <div class="slay-studio-conn" data-zone="conn"></div>
+              <div class="slay-studio-isize" data-zone="isizerow"><span>Разрешение</span><div class="slay-studio-seg" data-zone="isize"></div></div>
+              <div class="slay-studio-note">Это те же поля, что в настройках SLAY → «Подключение»: поменяешь здесь — поменяется и для картинок в чате.</div>
+            </div></div>
             <button type="button" class="slay-studio-btn go" data-act="go">Нарисовать</button>
             <div class="slay-studio-note" data-zone="cost"></div>
           </div>
@@ -14833,8 +14878,23 @@ function openSlayStudio() {
                 ? `${$z('refline').textContent} Свои рефы: ${onX.join(', ')}.`
                 : `Из рефов уйдут только свои: ${onX.join(', ')}.`;
         }
-        $z('ctx').innerHTML = Object.entries(SLAY_STUDIO_CTX).map(([k, [l]]) => `<button type="button" class="${_studio.ctx === k ? 'on' : ''}" data-ctx="${k}">${l}</button>`).join('');
-        $z('ctxnote').textContent = SLAY_STUDIO_CTX[_studio.ctx][1] + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
+        {
+            const cs = slayStudioCtxSel();
+            const grp = !!SillyTavern.getContext().groupId;
+            const row = (k, title, sub, extra = '') => `<label class="slay-studio-ck${cs[k] ? ' on' : ''}"><input type="checkbox" data-zone="ctxck" data-k="${k}"${cs[k] ? ' checked' : ''}><span><b>${title}</b><small>${sub}</small></span>${extra}</label>`;
+            $z('ctx').innerHTML = row('card', 'Карточка бота', (grp ? 'Вся, у каждого участника группы' : 'Вся') + ': описание, личность, сценарий, первое сообщение, примеры диалогов.')
+                + row('persona', 'Персона', 'Описание твоей персоны.')
+                + row('lore', 'Лорбуки', 'Все активные: глобальные, персонажа, чата, персоны. Ключи ищутся только в том, что уходит: в идее и отмеченном здесь. Постоянные записи идут всегда.')
+                + row('last', 'Последние сообщения', 'Переписка чата. Ключи лорбука ищутся и в ней.', `<span class="slay-studio-ckn"><input type="number" min="1" max="50" data-zone="ctxn" value="${cs.lastN}"${cs.last ? '' : ' disabled'}> шт</span>`);
+            const on = ['card', 'persona', 'lore', 'last'].filter(k => cs[k]);
+            const names = { card: 'карточка', persona: 'персона', lore: 'лорбук', last: cs.lastN + ' сообщ.' };
+            $z('sctx').textContent = on.length ? on.map(k => names[k]).join(' · ') : 'только идея';
+            $z('ctxnote').textContent = (on.length ? '' : 'Ничего не отмечено: переделка видит только идею и правила картинок из пресета.')
+                + (cs.lore && !cs.last ? ' Переписка в поиск по лорбуку не идёт, пока не отмечены «Последние сообщения».' : '')
+                + (slayStudioPresetRules() ? '' : ' Блок картинок в пресете не найден — будут общие правила.');
+        }
+        for (const f of ov.querySelectorAll('.slay-studio-fold')) f.classList.toggle('open', !!slayStudioFolds()[f.dataset.fold]);
+        drawImgSummary();
         $z('rw').hidden = _studio.raw;
         {
             const sel = $z('ruletog');
@@ -14849,7 +14909,8 @@ function openSlayStudio() {
         }
         {
             const via = slayStudioRewriteVia();
-            $z('via').innerHTML = [['chat', 'Модель чата'], ['direct', 'Прямой API']].map(([k, l]) => `<button type="button" class="${via === k ? 'on' : ''}" data-via="${k}">${l}</button>`).join('');
+            $z('svia').textContent = via === 'direct' ? 'своё · ' + (slayStudioRwModel() || 'модель не выбрана') : 'модель чата';
+            $z('via').innerHTML = [['chat', 'Модель чата'], ['direct', 'Своё подключение']].map(([k, l]) => `<button type="button" class="${via === k ? 'on' : ''}" data-via="${k}">${l}</button>`).join('');
             $z('viarow').hidden = via !== 'direct';
             if (via === 'direct') {
                 const cur = slayStudioRwModel();
@@ -14868,6 +14929,42 @@ function openSlayStudio() {
         if ($z('rawnote')) $z('rawnote').hidden = !_studio.raw;
         $z('cost').textContent = slayStudioCostText();
     };
+
+    // «Подключение SLAY · картинки»: the very fields of the settings' «Подключение»
+    // section are moved here while the block is open, and put back when it folds
+    // or the window closes, so every handler, profile and «Тест» works as there.
+    let connLent = null;
+    const connIn = () => {
+        if (connLent) return;
+        const bd = document.getElementById('slay_sec_api_bd');
+        if (!bd || !bd.firstElementChild) { $z('conn').innerHTML = '<div class="slay-studio-note">Открой настройки SLAY один раз — подключение появится здесь.</div>'; return; }
+        const away = document.createElement('p');
+        away.className = 'hint slay-conn-away';
+        away.textContent = 'Подключение сейчас открыто в студии.';
+        $z('conn').replaceChildren(...bd.childNodes);
+        bd.appendChild(away);
+        connLent = { bd, away };
+    };
+    const connOut = () => {
+        if (!connLent) return;
+        const { bd, away } = connLent;
+        connLent = null;
+        away.remove();
+        bd.append(...$z('conn').childNodes);
+    };
+    const IMG_TYPES = { gemini: 'Gemini', openai: 'OpenAI', custom: 'Custom', naistera: 'Naistera', novelai: 'NovelAI' };
+    // The resolution rides with Gemini and with chat-style bodies only.
+    const sizeApplies = (st) => st.apiType === 'gemini' || st.apiType === 'openai' || (st.apiType === 'custom' && (st.customBodyFormat || 'chat') === 'chat');
+    function drawImgSummary() {
+        const st = getSettings();
+        const model = st.apiType === 'naistera' ? normalizeNaisteraModel(st.naisteraModel) : st.apiType === 'novelai' ? '' : (st.model || '');
+        const size = ['1K', '2K', '4K'].includes(st.imageSize) ? st.imageSize : '1K';
+        $z('simg').textContent = [IMG_TYPES[st.apiType] || st.apiType, model || (st.apiType === 'novelai' ? '' : 'модель не выбрана'), sizeApplies(st) ? size : ''].filter(Boolean).join(' · ');
+        $z('isizerow').hidden = !sizeApplies(st);
+        $z('isize').innerHTML = ['1K', '2K', '4K'].map(v => `<button type="button" class="${v === size ? 'on' : ''}" data-isize="${v}">${v}</button>`).join('');
+    }
+    $z('conn').addEventListener('change', () => setTimeout(drawImgSummary, 0));
+    $z('conn').addEventListener('input', () => setTimeout(drawImgSummary, 0));
 
     // Results: a filter by «в чате», and a pick mode for deleting many at once.
     let pickMode = false, resFilter = 'all';
@@ -14941,7 +15038,7 @@ function openSlayStudio() {
             </div>`).join('');
     };
 
-    const close = () => { keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
+    const close = () => { connOut(); keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
     _studioClose = close;
     _studioRedraw = drawResults;
     // Escape only while focus is inside the Studio: in window mode the chat
@@ -15052,6 +15149,23 @@ function openSlayStudio() {
     };
 
     const onClick = async (e) => {
+        const isz = e.target.closest?.('[data-isize]');
+        if (isz) {
+            const st = getSettings();
+            st.imageSize = isz.dataset.isize; saveSettings();
+            const sel = document.getElementById('slay_image_size'); if (sel) sel.value = st.imageSize;
+            drawImgSummary(); return;
+        }
+        const ib = e.target.closest?.('.slay-studio-conn .iig-info-btn');
+        if (ib) { e.preventDefault(); document.getElementById(ib.dataset.hint || '')?.classList.toggle('iig-hidden'); return; }
+        const fh = e.target.closest?.('[data-act="fold"]');
+        if (fh) {
+            const f = fh.dataset.f, folds = slayStudioFolds();
+            folds[f] = !folds[f]; saveSettings();
+            fh.parentElement.classList.toggle('open', folds[f]);
+            if (f === 'img') { if (folds[f]) connIn(); else connOut(); drawImgSummary(); }
+            return;
+        }
         const big = e.target.closest?.('.slay-studio-card:not(.pick) > img[data-full]');
         if (big) { slayLightboxOpen(big.dataset.full); return; }
         const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-rf],[data-pk],[data-pickid],[data-card]');
@@ -15121,7 +15235,7 @@ function openSlayStudio() {
                 else for (const o of opts) if (o.kind === k || (k === 'char' && o.member)) { want.add(o.key); if (k === 'char') break; }
             }
             _studio.who = want;
-            if (task.ctx) _studio.ctx = task.ctx;
+            if (task.ctx === 'last') { slayStudioCtxSel().last = true; saveSettings(); }
             if (task.ar && ratios.includes(task.ar)) { _studio.ar = task.ar; $z('ar').value = task.ar; }
             const filled = slayStudioFill(opts);
             if (filled !== null) ideaEl.value = filled;
@@ -15145,7 +15259,7 @@ function openSlayStudio() {
                 for (const x of slayStudioXRefsOn()) names.push(`${x.name} (from an extra reference picture)`);
                 const st = getSettings();
                 const chatKey = slayStudioChatKey();
-                const text = await slayStudioRewrite(idea, _studio.ctx, names, '', { styleAdded: !_studio.noStyle && (!!_studio.style?.text || (!!st.slayStyle && !slayStyleInPreset())), outfits: slayStudioOutfits(opts, _studio.who), place: slayStudioPickedPlace(opts, _studio.who) });
+                const text = await slayStudioRewrite(idea, { ...slayStudioCtxSel() }, names, '', { styleAdded: !_studio.noStyle && (!!_studio.style?.text || (!!st.slayStyle && !slayStyleInPreset())), outfits: slayStudioOutfits(opts, _studio.who), place: slayStudioPickedPlace(opts, _studio.who) });
                 if (slayStudioChatKey() === chatKey) {
                     _studio.prompt = text;
                     const live = document.querySelector('.slay-studio-ov .slay-studio-prompt');
@@ -15258,6 +15372,8 @@ function openSlayStudio() {
         }
         else if (z === 'file') addRefs(e.target.files);
         else if (z === 'rwmodel') { getSettings().studioRewriteModel = e.target.value; saveSettings(); }
+        else if (z === 'ctxck') { slayStudioCtxSel()[e.target.dataset.k] = e.target.checked; saveSettings(); drawLeft(); }
+        else if (z === 'ctxn') { slayStudioCtxSel().lastN = Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 6)); saveSettings(); drawLeft(); }
         else if (z === 'ruletog') {
             const st = getSettings();
             if (!st.studioRuleToggle || typeof st.studioRuleToggle !== 'object') st.studioRuleToggle = {};
@@ -15269,6 +15385,7 @@ function openSlayStudio() {
     });
     drawLeft();
     drawResults();
+    if (slayStudioFolds().img) connIn();
 }
 
 // Button next to the wardrobe icon. Shown while generation is on.
