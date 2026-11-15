@@ -3813,10 +3813,11 @@
 .slay-orph-kind { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 2px 2px; font-size: 9.5px; text-align: center; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.75)); }
 .slay-orph-foot { display: flex; gap: 8px; margin-top: 10px; }
 .slay-orph-foot .slay-choose-b { flex: 1; }
-.slay-orph-lb { position: fixed; inset: 0; z-index: 100002; background: rgba(0,0,0,0.88); display: flex; align-items: center; justify-content: center; padding: 20px; }
+/* vw/vh, not %: with a transform on <html> (other extensions set one) a fixed layer is sized by <html>, which can be a few pixels tall. */
+.slay-orph-lb { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; height: 100dvh; z-index: 100002; background: rgba(0,0,0,0.96); display: flex; align-items: center; justify-content: center; padding: 20px; padding-top: max(20px, env(safe-area-inset-top)); padding-bottom: max(20px, env(safe-area-inset-bottom)); overflow-y: auto; box-sizing: border-box; }
 .slay-orph-lb[hidden] { display: none; }
-.slay-orph-lbcard { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 360px; width: 100%; }
-.slay-orph-lbcard img { max-width: 100%; max-height: 60dvh; border-radius: 10px; object-fit: contain; }
+.slay-orph-lbcard { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 360px; width: 100%; margin: auto; }
+.slay-orph-lbcard img { max-width: 100%; max-height: 60vh; max-height: 60dvh; border-radius: 10px; object-fit: contain; }
 .slay-orph-lbmeta { font-size: 12.5px; opacity: 0.8; text-align: center; line-height: 1.5; word-break: break-all; }
 .slay-orph-lbrow { display: flex; gap: 8px; width: 100%; }
 .slay-orph-lbrow .slay-choose-b { flex: 1; }

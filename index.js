@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.45';
+const SLAY_VERSION = '5.2.0-exp.47';
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -6449,6 +6449,9 @@ function slayPickOrphans(found, total, opts = {}) {
         document.body.appendChild(ov);
         const body = ov.querySelector('.slay-orph-body');
         const lb = ov.querySelector('.slay-orph-lb');
+        // The big view lives in <body>, not inside the scrolling window: on iPhone a
+        // fixed layer inside a scroller scrolled with it and lost its backdrop.
+        document.body.appendChild(lb);
         let io = null;
         // Open months, as «tab|month». Each tab starts with its newest month open.
         const openM = new Set(), seenTab = new Set();
@@ -6505,7 +6508,7 @@ function slayPickOrphans(found, total, opts = {}) {
         };
 
         let done = false;
-        const finish = (v) => { if (done) return; done = true; io?.disconnect(); ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
+        const finish = (v) => { if (done) return; done = true; io?.disconnect(); clearTimeout(pressT); lb.remove(); ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
         const onKey = (e) => {
             if (e.key !== 'Escape' || document.querySelector('.slay-confirm-ov')) return;
             e.stopPropagation();
@@ -6597,6 +6600,10 @@ function slayPickOrphans(found, total, opts = {}) {
             });
         }
         body.addEventListener('scroll', () => clearTimeout(pressT), { passive: true });
+        // Same isolation for the big view, now outside the window.
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend', 'contextmenu']) {
+            lb.addEventListener(type, (e) => { e.stopPropagation(); if (type === 'pointerdown') pressed = false; if (type === 'click') onClick(e); else if (type === 'contextmenu') e.preventDefault(); });
+        }
         render();
     });
 }
@@ -14839,6 +14846,21 @@ function openSlayStudio() {
     ideaEl.value = _studio.idea || '';
     promptEl.value = _studio.prompt || '';
     const keepText = () => { _studio.idea = ideaEl.value; _studio.prompt = promptEl.value; };
+    // A task's template goes AFTER what the user wrote. Switching tasks or people
+    // swaps only that template at the end; the user's own text stays. A task
+    // with no template («Свободно») takes the previous template away.
+    const putFill = (filled) => {
+        const last = String(_studio.lastFill || '');
+        const cur = ideaEl.value;
+        const tail = cur.trimEnd();
+        const base = last && tail.endsWith(last) ? tail.slice(0, -last.length).trimEnd() : cur.trimEnd();
+        if (filled === null) {
+            if (!last || base === tail) return;
+            ideaEl.value = base; _studio.lastFill = ''; keepText(); return;
+        }
+        ideaEl.value = base ? base + '\n' + filled : filled;
+        _studio.lastFill = filled; keepText();
+    };
     ov.addEventListener('input', (e) => { if (e.target === ideaEl || e.target === promptEl) keepText(); });
     $z('ar').value = ratios.includes(_studio.ar) ? _studio.ar : (ratios[0] || '1:1');
     $z('n').value = String(_studio.n);
@@ -15252,14 +15274,14 @@ function openSlayStudio() {
             if (task.ctx === 'last') { slayStudioCtxSel().last = true; saveSettings(); }
             if (task.ar && ratios.includes(task.ar)) { _studio.ar = task.ar; $z('ar').value = task.ar; }
             const filled = slayStudioFill(opts);
-            if (filled !== null) ideaEl.value = filled;
+            putFill(filled);
             drawLeft(); return;
         }
         if (t.dataset.who) {
             const k = t.dataset.who;
             if (_studio.who.has(k)) _studio.who.delete(k); else _studio.who.add(k);
             const filled = slayStudioFill(opts);
-            if (filled !== null) ideaEl.value = filled;
+            putFill(filled);
             drawLeft(); return;
         }
         if (t.dataset.ctx) { _studio.ctx = t.dataset.ctx; drawLeft(); return; }
