@@ -26,7 +26,13 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.47';
+const SLAY_VERSION = '5.2.0-exp.48';
+// Where the last press started. A click on a window's dark backdrop closes the
+// window only if the press started there too: selecting text inside and letting
+// go outside must not close it.
+let _slayDownAt = null;
+window.addEventListener('pointerdown', (e) => { _slayDownAt = e.target; }, true);
+const slayBackdropClick = (e, ov) => e.target === ov && _slayDownAt === ov;
 
 /* ╔═══════════════════════════════════════════════════════════════╗
    ║  MODULE 1: SlayWardrobe                                       ║
@@ -790,7 +796,7 @@ const SLAY_VERSION = '5.2.0-exp.47';
         const members = gid ? swGroupMembers() : [];
 
         const ov = document.createElement('div'); ov.id = 'sw-modal-overlay';
-        ov.addEventListener('click', (e) => { if (e.target === ov) swCloseModal(); });
+        ov.addEventListener('click', (e) => { if (slayBackdropClick(e, ov)) swCloseModal(); });
 
         const co = swGetCharOutfit();
         const s = swGetSettings();
@@ -6232,7 +6238,7 @@ function slayChoose(title, text, options, o = {}) {
                 if (type === 'click') {
                     const b = e.target.closest('.slay-choose-b');
                     if (b) finish(b.dataset.k);
-                    else if (e.target === ov) finish(null);
+                    else if (slayBackdropClick(e, ov)) finish(null);
                 }
                 e.stopPropagation();
             });
@@ -7066,7 +7072,7 @@ function openSlayCleanup() {
             e.stopPropagation();
             if (type !== 'click') return;
             const b = e.target.closest('[data-act]');
-            if (!b) { if (e.target === ov && !busy) close(); return; }
+            if (!b) { if (slayBackdropClick(e, ov) && !busy) close(); return; }
             if (b.disabled) return;
             if (b.dataset.act === 'close') close();
             else if (b.dataset.act === 'rescan') scan();
@@ -9853,7 +9859,7 @@ function slayEditLocationDialog(index, opts = {}) {
     for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
     ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
     ov.addEventListener('click', (e) => {
-        if (e.target === ov) { close(); return; }
+        if (slayBackdropClick(e, ov)) { close(); return; }
         const m = e.target.closest('[data-mode]');
         if (m && !m.disabled) { mode = m.dataset.mode; paint(); }
     });
@@ -10449,7 +10455,7 @@ function slayCardOverlay(html, onClose) {
     const close = () => { if (!ov.isConnected) return; ov.remove(); try { onClose?.(); } catch (_) { } };
     for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
     ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
-    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('.slay-loc-cancel')) close(); });
+    ov.addEventListener('click', (e) => { if (slayBackdropClick(e, ov) || e.target.closest('.slay-loc-cancel')) close(); });
     document.body.appendChild(ov);
     slayFitDialog(ov);
     return { ov, close };
@@ -11608,7 +11614,7 @@ function slayPickAvatarSource() {
         for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend']) ov.addEventListener(type, (e) => e.stopPropagation());
         ov.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') done(null); });
         ov.addEventListener('click', (e) => {
-            if (e.target === ov || e.target.closest('.slay-loc-cancel')) { done(null); return; }
+            if (slayBackdropClick(e, ov) || e.target.closest('.slay-loc-cancel')) { done(null); return; }
             const b = e.target.closest('[data-i]');
             if (b) { const c = chars[Number(b.dataset.i)]; done(c ? { name: c.name, url: c.url } : null); }
         });
@@ -12671,7 +12677,7 @@ async function openStylePickerModal({ onPick = null } = {}) {
     };
 
     overlay.querySelector('.slay-style-modal-close').addEventListener('click', closeOverlay);
-    overlay.addEventListener('click', e => { if (e.target === overlay) closeOverlay(e); });
+    overlay.addEventListener('click', e => { if (slayBackdropClick(e, overlay)) closeOverlay(e); });
     overlay.addEventListener('mousedown', e => {
         if (e.target === overlay) {
             e.preventDefault();
@@ -15205,7 +15211,7 @@ function openSlayStudio() {
         const big = e.target.closest?.('.slay-studio-card:not(.pick) > img[data-full]');
         if (big) { slayLightboxOpen(big.dataset.full); return; }
         const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-rf],[data-pk],[data-pickid],[data-card]');
-        if (!t) { if (e.target === ov) close(); return; }
+        if (!t) { if (slayBackdropClick(e, ov)) close(); return; }
         if (t.dataset.act === 'close') { close(); return; }
         if (t.dataset.act === 'clean') { openSlayCleanup(); return; }
         if (t.dataset.act === 'pick') { pickMode = !pickMode; pickedIds.clear(); drawResults(); return; }
