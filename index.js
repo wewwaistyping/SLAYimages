@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.48';
+const SLAY_VERSION = '5.2.0-exp.51';
 // Where the last press started. A click on a window's dark backdrop closes the
 // window only if the press started there too: selecting text inside and letting
 // go outside must not close it.
@@ -6221,6 +6221,7 @@ function slayChoose(title, text, options, o = {}) {
             <div class="slay-choose-box">
                 <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
                 <div class="slay-choose-x">${o.html ? text : sanitizeForHtml(text).replace(/@BR@/g, '<br>')}</div>
+                ${o.check ? `<label class="slay-choose-ck"><input type="checkbox"><span>${sanitizeForHtml(o.check)}</span></label>` : ''}
                 <div class="slay-choose-btns">
                     ${options.map(o => `<button class="slay-choose-b${o.danger ? ' danger' : ''}${o.primary ? ' primary' : ''}" data-k="${sanitizeForHtml(o.key)}">${sanitizeForHtml(o.label)}</button>`).join('')}
                     <button class="slay-choose-b ghost" data-k="">Отмена</button>
@@ -6228,7 +6229,7 @@ function slayChoose(title, text, options, o = {}) {
             </div>`;
         document.body.appendChild(ov);
         let done = false;
-        const finish = (k) => { if (done) return; done = true; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(k || null); };
+        const finish = (k) => { if (done) return; done = true; if (k && o.check) { try { o.onCheck?.(!!ov.querySelector('.slay-choose-ck input')?.checked); } catch (_) { } } ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(k || null); };
         const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(null); } };
         document.addEventListener('keydown', onKey, true);
         // Same isolation the crop overlay needs: these clicks must not reach the
@@ -10210,6 +10211,7 @@ function createSettingsUI() {
                         </div>
                         <div class="iig-subhead">Студия</div>
                         <label class="checkbox_label"><input type="checkbox" id="slay_studio_btn_show" ${settings.studioBtnHidden === true ? '' : 'checked'}><span>Кнопка студии (палитра) в окне чата</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_studio_del_warn" ${settings.studioDelNoWarn === true ? '' : 'checked'}><span>Студия: предупреждать перед удалением картинки с диска</span></label>
                         <div id="slay_studio_open" class="menu_button" style="width:100%;"><i class="fa-solid fa-palette"></i> Открыть студию</div>
                         <div class="iig-subhead">Диск</div>
                         <div id="slay_cleanup_open" class="menu_button" style="width:100%;"><i class="fa-solid fa-broom"></i> Уборка картинок</div>
@@ -13263,6 +13265,7 @@ function bindSettingsEvents() {
 
     document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { openSlayCleanup(); });
     document.getElementById('slay_cleanup_open')?.addEventListener('click', () => { openSlayCleanup(); });
+    document.getElementById('slay_studio_del_warn')?.addEventListener('change', (e) => { settings.studioDelNoWarn = !e.target.checked; saveSettings(); });
     document.getElementById('slay_studio_btn_show')?.addEventListener('change', (e) => { settings.studioBtnHidden = !e.target.checked; saveSettings(); slayInjectStudioBtn(); });
     document.getElementById('slay_studio_open')?.addEventListener('click', () => { openSlayStudio(); });
     document.getElementById('slay_skip_crop')?.addEventListener('change', (e) => { settings.skipCrop = e.target.checked; saveSettings(); });
@@ -14773,7 +14776,7 @@ function openSlayStudio() {
     document.querySelector('.slay-studio-ov')?.remove();
     slayStudioTakeLate();
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
-        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '' });
+        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '', ideaHist: null, ideaPos: 0 });
         // The style picked in the Studio stays: it is a choice of look, not of this chat.
     }
     // A raw idea skips the preset's image rules, so the model fills the gaps
@@ -14781,7 +14784,7 @@ function openSlayStudio() {
     _studio.raw = false;
     const esc = sanitizeForHtml;
     let opts = slayStudioWhoOptions();
-    if (!_studio.who) _studio.who = new Set(opts.filter(o => o.kind === 'char' || o.kind === 'user' || o.member).map(o => o.key).slice(0, 3));
+    if (!_studio.who) _studio.who = new Set();
     const ratios = SLAY_STUDIO_RATIOS.filter(r => VALID_ASPECT_RATIOS.includes(r));
     const title = ctx.groupId ? 'группа' : (ctx.name2 || '');
 
@@ -14802,7 +14805,11 @@ function openSlayStudio() {
             <div class="slay-studio-note" data-zone="refline"></div>
             <div class="slay-studio-xrefs" data-zone="xrefs"></div>
             <input type="file" accept="image/*" multiple hidden data-zone="file">
-            <div class="slay-studio-lbl">Идея (как хочешь, можно по-русски)</div>
+            <div class="slay-studio-lbl slay-studio-ilbl"><span>Идея (как хочешь, можно по-русски)</span><span class="slay-studio-itools">
+                <button type="button" data-act="iundo" title="Шаг назад"><i class="fa-solid fa-rotate-left"></i></button>
+                <button type="button" data-act="iredo" title="Шаг вперёд"><i class="fa-solid fa-rotate-right"></i></button>
+                <button type="button" data-act="iclear" title="Очистить (шаг назад вернёт)"><i class="fa-solid fa-eraser"></i></button>
+            </span></div>
             <textarea class="text_pole slay-studio-idea" rows="3" placeholder="например: они на кухне ночью, она смеётся над его шуткой"></textarea>
             <label class="slay-studio-check"><input type="checkbox" data-zone="raw"> Без переделки — отправить в генерацию как есть</label>
             <div class="slay-studio-rawnote" data-zone="rawnote" hidden>Правила картинок из пресета не применятся. Опиши одежду, место и кадр сама — иначе модель скопирует их с рефов.</div>
@@ -14852,6 +14859,36 @@ function openSlayStudio() {
     ideaEl.value = _studio.idea || '';
     promptEl.value = _studio.prompt || '';
     const keepText = () => { _studio.idea = ideaEl.value; _studio.prompt = promptEl.value; };
+    // The idea's own history: templates and «clear» change the field from code,
+    // which the browser's Ctrl+Z does not follow. Kept with the texts, per chat.
+    if (!Array.isArray(_studio.ideaHist)) { _studio.ideaHist = [ideaEl.value]; _studio.ideaPos = 0; }
+    let ideaTimer = 0;
+    const ideaTools = () => {
+        const h = _studio.ideaHist, q = (a) => ov.querySelector(`[data-act="${a}"]`);
+        q('iundo').disabled = !(_studio.ideaPos > 0 || h[_studio.ideaPos] !== ideaEl.value);
+        q('iredo').disabled = _studio.ideaPos >= h.length - 1 || h[_studio.ideaPos] !== ideaEl.value;
+        q('iclear').disabled = !ideaEl.value;
+    };
+    const ideaSnap = () => {
+        clearTimeout(ideaTimer); ideaTimer = 0;
+        const h = _studio.ideaHist;
+        if (h[_studio.ideaPos] !== ideaEl.value) {
+            h.length = _studio.ideaPos + 1;
+            h.push(ideaEl.value);
+            if (h.length > 100) h.splice(0, h.length - 100);
+            _studio.ideaPos = h.length - 1;
+        }
+        ideaTools();
+    };
+    const ideaStep = (d) => {
+        ideaSnap();
+        const p = _studio.ideaPos + d;
+        if (p < 0 || p >= _studio.ideaHist.length) return;
+        _studio.ideaPos = p;
+        ideaEl.value = _studio.ideaHist[p];
+        keepText(); ideaTools();
+    };
+    ideaTools();
     // A task's template goes AFTER what the user wrote. Switching tasks or people
     // swaps only that template at the end; the user's own text stays. A task
     // with no template («Свободно») takes the previous template away.
@@ -14862,12 +14899,18 @@ function openSlayStudio() {
         const base = last && tail.endsWith(last) ? tail.slice(0, -last.length).trimEnd() : cur.trimEnd();
         if (filled === null) {
             if (!last || base === tail) return;
-            ideaEl.value = base; _studio.lastFill = ''; keepText(); return;
+            ideaSnap(); ideaEl.value = base; _studio.lastFill = ''; keepText(); ideaSnap(); return;
         }
+        ideaSnap();
         ideaEl.value = base ? base + '\n' + filled : filled;
-        _studio.lastFill = filled; keepText();
+        _studio.lastFill = filled; keepText(); ideaSnap();
     };
-    ov.addEventListener('input', (e) => { if (e.target === ideaEl || e.target === promptEl) keepText(); });
+    ov.addEventListener('input', (e) => {
+        if (e.target !== ideaEl && e.target !== promptEl) return;
+        keepText();
+        // Typing lands in the history in pieces: a pause of half a second ends a piece.
+        if (e.target === ideaEl) { clearTimeout(ideaTimer); ideaTimer = setTimeout(ideaSnap, 500); ideaTools(); }
+    });
     $z('ar').value = ratios.includes(_studio.ar) ? _studio.ar : (ratios[0] || '1:1');
     $z('n').value = String(_studio.n);
     $z('raw').checked = _studio.raw;
@@ -15010,6 +15053,11 @@ function openSlayStudio() {
 
     // Results: a filter by «в чате», and a pick mode for deleting many at once.
     let pickMode = false, resFilter = 'all';
+    // How many results are drawn: the last 10, more by the button; pictures
+    // made while this window is open are always all drawn.
+    let shownN = 10;
+    const studioOpenedAt = Date.now();
+    const inFilter = (x) => resFilter === 'hid' ? !!x.hidden : !x.hidden && (resFilter === 'all' || (resFilter === 'sent') === !!x.sent);
     const pickedIds = new Set();
     // The grid shows small previews (480 px), made as a card scrolls into
     // view; the picture itself opens on a click. Until the preview is ready
@@ -15029,28 +15077,33 @@ function openSlayStudio() {
     };
     const drawResults = () => { drawResultsHtml(); loadCards(); };
     const drawResultsHtml = () => {
-        const all = slayStudioItems(false);
+        const every = slayStudioItems(false);
+        const all = every.filter(x => !x.hidden);
+        const hidN = every.length - all.length;
+        if (resFilter === 'hid' && !hidN) resFilter = 'all';
         const busyN = _studio.busyBy[slayStudioChatKey()] || 0;
         const busy = Array.from({ length: busyN }, () => '<div class="slay-studio-card busy"><div class="slay-studio-spin"><i class="fa-solid fa-spinner fa-spin"></i> рисую…</div></div>').join('');
         const sentN = all.filter(x => x.sent).length;
-        if (!all.length) { pickMode = false; resFilter = 'all'; }
-        for (const id of [...pickedIds]) if (!all.some(x => x.id === id)) pickedIds.delete(id);
-        $z('rescount').textContent = all.length
-            ? `Результаты · ${all.length} ${slayPlural(all.length, 'картинка', 'картинки', 'картинок')} · в чат уходят только по кнопке`
+        if (!every.length) { pickMode = false; resFilter = 'all'; }
+        for (const id of [...pickedIds]) if (!every.some(x => x.id === id)) pickedIds.delete(id);
+        $z('rescount').textContent = every.length
+            ? `Результаты · ${all.length} ${slayPlural(all.length, 'картинка', 'картинки', 'картинок')}${hidN ? ` · скрыто ${hidN}` : ''} · в чат уходят только по кнопке`
             : 'Результаты — только здесь, пока сама не отправишь в чат';
-        ov.querySelector('[data-act="pick"]').hidden = !all.length;
+        ov.querySelector('[data-act="pick"]').hidden = !every.length;
         ov.querySelector('[data-act="pick"]').textContent = pickMode ? 'Отмена' : 'Выбрать';
-        $z('resfilter').hidden = !all.length || (!sentN || sentN === all.length);
-        $z('resfilter').innerHTML = [['all', `Все ${all.length}`], ['free', `Не в чате ${all.length - sentN}`], ['sent', `В чате ${sentN}`]]
+        const mixed = !!sentN && sentN !== all.length;
+        if (!mixed && (resFilter === 'free' || resFilter === 'sent')) resFilter = 'all';
+        $z('resfilter').hidden = !mixed && !hidN;
+        $z('resfilter').innerHTML = [['all', `Все ${all.length}`], ...(mixed ? [['free', `Не в чате ${all.length - sentN}`], ['sent', `В чате ${sentN}`]] : []), ...(hidN ? [['hid', `Скрытые ${hidN}`]] : [])]
             .map(([k, l]) => `<button type="button" class="slay-studio-chip${resFilter === k ? ' on' : ''}" data-rf="${k}">${l}</button>`).join('');
         const bar = $z('pickbar');
         bar.hidden = !pickMode;
         if (pickMode) bar.innerHTML = `
             <div class="slay-studio-chips"><button type="button" class="slay-studio-chip" data-pk="all">Все</button><button type="button" class="slay-studio-chip" data-pk="free">Все, кроме тех, что в чате</button><button type="button" class="slay-studio-chip" data-pk="none">Снять</button></div>
-            <div class="slay-studio-pickrow"><span>Выбрано: <b>${pickedIds.size}</b></span><button type="button" class="slay-studio-btn del" data-pk="del"><i class="fa-solid fa-trash"></i> Удалить</button></div>`;
-        const items = all.filter(x => resFilter === 'all' || (resFilter === 'sent') === !!x.sent);
+            <div class="slay-studio-pickrow"><span>Выбрано: <b>${pickedIds.size}</b></span><button type="button" class="slay-studio-btn" data-pk="hide" title="${resFilter === 'hid' ? 'Вернуть в общий список' : 'Убрать из списка. Файлы остаются на диске'}"><i class="fa-solid ${resFilter === 'hid' ? 'fa-eye' : 'fa-eye-slash'}"></i> ${resFilter === 'hid' ? 'Вернуть' : 'Скрыть'}</button><button type="button" class="slay-studio-btn del" data-pk="del"><i class="fa-solid fa-trash"></i> Удалить</button></div>`;
+        const items = every.filter(inFilter);
         if (!items.length && !busyN) {
-            $z('res').innerHTML = all.length
+            $z('res').innerHTML = every.length
                 ? '<div class="slay-studio-empty">В этом фильтре пусто.</div>'
                 : '<div class="slay-studio-empty">Здесь появятся картинки.<br>Они хранятся в студии этого чата, пока не удалишь.</div>';
             return;
@@ -15064,9 +15117,17 @@ function openSlayStudio() {
             </div>`).join('');
             return;
         }
-        $z('res').innerHTML = busy + items.slice().reverse().map(it => `
+        const freshN = items.filter(x => (x.at || 0) >= studioOpenedAt).length;
+        const lim = Math.max(shownN, freshN);
+        const rest = Math.max(0, items.length - lim);
+        const more = rest ? `<div class="slay-studio-more"><span>Показаны последние ${lim} из ${items.length}</span><button type="button" class="slay-studio-btn" data-act="more">Ещё ${Math.min(10, rest)}</button><button type="button" class="slay-studio-btn" data-act="moreall">Все ${items.length}</button></div>` : '';
+        const hidView = resFilter === 'hid';
+        $z('res').innerHTML = busy + items.slice(rest).reverse().map(it => `
             <div class="slay-studio-card" data-id="${esc(it.id)}">
-              <img decoding="async" alt="" data-full="${esc(it.path)}"${cardRatio(it)}>
+              <div class="slay-studio-imgw">
+                <img decoding="async" alt="" data-full="${esc(it.path)}"${cardRatio(it)}>
+                <button type="button" class="sw-corner-btn sw-corner-hide${hidView ? ' sw-corner-active' : ''}" data-card="${hidView ? 'unhide' : 'hide'}" title="${hidView ? 'Вернуть в общий список' : 'Скрыть: убрать из списка, файл останется на диске'}"><i class="fa-solid fa-eye${hidView ? '-slash' : ''}"></i></button>
+              </div>
               <div class="slay-studio-cap" title="${esc(it.prompt || '')}">${it.sent ? '✓ в чате · ' : ''}${esc(it.idea || it.prompt || '')}</div>
               <div class="slay-studio-acts">
                 <button type="button" data-card="chat">В чат</button>
@@ -15077,7 +15138,7 @@ function openSlayStudio() {
                 <button type="button" data-card="dl" title="Скачать"><i class="fa-solid fa-download"></i></button>
                 <button type="button" class="del" data-card="del" title="Удалить из студии и с диска"><i class="fa-solid fa-trash"></i> Удалить</button>
               </div>
-            </div>`).join('');
+            </div>`).join('') + more;
     };
 
     const close = () => { connOut(); keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
@@ -15208,14 +15269,16 @@ function openSlayStudio() {
             if (f === 'img') { if (folds[f]) connIn(); else connOut(); drawImgSummary(); }
             return;
         }
-        const big = e.target.closest?.('.slay-studio-card:not(.pick) > img[data-full]');
+        const big = e.target.closest?.('.slay-studio-card:not(.pick) img[data-full]');
         if (big) { slayLightboxOpen(big.dataset.full); return; }
         const t = e.target.closest('[data-act],[data-task],[data-who],[data-ctx],[data-via],[data-xact],[data-xref],[data-rf],[data-pk],[data-pickid],[data-card]');
         if (!t) { if (slayBackdropClick(e, ov)) close(); return; }
         if (t.dataset.act === 'close') { close(); return; }
         if (t.dataset.act === 'clean') { openSlayCleanup(); return; }
         if (t.dataset.act === 'pick') { pickMode = !pickMode; pickedIds.clear(); drawResults(); return; }
-        if (t.dataset.rf) { resFilter = t.dataset.rf; drawResults(); return; }
+        if (t.dataset.rf) { resFilter = t.dataset.rf; pickedIds.clear(); shownN = 10; drawResults(); return; }
+        if (t.dataset.act === 'more') { shownN = Math.max(shownN, slayStudioItems(false).filter(inFilter).filter(x => (x.at || 0) >= studioOpenedAt).length) + 10; drawResults(); return; }
+        if (t.dataset.act === 'moreall') { shownN = Infinity; drawResults(); return; }
         if (t.dataset.pickid) {
             const id = t.dataset.pickid;
             if (pickedIds.has(id)) pickedIds.delete(id); else pickedIds.add(id);
@@ -15227,8 +15290,18 @@ function openSlayStudio() {
         if (t.dataset.pk) {
             const all = slayStudioItems(false);
             if (t.dataset.pk === 'del') { await bulkDelete(); return; }
+            if (t.dataset.pk === 'hide') {
+                const sel = all.filter(x => pickedIds.has(x.id));
+                if (!sel.length) { toastr.info('Ничего не выбрано', 'Студия'); return; }
+                const hide = resFilter !== 'hid';
+                for (const x of sel) { if (hide) x.hidden = true; else delete x.hidden; }
+                slayStudioSave();
+                pickedIds.clear(); pickMode = false;
+                toastr.info(hide ? `Скрыто: ${sel.length}. Файлы на диске, вернуть можно в «Скрытые».` : `Возвращено: ${sel.length}`, 'Студия', { timeOut: 3000 });
+                drawResults(); return;
+            }
             pickedIds.clear();
-            if (t.dataset.pk !== 'none') for (const x of all) if (t.dataset.pk === 'all' || !x.sent) pickedIds.add(x.id);
+            if (t.dataset.pk !== 'none') for (const x of all.filter(inFilter)) if (t.dataset.pk === 'all' || !x.sent) pickedIds.add(x.id);
             drawResults(); return;
         }
         if (t.dataset.act === 'addref') { $z('file').click(); return; }
@@ -15268,6 +15341,9 @@ function openSlayStudio() {
             return;
         }
         if (t.dataset.act === 'mode') { win.toggle(); return; }
+        if (t.dataset.act === 'iundo') { ideaStep(-1); return; }
+        if (t.dataset.act === 'iredo') { ideaStep(1); return; }
+        if (t.dataset.act === 'iclear') { ideaSnap(); ideaEl.value = ''; _studio.lastFill = ''; keepText(); ideaSnap(); ideaEl.focus(); return; }
         if (t.dataset.task) {
             _studio.task = t.dataset.task;
             const task = SLAY_STUDIO_TASKS[_studio.task];
@@ -15342,8 +15418,10 @@ function openSlayStudio() {
                 const raw = !!item.prompt && item.prompt === item.idea;
                 _studio.raw = raw;
                 $z('raw').checked = raw;
+                ideaSnap();
                 ideaEl.value = raw ? item.prompt : (item.idea && !/^🪄/.test(item.idea) ? idea : ideaEl.value);
                 if (!raw) promptEl.value = item.prompt || '';
+                keepText(); ideaSnap();
                 drawLeft();
                 (raw ? ideaEl : promptEl).scrollIntoView({ block: 'nearest' });
                 let copied = false;
@@ -15351,7 +15429,22 @@ function openSlayStudio() {
                 toastr.success(copied ? 'Промпт в полях и в буфере' : 'Промпт в полях', 'Студия', { timeOut: 2000 });
                 return;
             }
+            if (act === 'hide' || act === 'unhide') {
+                if (act === 'hide') item.hidden = true; else delete item.hidden;
+                slayStudioSave();
+                drawResults(); return;
+            }
             if (act === 'del') {
+                const st = getSettings();
+                if (st.studioDelNoWarn !== true) {
+                    const inChat = slayStudioInChat(item);
+                    const k = await slayChoose('Удаление', inChat
+                        ? 'Убрать картинку из студии?<br><br>Она стоит в чате, поэтому в чате и на диске останется.'
+                        : 'Удалить картинку?<br><br>Файл удалится <b>с диска</b>, вернуть его будет нельзя. Если хочешь просто убрать её из списка, нажми «Скрыть».',
+                        [{ key: 'y', label: inChat ? 'Убрать' : 'Удалить', danger: true }],
+                        { html: true, confirm: true, check: 'Больше не предупреждать', onCheck: (v) => { if (v) { st.studioDelNoWarn = true; saveSettings(); const c = document.getElementById('slay_studio_del_warn'); if (c) c.checked = false; } } });
+                    if (k !== 'y') return;
+                }
                 const i = items.indexOf(item);
                 if (i >= 0) items.splice(i, 1);
                 slayStudioSave();

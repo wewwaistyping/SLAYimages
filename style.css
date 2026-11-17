@@ -4141,3 +4141,22 @@ button.slay-card-look { cursor: pointer; }
 .slay-studio-isize[hidden] { display: none; }
 .slay-studio-isize > span { min-width: 80px; font-size: 0.86em; opacity: 0.75; }
 .slay-studio-isize .slay-studio-seg { flex: 1; }
+
+/* A tick inside a choice box («Больше не предупреждать»). */
+.slay-choose-ck { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: -4px 0 14px; cursor: pointer; opacity: 0.85; }
+.slay-choose-ck input { margin: 0; flex: none; }
+/* Studio results: the «show more» row under the last pictures. */
+.slay-studio-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 2px; font-size: 12px; }
+.slay-studio-more span { flex: 1; min-width: 140px; opacity: 0.65; }
+
+/* Studio results: the hide eye in the corner of the picture, as in the wardrobe. */
+.slay-studio-imgw { position: relative; }
+.slay-studio-card:hover .sw-corner-btn { opacity: 1; }
+
+/* Studio: step back / forward / clear next to the idea label. */
+.slay-studio-ilbl { display: flex; align-items: center; gap: 8px; }
+.slay-studio-ilbl > span:first-child { flex: 1; min-width: 0; }
+.slay-studio-itools { display: flex; gap: 4px; flex: none; }
+.slay-studio-itools button { width: 28px; height: 26px; padding: 0; border-radius: 7px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: inherit; cursor: pointer; font-size: 12px; display: grid; place-items: center; }
+.slay-studio-itools button:hover:not(:disabled) { border-color: var(--slay-pink); color: var(--slay-pink); }
+.slay-studio-itools button:disabled { opacity: 0.35; cursor: default; }
