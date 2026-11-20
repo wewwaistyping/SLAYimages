@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.55';
+const SLAY_VERSION = '5.2.0-exp.60';
 // Where the last press started. A click on a window's dark backdrop closes the
 // window only if the press started there too: selecting text inside and letting
 // go outside must not close it.
@@ -7887,6 +7887,449 @@ function iigStripOurUi() {
     for (const img of document.querySelectorAll('#chat img[data-iig-instruction]')) delete img.dataset.iigRegenBound;
 }
 
+/* ── Frames: a chat picture is shown inside the frame picked in the settings.
+   The message keeps its plain picture tag; the preset and the regexes are not
+   touched. The frames themselves live on the styles site (frames.json next to
+   the styles page) and are read only when the list is opened; the extension
+   carries none. The frames in use are kept as copies in the settings, so a
+   chat needs no download and works offline. ── */
+const SLAY_FRAME_SLOT = '<i data-slay-slot></i>';
+let _slayFramesAll = null;
+let _slayFramesAt = 0;
+let _slayFrameIo = null;
+let _slayFrameCat = '';
+function slayFramesLoad() {
+    // The site lets the browser keep the file for ten minutes; so do we.
+    if (!_slayFramesAll || Date.now() - _slayFramesAt > 600000) {
+        _slayFramesAt = Date.now();
+        _slayFramesAll = fetch(SLAY_STYLES_BASE + 'frames.json')
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(d => {
+                const frames = (Array.isArray(d?.frames) ? d.frames : []).filter(x => x && typeof x.k === 'string' && typeof x.n === 'string' && typeof x.t === 'string' && typeof x.f === 'string' && typeof x.r === 'string'
+                    && x.t.includes(SLAY_FRAME_SLOT) && !/<script|\son[a-z]+\s*=|javascript:/i.test(x.r));
+                const cats = (Array.isArray(d?.cats) ? d.cats : []).filter(c => Array.isArray(c) && typeof c[0] === 'string');
+                if (!frames.length || !cats.length) throw new Error('пустой список');
+                const data = { cats, frames };
+                try { slayFramesRefreshUsed(data); } catch (e) { iigLog('WARN', 'frames refresh:', e?.message); }
+                return data;
+            })
+            .catch(e => { _slayFramesAll = null; throw e; });
+    }
+    return _slayFramesAll;
+}
+// The copies kept in the settings follow the site: a frame edited there is
+// updated here, a copy nobody uses any more is dropped.
+function slayFramesRefreshUsed(data) {
+    const st = slayFrameStore();
+    const used = new Set();
+    for (const f of [st.all, ...Object.values(st.chars), ...Object.values(st.chats)]) {
+        if (!f) continue;
+        if (f.key) used.add(f.key);
+        for (const h of (Array.isArray(f.hist) ? f.hist : [])) if (h.key) used.add(h.key);
+    }
+    let changed = false, redraw = false;
+    for (const k of Object.keys(st.tpl)) if (!used.has(k)) { delete st.tpl[k]; changed = true; }
+    for (const k of used) {
+        const x = data.frames.find(y => y.k === k);
+        if (!x) continue;   // gone from the site: the copy keeps working
+        const fresh = { n: x.n, v: x.v || '', t: x.t, f: x.f, r: x.r };
+        if (JSON.stringify(st.tpl[k]) !== JSON.stringify(fresh)) { st.tpl[k] = fresh; changed = redraw = true; }
+    }
+    if (changed) saveSettings();
+    if (redraw) {
+        for (const box of document.querySelectorAll('#chat .slay-frame')) slayFrameOff(box);
+        slayFramesSync();
+    }
+}
+// Three levels, each with its own frame: the chat's, the person's, the common
+// one. The most specific level that has anything wins. All of it lives in the
+// settings (never in the chat file): st.frames = { all, chars: {id: cfg},
+// chats: {id: cfg}, tpl: {key: frame data} }.
+// cfg: { key, off, cap, mode, since, hist: [{ since, key }] }.
+//   off  — «Без рамки» picked on purpose at this level (hides the levels below);
+//   mode — 'new' (default): the frame goes only on pictures made after it was
+//          picked, earlier picks stay in hist; 'all': on every fitting picture.
+let _slayFrameLvl = '';
+function slayFrameChatKey() { return String(SillyTavern.getContext().chatId || ''); }
+function slayFrameCharKey() {
+    const c = SillyTavern.getContext();
+    return c.groupId ? 'g:' + c.groupId : String(c.characters?.[c.characterId]?.avatar || '');
+}
+const slayFrameBlank = () => ({ key: '', off: false, cap: true, mode: 'new', since: 0, hist: [] });
+function slayFrameStore() {
+    const st = getSettings();
+    if (!st.frames || typeof st.frames !== 'object') {
+        st.frames = { all: null, chars: {}, chats: {}, tpl: {} };
+        // exp.56–58 kept a single frame with a scope.
+        const o = st.frame;
+        if (o && typeof o === 'object' && (o.key || (Array.isArray(o.hist) && o.hist.length))) {
+            const cfg = { ...slayFrameBlank(), key: o.key || '', cap: o.cap !== false, mode: o.mode === 'all' ? 'all' : 'new', since: o.since || 0 };
+            if (o.key && o.tpl) st.frames.tpl[o.key] = o.tpl;
+            for (const h of (Array.isArray(o.hist) ? o.hist : [])) { if (h.key && h.tpl) st.frames.tpl[h.key] = h.tpl; cfg.hist.push({ since: h.since || 0, key: h.key || '' }); }
+            if (o.scope === 'chat' && o.chat) st.frames.chats[o.chat] = cfg;
+            else if (o.scope === 'char' && o.char) st.frames.chars[o.char] = cfg;
+            else st.frames.all = cfg;
+        }
+        delete st.frame;
+    }
+    for (const k of ['chars', 'chats', 'tpl']) if (!st.frames[k] || typeof st.frames[k] !== 'object') st.frames[k] = {};
+    return st.frames;
+}
+function slayFrameLevelCfg(lvl, create = false) {
+    const st = slayFrameStore();
+    if (lvl === 'all') { if (!st.all && create) st.all = slayFrameBlank(); return st.all || null; }
+    const map = lvl === 'chat' ? st.chats : st.chars;
+    const id = lvl === 'chat' ? slayFrameChatKey() : slayFrameCharKey();
+    if (!id) return null;
+    if (!map[id] && create) map[id] = slayFrameBlank();
+    return map[id] || null;
+}
+function slayFrameDrop(lvl) {
+    const st = slayFrameStore();
+    if (lvl === 'all') st.all = null;
+    else if (lvl === 'chat') delete st.chats[slayFrameChatKey()];
+    else delete st.chars[slayFrameCharKey()];
+}
+function slayFrameHas(f) {
+    const t = slayFrameStore().tpl;
+    return !!f && (!!(f.key && t[f.key]) || (f.mode !== 'all' && Array.isArray(f.hist) && f.hist.some(h => h.key && t[h.key])));
+}
+// What is in effect in the open chat: { lvl, f } or null.
+function slayFrameEffective() {
+    for (const lvl of ['chat', 'char', 'all']) {
+        const f = slayFrameLevelCfg(lvl);
+        if (f && (f.off || slayFrameHas(f))) return { lvl, f };
+    }
+    return null;
+}
+// The level the menu shows: the one picked there, else the one in effect.
+function slayFrameLevel() {
+    if (_slayFrameLvl === 'chat' && !slayFrameChatKey()) _slayFrameLvl = '';
+    if (_slayFrameLvl === 'char' && !slayFrameCharKey()) _slayFrameLvl = '';
+    return _slayFrameLvl || slayFrameEffective()?.lvl || 'all';
+}
+// The menu's level: for reading (a blank that is not stored) or for writing.
+function slayFrameCfg(create = false) {
+    return slayFrameLevelCfg(slayFrameLevel(), create) || slayFrameBlank();
+}
+// When the picture was made: the time in its file name (iig_2026-11-07T04-33-10…).
+// A picture not saved yet is new; one with no time in the name is old.
+function slayFramePicTime(wrap) {
+    const src = wrap.querySelector('img')?.getAttribute('src') || '';
+    if (src.startsWith('data:') || src.startsWith('blob:')) return Date.now();
+    const m = src.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0;
+}
+// The frame for a picture made at `time`: { key, tpl } or null.
+function slayFrameFor(f, time) {
+    const t = slayFrameStore().tpl;
+    const mk = (k) => (k && t[k] ? { key: k, tpl: t[k] } : null);
+    if (f.mode === 'all' || time >= (f.since || 0)) return mk(f.key);
+    for (const h of (Array.isArray(f.hist) ? f.hist : [])) if (time >= (h.since || 0)) return mk(h.key);
+    return null;
+}
+// The settings of the frame in effect in the open chat, or null.
+function slayFrameActive() { return slayFrameEffective()?.f || null; }
+const slayFrameEsc = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The frame's HTML: its short tag run through its own regex, as the Tavern
+// would do it. `inner` stands where the picture goes.
+function slayFrameHtml(tpl, cap, who, inner = SLAY_FRAME_SLOT) {
+    const m = String(tpl?.f || '').match(/^\/([\s\S]*)\/([a-z]*)$/);
+    if (!m) return '';
+    let re;
+    try { re = new RegExp(m[1], m[2].replace('g', '')); } catch (_) { return ''; }
+    const tag = String(tpl.t).replace('Scene caption', () => slayFrameEsc(cap)).replace('[SENDER NAME]', () => slayFrameEsc(who));
+    const html = tag.replace(re, tpl.r);
+    return html === tag ? '' : html.replace(SLAY_FRAME_SLOT, () => inner);
+}
+function slayFrameOff(box) {
+    const slot = box.querySelector('[data-slay-slot]');
+    // A picture taken out of the preset's own frame goes back into it.
+    const home = box._slayHome && box._slayHome.isConnected ? box._slayHome : null;
+    if (slot && home) { while (slot.firstChild) home.parentNode.insertBefore(slot.firstChild, home); home.remove(); }
+    else if (slot && box.parentNode) while (slot.firstChild) box.parentNode.insertBefore(slot.firstChild, box);
+    box._slayHost?.classList?.remove('slay-frame-hid');
+    box.remove();
+}
+// The preset may already tell the model to write a frame tag (the frames from
+// the site). For each picture of a message, in order: null, or { cap, who }
+// of the frame tag it stands in. Read from the message text, not the page.
+const SLAY_FRAME_TAGS = 'sq|vhs|pol|tape|diary|sc|icq-old|icq|board|letter|frw|fr';
+function slayFrameTextInfo(mesEl) {
+    const text = String(SillyTavern.getContext().chat?.[Number(mesEl?.getAttribute('mesid'))]?.mes || '');
+    if (!text.includes('data-iig-instruction')) return null;
+    const attr = (a, n) => { const m = a.match(new RegExp('\\b' + n + '="([^"]*)"')); return m ? m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&') : ''; };
+    const spans = [];
+    for (const x of text.matchAll(new RegExp(`<(${SLAY_FRAME_TAGS})\\b([^>]*)>[\\s\\S]*?<\\/\\1>`, 'g'))) spans.push({ a: x.index, b: x.index + x[0].length, cap: attr(x[2], 'cap'), who: attr(x[2], 'who') });
+    const out = [];
+    for (const x of text.matchAll(/<(?:img|video)\b[^>]*data-iig-instruction/gi)) out.push(spans.find(sp => x.index > sp.a && x.index < sp.b) || null);
+    return out;
+}
+// The block the preset's frame made around one picture: the frame tag itself
+// (no regex installed), or the box its regex drew. Never a block that holds
+// other pictures or the message's own text.
+// The block every style from the SLAY site puts around its picture: one styled
+// <div> standing on its own in the text, holding the picture and, at most, one
+// short caption line. Returns { host, cap } or null. A block with anything
+// else inside (the card's own layout) is not this.
+function slayFrameSiteBlock(wrap) {
+    const p = wrap.parentElement;
+    if (!p || p.tagName !== 'DIV' || !p.hasAttribute('style') || p.className || !slayFrameBare(p)) return null;
+    let cap = null;
+    for (const n of p.childNodes) {
+        if (n === wrap) continue;
+        if (n.nodeType === 3) { if (n.textContent.trim()) return null; continue; }
+        if (n.nodeType !== 1) continue;
+        if (n.tagName === 'BR') continue;
+        if (cap !== null || !/^(DIV|P|SPAN|I|EM|FIGCAPTION)$/.test(n.tagName) || n.querySelector('img,video,.iig-img-wrap')) return null;
+        cap = (n.textContent || '').trim();
+        if (cap.length > 200) return null;
+    }
+    return { host: p, cap: cap || '' };
+}
+function slayFrameHost(wrap) {
+    const tags = new RegExp(`^(${SLAY_FRAME_TAGS})$`, 'i');
+    let best = null;
+    for (let p = wrap.parentElement; p && !p.classList.contains('mes_text'); p = p.parentElement) {
+        if (p.querySelectorAll('.iig-img-wrap').length !== 1 || (p.textContent || '').trim().length > 400) break;
+        if (tags.test(p.tagName)) return p;
+        if (p.hasAttribute('style') || p.className) best = p;
+    }
+    return best;
+}
+// Only a picture standing on its own in the text gets a frame: one that the
+// card or a regex already put into a block of its own keeps that block.
+function slayFrameBare(wrap) {
+    let p = wrap.parentElement;
+    for (; p && !p.classList.contains('mes_text'); p = p.parentElement) {
+        if (p.hasAttribute('style') || p.className || !/^(P|DIV|SPAN|CENTER|EM|STRONG|Q|BLOCKQUOTE)$/.test(p.tagName)) return false;
+    }
+    return !!p;
+}
+// Puts the frame on / takes it off the pictures under `root`. Returns
+// { on, skipped }: framed pictures and pictures left in their own block.
+function slayFramesSync(root) {
+    root = root || document.getElementById('chat');
+    const res = { on: 0, skipped: 0, over: 0, old: 0 };
+    if (!root || !root.querySelectorAll) return res;
+    const cfg = getSettings().enabled ? slayFrameActive() : null;
+    const boxes = root.querySelectorAll('.slay-frame');
+    if (!cfg && !boxes.length) return res;
+    const pick = (wrap) => {
+        const fr = cfg ? slayFrameFor(cfg, slayFramePicTime(wrap)) : null;
+        return fr ? { fr, sig: `${fr.key}|${cfg.cap !== false ? 1 : 0}` } : null;
+    };
+    for (const box of boxes) {
+        const w = box.querySelector('.iig-img-wrap');
+        // No picture inside: it is being redrawn, the frame waits for it.
+        if (!w && cfg) continue;
+        const p = w ? pick(w) : null;
+        if (!p || box.dataset.sig !== p.sig) slayFrameOff(box);
+    }
+    if (!cfg) return res;
+    const infoBy = new Map();
+    for (const wrap of root.querySelectorAll('.mes_text .iig-img-wrap')) {
+        const inBox = wrap.closest('.slay-frame');
+        if (inBox) { res.on++; if (inBox._slayHost) res.over++; continue; }
+        const img = wrap.querySelector('img[data-iig-instruction]');
+        if (!img) { res.skipped++; continue; }
+        const p = pick(wrap);
+        if (!p) { res.old++; continue; }
+        const f = p.fr, sig = p.sig;
+        // What the message text says about this picture: is it inside a frame
+        // tag from the preset, and with what caption. Only when the pictures
+        // on the page pair up with the tags in the text one to one.
+        const mes = wrap.closest('.mes');
+        if (mes && !infoBy.has(mes)) {
+            const list = slayFrameTextInfo(mes);
+            const wraps = [...mes.querySelectorAll('.mes_text .iig-img-wrap')];
+            infoBy.set(mes, list && list.length === wraps.length ? { list, wraps } : null);
+        }
+        const pair = mes ? infoBy.get(mes) : null;
+        const info = pair ? pair.list[pair.wraps.indexOf(wrap)] : null;
+        // A picture already inside the preset's frame: SLAY's frame takes its
+        // place on the screen (the preset's one is hidden, not removed). Any
+        // other block of its own (the card's layout) is left alone.
+        let host = null, site = null;
+        if (!slayFrameBare(wrap)) {
+            host = info ? slayFrameHost(wrap) : null;
+            if (!host) { site = slayFrameSiteBlock(wrap); host = site?.host || null; }
+            if (!host) { res.skipped++; continue; }
+        }
+        let cap = '';
+        if (cfg.cap !== false) {
+            try {
+                const d = JSON.parse(iigDecodeInstruction(img.getAttribute('data-iig-instruction') || '{}'));
+                cap = String(d.caption ?? d.cap ?? '').trim();
+            } catch (_) { }
+            cap = (cap || info?.cap || site?.cap || '').slice(0, 200);
+        }
+        const html = slayFrameHtml(f.tpl, cap, info?.who || mes?.getAttribute('ch_name') || '');
+        if (!html) { res.skipped++; continue; }
+        const box = document.createElement('div');
+        box.className = 'slay-frame';
+        box.dataset.sig = sig;
+        box.innerHTML = html;
+        const slot = box.querySelector('[data-slay-slot]');
+        if (!slot) { res.skipped++; continue; }
+        if (host) {
+            const home = document.createElement('i');
+            home.setAttribute('data-slay-home', '');
+            wrap.parentNode.insertBefore(home, wrap);
+            host.parentNode.insertBefore(box, host);
+            host.classList.add('slay-frame-hid');
+            box._slayHome = home; box._slayHost = host;
+            res.over++;
+        } else wrap.parentNode.insertBefore(box, wrap);
+        slot.appendChild(wrap);
+        res.on++;
+    }
+    return res;
+}
+function slayFrameUiRender() {
+    const $ = (id) => document.getElementById(id);
+    if (!$('slay_fr_row')) return;
+    const tplOf = (k) => slayFrameStore().tpl[k];
+    const label = (c) => { const t = c && tplOf(c.key); return t ? t.n + (t.v ? ` (${t.v})` : '') : ''; };
+    const lvl = slayFrameLevel();
+    const f = slayFrameCfg();
+    const eff = slayFrameEffective();
+    const set = !!slayFrameLevelCfg(lvl) && (f.off || slayFrameHas(f));
+    const isNew = f.mode !== 'all';
+    $('slay_fr_scope').value = lvl;
+    $('slay_fr_mode').value = isNew ? 'new' : 'all';
+    $('slay_fr_name').textContent = label(f) || (lvl === 'all' || f.off ? 'Без рамки' : 'Своя не задана');
+    $('slay_fr_reset_btn').classList.toggle('iig-hidden', !set);
+    $('slay_fr_opts').classList.toggle('iig-hidden', !slayFrameHas(f));
+    $('slay_fr_cap').checked = f.cap !== false;
+    const st = $('slay_fr_status');
+    const WHOSE = { chat: 'этого чата', char: 'этого персонажа', all: 'общая, для всех чатов' };
+    const pl = (n) => `${n} ${slayPlural(n, 'картинку', 'картинки', 'картинок')}`;
+    let warn = false, text = '';
+    if (!eff) text = lvl === 'all' ? '' : 'Своя рамка здесь не задана, и общей тоже нет: картинки без рамки.';
+    else if (!getSettings().enabled) { warn = true; text = 'Генерация выключена, поэтому рамка не показывается.'; }
+    else {
+        const r = slayFramesSync();
+        const cur = label(eff.f);
+        // First: what is in effect here and whose it is, so the row above never contradicts the chat.
+        text = `Сейчас в этом чате: ${cur ? `«${cur}»` : 'без рамки'}, настройка ${WHOSE[eff.lvl]}.`;
+        if (eff.lvl !== lvl) text += lvl === 'all' || (lvl === 'char' && eff.lvl === 'chat')
+            ? ' Она важнее той, что ты смотришь сейчас.'
+            : ' Своя здесь не задана: выбери рамку, и она будет только тут.';
+        text += (r.on ? ` Надета на ${pl(r.on)}.` : '')
+            + (r.old && cur ? ` Старые (${r.old}) остались как были.` : '')
+            + (r.skipped ? ` ${pl(r.skipped)} не трогаю: вокруг них своя вёрстка.` : '')
+            + (eff.f.mode !== 'all' ? ' Новая рамка идёт на картинки, нарисованные после выбора.' : '');
+    }
+    st.classList.toggle('iig-hidden', !text);
+    st.classList.toggle('warn', warn);
+    st.innerHTML = `<i class="fa-solid ${warn ? 'fa-circle-exclamation' : 'fa-circle-info'}"></i><span>${sanitizeForHtml(text)}</span>`;
+}
+function slayFramePickerClose() {
+    const $ = (id) => document.getElementById(id);
+    _slayFrameIo?.disconnect(); _slayFrameIo = null;
+    $('slay_fr_pick')?.classList.add('iig-hidden');
+    // The previews are heavy: they are thrown away with the list.
+    if ($('slay_fr_grid')) $('slay_fr_grid').innerHTML = '';
+    const lbl = $('slay_fr_pick_btn')?.querySelector('span'); if (lbl) lbl.textContent = 'Выбрать';
+}
+function slayFramePickerDraw(data) {
+    const $ = (id) => document.getElementById(id);
+    const esc = sanitizeForHtml;
+    const cur = slayFrameCfg().key;
+    const count = (k) => data.frames.filter(x => x.g === k).length;
+    $('slay_fr_chips').innerHTML = data.cats.filter(([k]) => count(k)).map(([k, n]) => `<button type="button" class="slay-fr-chip${k === _slayFrameCat ? ' on' : ''}" data-c="${esc(k)}">${esc(n)} ${count(k)}</button>`).join('');
+    const grid = $('slay_fr_grid');
+    grid.innerHTML = `<button type="button" class="slay-fr-card slay-fr-none${cur ? '' : ' on'}" data-k=""><i class="fa-solid fa-ban"></i>&nbsp; Без рамки</button>`
+        + data.frames.filter(x => x.g === _slayFrameCat).map(x => `<button type="button" class="slay-fr-card${x.k === cur ? ' on' : ''}" data-k="${esc(x.k)}"><span class="slay-fr-pv"></span><span class="slay-fr-cn"><span>${esc(x.n)}</span>${x.v ? `<i>${esc(x.v)}</i>` : ''}</span></button>`).join('');
+    grid.scrollTop = 0;
+    $('slay_fr_chips').querySelector('.on')?.scrollIntoView({ block: 'nearest', inline: 'center' });
+    // A preview is drawn when its card comes near the screen, not all at once.
+    const who = SillyTavern.getContext().name2 || 'Alex';
+    const pic = `<img src="${esc(SLAY_STYLES_BASE)}thumbs/anime3.webp" alt="" decoding="async">`;
+    const fill = (card) => {
+        const x = data.frames.find(y => y.k === card.dataset.k);
+        const pv = card.querySelector('.slay-fr-pv');
+        if (x && pv && !pv.firstChild) pv.innerHTML = `<div>${slayFrameHtml(x, 'вечер на крыше', who, pic)}</div>`;
+    };
+    _slayFrameIo?.disconnect();
+    const cards = grid.querySelectorAll('.slay-fr-card[data-k]:not([data-k=""])');
+    if (typeof IntersectionObserver === 'function') {
+        _slayFrameIo = new IntersectionObserver((es, obs) => { for (const e of es) if (e.isIntersecting) { obs.unobserve(e.target); fill(e.target); } }, { root: grid, rootMargin: '250px 0px' });
+        for (const c of cards) _slayFrameIo.observe(c);
+    } else for (const c of cards) fill(c);
+}
+function slayFrameUiBind() {
+    const $ = (id) => document.getElementById(id);
+    if (!$('slay_fr_row') || $('slay_fr_row').dataset.bound) return;
+    $('slay_fr_row').dataset.bound = '1';
+    const apply = () => { saveSettings(); slayFramesSync(); slayFrameUiRender(); };
+    $('slay_fr_pick_btn').addEventListener('click', async () => {
+        if (!$('slay_fr_pick').classList.contains('iig-hidden')) { slayFramePickerClose(); return; }
+        $('slay_fr_pick').classList.remove('iig-hidden');
+        $('slay_fr_pick_btn').querySelector('span').textContent = 'Свернуть';
+        $('slay_fr_grid').innerHTML = '<div class="slay-fr-load"><i class="fa-solid fa-spinner fa-spin"></i> Загружаю рамки…</div>';
+        let data;
+        try { data = await slayFramesLoad(); }
+        catch (e) { slayFramePickerClose(); toastr.error('Не загрузился список рамок с сайта: ' + (e?.message || e) + '. Уже выбранные рамки работают и без него.', 'SLAY Images', { timeOut: 7000 }); return; }
+        if ($('slay_fr_pick').classList.contains('iig-hidden')) return;
+        const cur = data.frames.find(x => x.k === slayFrameCfg().key);
+        _slayFrameCat = cur ? cur.g : (data.cats.some(([k]) => k === _slayFrameCat) ? _slayFrameCat : data.cats[0][0]);
+        slayFramePickerDraw(data);
+    });
+    $('slay_fr_chips').addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-c]');
+        if (!b) return;
+        _slayFrameCat = b.dataset.c;
+        slayFramePickerDraw(await slayFramesLoad());
+    });
+    const mark = () => { const k = slayFrameCfg().key || ''; for (const c of $('slay_fr_grid').querySelectorAll('.slay-fr-card')) c.classList.toggle('on', c.dataset.k === k); };
+    $('slay_fr_grid').addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-k]');
+        if (!b) return;
+        const x = b.dataset.k ? (await slayFramesLoad()).frames.find(y => y.k === b.dataset.k) : null;
+        const lvl = slayFrameLevel();
+        const f = slayFrameCfg(true);
+        const key = x ? x.k : '';
+        if (key === (f.key || '') && (x || f.off || lvl === 'all')) { mark(); return; }
+        if (f.mode !== 'all') {
+            // The pick so far stays with the pictures made under it.
+            f.hist = [{ since: f.since || 0, key: f.key || '' }, ...(Array.isArray(f.hist) ? f.hist : [])].slice(0, 4);
+            f.since = Date.now();
+        } else { f.hist = []; f.since = 0; }
+        if (x) slayFrameStore().tpl[x.k] = { n: x.n, v: x.v || '', t: x.t, f: x.f, r: x.r };
+        f.key = key;
+        // «Без рамки» for one chat or person is a choice of its own: it hides the common frame there.
+        f.off = !x && lvl !== 'all';
+        if (lvl === 'all' && !slayFrameHas(f)) slayFrameDrop('all');
+        _slayFrameLvl = lvl;
+        mark(); apply();
+    });
+    $('slay_fr_reset_btn').addEventListener('click', () => {
+        // The round arrow forgets this level altogether: the chat falls back to
+        // the person's frame, then to the common one.
+        slayFrameDrop(slayFrameLevel());
+        mark(); apply();
+    });
+    $('slay_fr_mode').addEventListener('change', (e) => {
+        const f = slayFrameCfg(true);
+        f.mode = e.target.value === 'all' ? 'all' : 'new';
+        // «На все»: one frame for everything, the earlier picks are dropped.
+        if (f.mode === 'all') { f.hist = []; f.since = 0; }
+        apply();
+    });
+    $('slay_fr_cap').addEventListener('change', (e) => { slayFrameCfg(true).cap = e.target.checked; apply(); });
+    // Switching the level only changes what the menu shows; nothing is saved.
+    $('slay_fr_scope').addEventListener('change', (e) => {
+        const v = e.target.value;
+        if (v === 'chat' && !slayFrameChatKey()) { toastr.info('Сначала открой чат', 'SLAY Images'); e.target.value = slayFrameLevel(); return; }
+        if (v === 'char' && !slayFrameCharKey()) { toastr.info('Сначала открой чат с персонажем', 'SLAY Images'); e.target.value = slayFrameLevel(); return; }
+        _slayFrameLvl = v;
+        mark(); slayFrameUiRender();
+    });
+    slayFrameUiRender();
+}
+
 function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
     if (!root) return;
     // "Off" has to mean off. This pass heals srcs, rewrites error placeholders
@@ -7897,6 +8340,8 @@ function attachRegenButtonsInRoot(root, { rehydratePending = false } = {}) {
     // cards with its own, and rewriting their srcs into the saved chat. Clicking
     // any of those buttons then generated through SLAY's API while SLAY was off.
     if (!getSettings().enabled) return;
+    // Frames go on once this pass has wrapped the pictures.
+    queueMicrotask(() => { try { slayFramesSync(root); } catch (e) { iigLog('WARN', 'frames:', e?.message); } });
 
     // ZEROTH: self-heal any resurrected stale srcs (superseded by a regen).
     // Runs before everything else so the rest of this pass — and the user —
@@ -10192,6 +10637,14 @@ function createSettingsUI() {
                         <label class="checkbox_label" for="slay_style_to_preset" id="slay_style_preset_row"><input type="checkbox" id="slay_style_to_preset" ${settings.slayStyleToPreset ? 'checked' : ''}><span>Стиль в тогл пресета</span></label>
                         <div class="flex-row iig-hidden" id="slay_style_target_row"><label>Тогл в пресете «<span id="slay_style_preset_name"></span>»</label><select id="slay_style_target" class="flex1"></select></div>
                         <div id="slay_style_status" class="iig-style-status"></div>
+                        <div class="flex-row"><label>Рамка для</label><select class="flex1" id="slay_fr_scope"><option value="all">Всех чатов (общая)</option><option value="char">Этого персонажа</option><option value="chat">Этого чата</option></select></div>
+                        <div class="flex-row slay-fr-row" id="slay_fr_row"><label>Рамка</label><div class="flex1 slay-fr-btns"><span class="slay-fr-name" id="slay_fr_name">Без рамки</span><div class="menu_button" id="slay_fr_pick_btn"><i class="fa-solid fa-border-all"></i><span>Выбрать</span></div><div class="menu_button iig-hidden" id="slay_fr_reset_btn" title="Забыть рамку этого уровня"><i class="fa-solid fa-rotate-left"></i></div></div></div>
+                        <div class="slay-fr-pick iig-hidden" id="slay_fr_pick"><div class="slay-fr-chips" id="slay_fr_chips"></div><div class="slay-fr-grid" id="slay_fr_grid"></div></div>
+                        <div class="flex-row"><label>На какие картинки</label><select class="flex1" id="slay_fr_mode"><option value="new">Только на новые</option><option value="all">На все подходящие в чате</option></select></div>
+                        <div class="iig-col iig-hidden" id="slay_fr_opts">
+                            <label class="checkbox_label"><input type="checkbox" id="slay_fr_cap"><span>Подпись в рамке (если модель её написала)</span></label>
+                        </div>
+                        <div class="slay-fr-status iig-hidden" id="slay_fr_status"></div>
                         <div id="slay_image_context_section" class="iig-col">
                             <div class="iig-subhead">Прошлые картинки как референс</div>
                             <label class="checkbox_label"><input type="checkbox" id="slay_image_context_enabled" ${settings.imageContextEnabled ? 'checked' : ''}><span>Отправлять предыдущие картинки как reference</span></label>
@@ -13722,6 +14175,7 @@ function bindSettingsEvents() {
         on('slay_novel_sm_dyn', 'change', (e) => { settings.novelSmDyn = e.target.checked; saveSettings(); });
     }
     document.getElementById('slay_style_pick_btn')?.addEventListener('click', openStylePickerModal);
+    slayFrameUiBind();
     document.getElementById('slay_style_reset_btn')?.addEventListener('click', () => { slayResetStyle().catch(e => iigLog('ERROR', 'style reset failed:', e?.message || e)); });
     document.getElementById('slay_style_to_preset')?.addEventListener('change', (e) => { settings.slayStyleToPreset = !!e.target.checked; saveSettings(); slayRenderStyleStatus(); });
     document.getElementById('slay_style_target')?.addEventListener('change', (e) => {
@@ -15999,7 +16453,7 @@ function updateHeaderStatusDot() {
                     for (const node of m.addedNodes) {
                         if (node.nodeType !== 1) continue;
                         // Our own wrappers and buttons need no second look.
-                        if (node.classList?.contains('iig-img-wrap') || node.classList?.contains('iig-regen-btn')) continue;
+                        if (node.classList?.contains('iig-img-wrap') || node.classList?.contains('iig-regen-btn') || node.classList?.contains('slay-frame')) continue;
                         waiting.add(node.closest?.('.mes') || node);
                     }
                 }
@@ -16023,6 +16477,7 @@ function updateHeaderStatusDot() {
             slayInjectStudioBtn();
             slayStudioOnChatChanged();
             attachRegenButtonsInRoot(document.getElementById('chat') || document.body, { rehydratePending: true });
+            setTimeout(() => { _slayFrameLvl = ''; slayFrameUiRender(); }, 60);
             // Pictures that finished while another chat was open (P6).
             iigApplyPendingResults().catch(e => iigLog('WARN', 'pending results apply failed:', e?.message));
         }, 300);

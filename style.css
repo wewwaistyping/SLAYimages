@@ -4172,3 +4172,48 @@ button.slay-card-look { cursor: pointer; }
 .slay-form-box .slay-cs-l > span { opacity: 0.75; }
 /* Ready words above the field of a SLAY question box. */
 .slay-ask-chips { margin: 0 0 8px; }
+
+/* ==================== Frames ==================== */
+/* In the chat: the frame is the box, the picture sits in its slot. Nothing of
+   ours may lie over the picture, so its margin, rounding and hover lift go. */
+.slay-frame { display: block; max-width: 100%; line-height: normal; }
+.slay-frame [data-slay-slot] { display: contents; font-style: normal; }
+.slay-frame .iig-img-wrap { border-radius: 0 !important; }
+.slay-frame .iig-generated-image, .slay-frame .iig-img-wrap > img, .slay-frame .iig-img-wrap > video { margin: 0 !important; border-radius: 0 !important; }
+.slay-frame .iig-generated-image:hover { transform: none; box-shadow: none; }
+/* In the settings: the row and the list that opens under it. */
+.slay-fr-name { flex: 1; min-width: 30px; font-size: .8em; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap !important; }
+.slay-fr-btns { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.iig-settings .flex-row.slay-fr-row { grid-template-columns: auto minmax(0, 1fr); }
+.slay-fr-row > label { white-space: nowrap !important; }
+.slay-fr-btns .menu_button { white-space: nowrap !important; flex-shrink: 0; min-height: 32px; margin: 0; display: inline-flex; align-items: center; gap: 7px; }
+.slay-fr-pick { border: 1px solid color-mix(in srgb, var(--slay-pink) 25%, var(--SmartThemeBorderColor)); border-radius: var(--slay-radius-sm); background: rgba(0, 0, 0, .22); overflow: hidden; }
+.slay-fr-chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px; scrollbar-width: none; border-bottom: 1px solid var(--SmartThemeBorderColor); overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+.slay-fr-chips::-webkit-scrollbar { display: none; }
+.slay-fr-chip { flex: 0 0 auto; border: 1px solid var(--SmartThemeBorderColor); background: transparent; color: inherit; font: inherit; font-size: .8em; border-radius: 999px; padding: 0 12px; min-height: 32px; cursor: pointer; white-space: nowrap !important; }
+.slay-fr-chip.on { background: var(--slay-pink); border-color: var(--slay-pink); color: #1a0d14; font-weight: 600; }
+.slay-fr-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px; max-height: min(430px, 62vh); max-height: min(430px, 62dvh); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+/* Off-screen cards cost nothing to lay out or paint. */
+.slay-fr-card { display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; background: #22222a; color: inherit; font: inherit; cursor: pointer; text-align: left; min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 160px; }
+.slay-fr-card.on { border-color: var(--slay-pink); box-shadow: 0 0 0 1px var(--slay-pink); }
+.slay-fr-pv { display: block; min-height: 90px; background: #2d2d36; border-radius: 4px; overflow: hidden; pointer-events: none; }
+.slay-fr-pv > div { zoom: .5; padding: 10px; }
+.slay-fr-pv img { max-width: 100%; }
+.slay-fr-cn { font-size: .78em; line-height: 1.25; display: flex; justify-content: space-between; gap: 6px; }
+.slay-fr-cn i { font-style: normal; opacity: .55; }
+.slay-fr-none { grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: center; min-height: 40px; font-size: .85em; opacity: .85; content-visibility: visible; }
+.slay-fr-load { grid-column: 1 / -1; padding: 18px; text-align: center; font-size: .85em; opacity: .7; }
+.slay-fr-status { font-size: .75em; line-height: 1.45; opacity: .8; display: flex; gap: 6px; align-items: flex-start; }
+.slay-fr-status i { color: var(--slay-success); margin-top: 3px; }
+.slay-fr-status.warn i { color: var(--slay-warning); }
+@media (hover: hover) { .slay-fr-card:hover { border-color: color-mix(in srgb, var(--slay-pink) 50%, transparent); } }
+/* Fingers: taller targets. */
+@media (hover: none), (max-width: 600px) {
+    .slay-fr-chip, .slay-fr-btns .menu_button { min-height: 40px; }
+    .slay-fr-none { min-height: 44px; }
+}
+/* The preset's own frame while SLAY's frame stands in for it. */
+.slay-frame-hid { display: none !important; }
+[data-slay-home] { display: none; }
+/* A picture taken from a style block keeps that block's inline border: not inside a frame. */
+.slay-frame .iig-img-wrap > img, .slay-frame .iig-img-wrap > video { border: 0 !important; box-shadow: none !important; }
