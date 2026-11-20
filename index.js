@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.51';
+const SLAY_VERSION = '5.2.0-exp.55';
 // Where the last press started. A click on a window's dark backdrop closes the
 // window only if the press started there too: selecting text inside and letting
 // go outside must not close it.
@@ -7099,6 +7099,86 @@ async function slayMaybeCrop(rawBase64, opts = {}) {
     return String(out).split(',')[1] || rawBase64;
 }
 
+// A text question in SLAY's own box (the look of slayChoose). Resolves with the
+// text, or null on cancel. Enter sends, Shift+Enter is a new line.
+function slayAskText(title, text, o = {}) {
+    try { toastr.clear(); } catch (_) { }
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-choose-ov slay-confirm-ov';
+        ov.innerHTML = `
+            <div class="slay-choose-box">
+                <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
+                ${text ? `<div class="slay-choose-x">${sanitizeForHtml(text)}</div>` : ''}
+                ${Array.isArray(o.chips) && o.chips.length ? `<div class="iig-lb-chips slay-ask-chips">${o.chips.map(c => `<button type="button" class="iig-lb-chip" data-chip="${sanitizeForHtml(c)}">${sanitizeForHtml(c)}</button>`).join('')}</div>` : ''}
+                <textarea class="text_pole slay-ask-ta" rows="3" placeholder="${sanitizeForHtml(o.placeholder || '')}"></textarea>
+                <div class="slay-choose-btns">
+                    <button class="slay-choose-b primary" data-k="y">${sanitizeForHtml(o.ok || 'Готово')}</button>
+                    <button class="slay-choose-b ghost" data-k="">Отмена</button>
+                </div>
+            </div>`;
+        const ta = ov.querySelector('textarea');
+        ta.value = String(o.value || '');
+        document.body.appendChild(ov);
+        let done = false;
+        const finish = (ok) => { if (done) return; done = true; const v = ta.value; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(ok ? v : null); };
+        const onKey = (e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); finish(false); }
+            else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.target === ta) { e.preventDefault(); e.stopPropagation(); finish(true); }
+        };
+        document.addEventListener('keydown', onKey, true);
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend', 'keydown', 'keyup', 'input']) {
+            ov.addEventListener(type, (e) => {
+                if (type === 'click') {
+                    const b = e.target.closest('.slay-choose-b');
+                    const chip = e.target.closest('[data-chip]');
+                    if (chip) { ta.value = ta.value.trim() ? `${ta.value.trim()}, ${chip.dataset.chip}` : chip.dataset.chip; ta.focus(); }
+                    else if (b) finish(b.dataset.k === 'y');
+                    // A click past the box closes it only while nothing is typed.
+                    else if (slayBackdropClick(e, ov) && !ta.value.trim()) finish(false);
+                }
+                e.stopPropagation();
+            });
+        }
+        setTimeout(() => { try { ta.focus(); } catch (_) { } }, 0);
+    });
+}
+// node: the form. o.ok: the main button. o.validate(): false keeps the box open
+// (the typed text stays). Resolves true on the main button, false on cancel.
+async function slayFormBox(node, o = {}) {
+    try { toastr.clear(); } catch (_) { }
+    const ctx = SillyTavern.getContext();
+    if (document.querySelector('dialog[open]') && typeof ctx.callGenericPopup === 'function') {
+        const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+        const okd = await ctx.callGenericPopup(node, CONFIRM, '', { okButton: o.ok || 'Готово', cancelButton: 'Отмена', wide: true });
+        return !!okd && (!o.validate || o.validate() !== false);
+    }
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.className = 'slay-choose-ov slay-confirm-ov';
+        ov.innerHTML = `<div class="slay-choose-box slay-form-box"><div class="slay-form-body"></div>
+            <div class="slay-form-btns"><button type="button" class="slay-choose-b ghost" data-k="">Отмена</button><button type="button" class="slay-choose-b primary" data-k="y">${sanitizeForHtml(o.ok || 'Готово')}</button></div></div>`;
+        ov.querySelector('.slay-form-body').appendChild(node);
+        document.body.appendChild(ov);
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            if (ok && o.validate && o.validate() === false) return;
+            done = true; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(!!ok);
+        };
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } };
+        document.addEventListener('keydown', onKey, true);
+        // Clicks and keys stay inside: nothing reaches the chat's hotkeys or the
+        // windows underneath. A click past the box does not close a filled form.
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend', 'keydown', 'keyup', 'input']) {
+            ov.addEventListener(type, (e) => {
+                if (type === 'click') { const b = e.target.closest('.slay-form-btns .slay-choose-b'); if (b) finish(b.dataset.k === 'y'); }
+                e.stopPropagation();
+            });
+        }
+        setTimeout(() => { try { (node.querySelector('input[type="text"]:not([value])') || node.querySelector('input, textarea'))?.focus(); } catch (_) { } }, 0);
+    });
+}
 async function slayPromptInput(title, defaultValue = '') {
     // A leftover toast paints above the popup layer and covers the very
     // field the user is meant to type into. Clear the area before showing.
@@ -12386,8 +12466,6 @@ function slayCustomStyleDesc(item) {
 // note is for the user only and never reaches the AI.
 async function slayEditCustomStyleDialog(existing, prefill = null) {
     const T = 'SLAY Images';
-    const ctx = SillyTavern.getContext();
-    if (typeof ctx.callGenericPopup !== 'function') { toastr.warning('Нужна версия SillyTavern с попапами', T); return null; }
     let cover = existing ? String(existing.cover || '') : String(prefill?.cover || '');
     const wrap = document.createElement('div');
     wrap.className = 'iig-fm slay-cs';
@@ -12410,15 +12488,20 @@ async function slayEditCustomStyleDialog(existing, prefill = null) {
     showCover();
     if (existing) { nameIn.value = existing.name || ''; descIn.value = slayCustomStyleDesc(existing); noteIn.value = existing.note || ''; }
     else if (prefill?.desc) descIn.value = prefill.desc;
-    const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
-    const okd = await ctx.callGenericPopup(wrap, CONFIRM, '', { okButton: 'Сохранить', cancelButton: 'Отмена', wide: true });
+    const list = slayCustomStyles();
+    const okd = await slayFormBox(wrap, {
+        ok: 'Сохранить',
+        validate: () => {
+            const nm = nameIn.value.trim();
+            if (!nm || !descIn.value.trim()) { toastr.warning('Нужны название и стиль', T); return false; }
+            if (list.some(c => c !== existing && String(c.name).toLowerCase() === nm.toLowerCase())) { toastr.warning('Стиль с таким названием уже есть', T); return false; }
+            return true;
+        },
+    });
     if (!okd) return null;
     const name = nameIn.value.trim();
     const desc = descIn.value.trim();
     const note = noteIn.value.trim();
-    if (!name || !desc) { toastr.warning('Нужны название и стиль', T); return null; }
-    const list = slayCustomStyles();
-    if (list.some(c => c !== existing && String(c.name).toLowerCase() === name.toLowerCase())) { toastr.warning('Стиль с таким названием уже есть', T); return null; }
     const block = slayBuildStyleBlock(name, desc, getSettings().imageSize);
     let item;
     if (existing && list.includes(existing)) {
@@ -13992,7 +14075,7 @@ function bindSettingsEvents() {
 // results stay in this chat's studio until sent to the chat or deleted.
 
 const SLAY_STUDIO_TASKS = {
-    free: { label: 'Свободно', idea: '', who: ['char', 'user'] },
+    free: { label: 'Свободно', idea: '', who: [] },
     portrait: { label: 'Портрет персонажа', idea: 'Portrait of {who}, head and shoulders, neutral background, soft studio light.', who: ['char'], ar: '3:4' },
     sheet: { label: 'Лист персонажа', idea: 'Character sheet of {who}: front view, side profile and full body on one canvas, plain light background, the same outfit in every view, no text.', who: ['char'], ar: '16:9' },
     place: { label: 'Локация для рефа', idea: 'Empty interior of {loc}, no people, wide shot, natural light, detailed furniture and props.', who: ['loc'], ar: '16:9' },
@@ -14776,7 +14859,7 @@ function openSlayStudio() {
     document.querySelector('.slay-studio-ov')?.remove();
     slayStudioTakeLate();
     if (_studio.chatId !== (ctx.chatId || ctx.groupId)) {
-        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '', ideaHist: null, ideaPos: 0 });
+        Object.assign(_studio, { chatId: ctx.chatId || ctx.groupId, task: 'free', ctx: 'off', who: null, raw: false, n: 1, noStyle: false, idea: '', prompt: '', ideaHist: null, ideaPos: 0, lastFill: '' });
         // The style picked in the Studio stays: it is a choice of look, not of this chat.
     }
     // A raw idea skips the preset's image rules, so the model fills the gaps
@@ -14861,23 +14944,24 @@ function openSlayStudio() {
     const keepText = () => { _studio.idea = ideaEl.value; _studio.prompt = promptEl.value; };
     // The idea's own history: templates and «clear» change the field from code,
     // which the browser's Ctrl+Z does not follow. Kept with the texts, per chat.
-    if (!Array.isArray(_studio.ideaHist)) { _studio.ideaHist = [ideaEl.value]; _studio.ideaPos = 0; }
+    if (!Array.isArray(_studio.ideaHist)) { _studio.ideaHist = [{ v: ideaEl.value, f: String(_studio.lastFill || '') }]; _studio.ideaPos = 0; }
     let ideaTimer = 0;
     const ideaTools = () => {
         const h = _studio.ideaHist, q = (a) => ov.querySelector(`[data-act="${a}"]`);
-        q('iundo').disabled = !(_studio.ideaPos > 0 || h[_studio.ideaPos] !== ideaEl.value);
-        q('iredo').disabled = _studio.ideaPos >= h.length - 1 || h[_studio.ideaPos] !== ideaEl.value;
+        q('iundo').disabled = !(_studio.ideaPos > 0 || h[_studio.ideaPos].v !== ideaEl.value);
+        q('iredo').disabled = _studio.ideaPos >= h.length - 1 || h[_studio.ideaPos].v !== ideaEl.value;
         q('iclear').disabled = !ideaEl.value;
     };
     const ideaSnap = () => {
         clearTimeout(ideaTimer); ideaTimer = 0;
         const h = _studio.ideaHist;
-        if (h[_studio.ideaPos] !== ideaEl.value) {
+        const f = String(_studio.lastFill || '');
+        if (h[_studio.ideaPos].v !== ideaEl.value) {
             h.length = _studio.ideaPos + 1;
-            h.push(ideaEl.value);
+            h.push({ v: ideaEl.value, f });
             if (h.length > 100) h.splice(0, h.length - 100);
             _studio.ideaPos = h.length - 1;
-        }
+        } else h[_studio.ideaPos].f = f;
         ideaTools();
     };
     const ideaStep = (d) => {
@@ -14885,7 +14969,8 @@ function openSlayStudio() {
         const p = _studio.ideaPos + d;
         if (p < 0 || p >= _studio.ideaHist.length) return;
         _studio.ideaPos = p;
-        ideaEl.value = _studio.ideaHist[p];
+        ideaEl.value = _studio.ideaHist[p].v;
+        _studio.lastFill = _studio.ideaHist[p].f;
         keepText(); ideaTools();
     };
     ideaTools();
@@ -15141,7 +15226,7 @@ function openSlayStudio() {
             </div>`).join('') + more;
     };
 
-    const close = () => { connOut(); keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
+    const close = () => { clearTimeout(ideaTimer); connOut(); keepText(); cardIo?.disconnect(); win.destroy(); ov.remove(); document.removeEventListener('keydown', onKey, true); if (_studioClose === close) _studioClose = null; if (_studioRedraw === drawResults) _studioRedraw = null; };
     _studioClose = close;
     _studioRedraw = drawResults;
     // Escape only while focus is inside the Studio: in window mode the chat
@@ -15438,12 +15523,14 @@ function openSlayStudio() {
                 const st = getSettings();
                 if (st.studioDelNoWarn !== true) {
                     const inChat = slayStudioInChat(item);
+                    const key = slayStudioChatKey();
                     const k = await slayChoose('Удаление', inChat
                         ? 'Убрать картинку из студии?<br><br>Она стоит в чате, поэтому в чате и на диске останется.'
-                        : 'Удалить картинку?<br><br>Файл удалится <b>с диска</b>, вернуть его будет нельзя. Если хочешь просто убрать её из списка, нажми «Скрыть».',
+                        : 'Удалить картинку?<br><br>Файл удалится <b>с диска</b>, вернуть его будет нельзя.' + (resFilter === 'hid' ? '' : ' Если хочешь просто убрать её из списка, нажми на глазик в углу картинки.'),
                         [{ key: 'y', label: inChat ? 'Убрать' : 'Удалить', danger: true }],
                         { html: true, confirm: true, check: 'Больше не предупреждать', onCheck: (v) => { if (v) { st.studioDelNoWarn = true; saveSettings(); const c = document.getElementById('slay_studio_del_warn'); if (c) c.checked = false; } } });
                     if (k !== 'y') return;
+                    if (slayStudioChatKey() !== key || !items.includes(item)) return;
                 }
                 const i = items.indexOf(item);
                 if (i >= 0) items.splice(i, 1);
@@ -15476,7 +15563,7 @@ function openSlayStudio() {
                 return;
             }
             if (act === 'edit') {
-                const text = await slayPromptInput('Что поменять? (картинка уйдёт рефом, это платный запрос)', '');
+                const text = await slayAskText('Правка', 'Что поменять? Картинка уйдёт рефом, это платный запрос.', { placeholder: 'например: сделай ночь, сними очки', ok: 'Перерисовать с правкой', chips: ['ночь', 'улыбается', 'без очков', 'крупнее лицо'] });
                 if (!text || !String(text).trim()) return;
                 runGenerate({ prompt: item.prompt, idea: '🪄 ' + String(text).trim(), who: item.who || {}, ar: item.ar, n: 1, noStyle: _studio.noStyle, editSource: item.path, editText: String(text).trim() });
             }
@@ -15664,7 +15751,16 @@ function initLightbox() {
             const slots = findAllSlotsByKey(t.dataset.slot);
             if (!src || src.startsWith('data:')) { toastr.warning('Картинка ещё не сохранена', 'SLAY Images'); return; }
             if (!slots.length) { toastr.warning('Не нашла слоты рефов — открой настройки SLAY один раз', 'SLAY Images'); return; }
-            if (await slayImageToSlot(src, t.dataset.slot, t.textContent)) { panel.hidden = true; fitPanel(); }
+            if (await slayImageToSlot(src, t.dataset.slot, t.textContent)) {
+                panel.hidden = true; fitPanel();
+                const li = /^loc-(\d+)$/.exec(t.dataset.slot);
+                if (li) {
+                    const desc = slayPlaceFromPrompt(instrPrompt());
+                    // The big view sits above every window: it goes first.
+                    close();
+                    slayEditLocationDialog(+li[1], { desc, over: true });
+                }
+            }
         }
     });
     // Typing in the panel must not reach the chat's hotkeys.

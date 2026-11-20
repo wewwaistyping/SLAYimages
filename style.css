@@ -4160,3 +4160,15 @@ button.slay-card-look { cursor: pointer; }
 .slay-studio-itools button { width: 28px; height: 26px; padding: 0; border-radius: 7px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: inherit; cursor: pointer; font-size: 12px; display: grid; place-items: center; }
 .slay-studio-itools button:hover:not(:disabled) { border-color: var(--slay-pink); color: var(--slay-pink); }
 .slay-studio-itools button:disabled { opacity: 0.35; cursor: default; }
+
+/* The text field of a SLAY question box («Правка» in the Studio). */
+.slay-ask-ta { display: block; width: 100%; box-sizing: border-box; min-height: 72px; resize: vertical; margin: 0 0 12px; font-size: 13px; line-height: 1.45; }
+
+/* A form in a SLAY box («Свой стиль»): wider, two buttons in a row. */
+.slay-form-box { max-width: 520px; }
+.slay-form-btns { display: flex; gap: 8px; margin-top: 12px; }
+.slay-form-btns .slay-choose-b { flex: 1; }
+.slay-form-box .slay-cs-l { margin-bottom: 4px; }
+.slay-form-box .slay-cs-l > span { opacity: 0.75; }
+/* Ready words above the field of a SLAY question box. */
+.slay-ask-chips { margin: 0 0 8px; }
