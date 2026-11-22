@@ -26,7 +26,7 @@
  *              which is why this project carries the same licence
  *   hydall   — style gallery
  */
-const SLAY_VERSION = '5.2.0-exp.60';
+const SLAY_VERSION = '5.2.0-exp.64';
 // Where the last press started. A click on a window's dark backdrop closes the
 // window only if the press started there too: selecting text inside and letting
 // go outside must not close it.
@@ -3424,13 +3424,23 @@ function isGeminiModel(modelId) {
 }
 
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
-const NAISTERA_MODELS = Object.freeze([
-    'grok',
-    'nano banana 2', 'nano banana 2 lite', 'nano banana pro',
-    'novelai v4.5', 'novelai v5',
-    // Legacy values people already have stored — dropping them would reset
-    // everyone to grok on update.
-    'nano banana', 'novelai',
+// What Naistera can draw. The live list comes from its /api/models (with the
+// key: what the tariff opens) and is kept in the settings (naisteraCatalog);
+// this one stands in until the first answer. `id` is what the server is sent.
+const NAISTERA_BUILTIN = Object.freeze([
+    { id: 'nano-banana-2', name: 'Nano Banana 2' },
+    { id: 'nano-banana-2-lite', name: 'Nano Banana 2 Lite' },
+    { id: 'nano banana pro', name: 'Nano Banana Pro' },
+    { id: 'novelai-v4.5', name: 'NovelAI V4.5', references: false },
+    { id: 'novelai-v5', name: 'NovelAI V5', references: false },
+    { id: 'novelai-v5-medium', name: 'NovelAI V5 Medium', references: false },
+    { id: 'grok', name: 'Grok' },
+]);
+// Values people already have stored: shown while picked, sent as before.
+const NAISTERA_LEGACY = Object.freeze([
+    { id: 'nano banana pro', name: 'Nano Banana Pro' },
+    { id: 'nano banana', name: 'Nano Banana (старая)' },
+    { id: 'novelai', name: 'NovelAI (старая)' },
 ]);
 const NAISTERA_MANUAL = '__manual__';
 const NOVELAI_MODELS = Object.freeze([
@@ -3499,22 +3509,117 @@ const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', 
 function canonNaisteraModelName(model) {
     return String(model || '').trim().toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
+// For comparing names only: 'NovelAI-V5', 'novelai v5' and 'novelai_v5' are one model.
 function normalizeNaisteraModel(model) {
     const canon = canonNaisteraModelName(model);
-    if (!canon) return 'grok';
-    // Anything unknown passes through (canonicalised, never rewritten).
-    // Naistera has no endpoint that lists its models, so our dropdown always
-    // lags behind — and rewriting every unknown name to 'grok' meant a user who
-    // had PAID for a newer model could not reach it by any means, including
-    // typing it out.
-    return canon;
+    return canon || 'grok';
 }
-// Is the stored value one of the dropdown entries (after canonicalisation)?
-// Everything else lives in the «вписать вручную» field.
-function naisteraModelIsListed(model) { return NAISTERA_MODELS.includes(normalizeNaisteraModel(model)); }
-// Refs and the video test exist only for grok and the nano banana family.
-// Exact 'grok', not startsWith: there is no grok-pro on Naistera.
-function naisteraModelSupportsRefs(model) { const n = normalizeNaisteraModel(model); return n === 'grok' || n.startsWith('nano banana'); }
+function naisteraCatalogList() {
+    const c = getSettings().naisteraCatalog;
+    return Array.isArray(c?.models) && c.models.length ? c.models : NAISTERA_BUILTIN;
+}
+// The list entry a stored or typed name stands for, by id or by name; null if none.
+function naisteraFind(model) {
+    const c = canonNaisteraModelName(model);
+    if (!c) return null;
+    for (const list of [naisteraCatalogList(), NAISTERA_BUILTIN, NAISTERA_LEGACY]) {
+        const e = list.find(m => canonNaisteraModelName(m.id) === c || canonNaisteraModelName(m.name) === c);
+        if (e) return e;
+    }
+    return null;
+}
+// What the server is sent: the list's own id ('novelai-v5-medium'); a name
+// typed by hand goes as typed. Dashes turned into spaces (as before) made a
+// model the server knows only by its id unreachable.
+function naisteraWireModel(model) {
+    const e = naisteraFind(model);
+    return e ? e.id : (String(model || '').trim().toLowerCase() || 'grok');
+}
+function naisteraModelLabel(model) { const e = naisteraFind(model); return e ? e.name : String(model || '').trim(); }
+// Is the stored value one of the dropdown entries? Everything else lives in
+// the «вписать вручную» field.
+function naisteraModelIsListed(model) { return !!naisteraFind(model); }
+// Refs: what Naistera's list says; else grok and the nano banana family.
+function naisteraModelSupportsRefs(model) {
+    const e = naisteraFind(model);
+    if (e && typeof e.references === 'boolean') return e.references;
+    const n = canonNaisteraModelName(e ? e.id : model);
+    if (n === 'grok' || n.startsWith('nano banana')) return true;
+    // A model from Naistera's own list that says nothing about refs takes them.
+    const live = getSettings().naisteraCatalog?.models;
+    return !!e && Array.isArray(live) && live.includes(e);
+}
+// Reads Naistera's list (with the key, then without it) into the settings.
+// Resolves with the stored list, or null when Naistera is not the API in use.
+let _naisteraModelsBusy = null;
+function slayNaisteraLoadModels() {
+    if (_naisteraModelsBusy) return _naisteraModelsBusy;
+    const st = getSettings();
+    if (st.apiType !== 'naistera') return Promise.resolve(null);
+    const base = getEffectiveEndpoint(st).replace(/\/+$/, '').replace(/\/api\/generate$/, '');
+    const url = `${base}/api/models`;
+    const get = (withKey) => {
+        const headers = { Accept: 'application/json' };
+        const key = withKey ? sanitizeApiKey(st.apiKey) : '';
+        if (key && /^[\x20-\x7E]+$/.test(key)) headers.Authorization = `Bearer ${key}`;
+        return fetch(url, { headers });
+    };
+    _naisteraModelsBusy = (async () => {
+        let r = null;
+        try { r = await get(true); } catch (_) { r = null; }
+        // A refused or failed call with the key: the public list still says what exists.
+        if (!r || !r.ok) r = await get(false);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const models = (Array.isArray(d?.models) ? d.models : [])
+            .filter(m => m && typeof m.id === 'string' && m.id.trim() && m.id.length <= 80)
+            .slice(0, 60)
+            .map(m => ({
+                id: m.id.trim(),
+                name: String(m.name || m.id).trim().slice(0, 60),
+                ...(typeof m.references === 'boolean' ? { references: m.references } : {}),
+                ...(m.visible === false ? { visible: false } : {}),
+                ...(m.deprecated ? { deprecated: true } : {}),
+            }));
+        if (!models.length) throw new Error('пустой список');
+        st.naisteraCatalog = { at: Date.now(), auth: !!d?.authenticated, models };
+        saveSettings();
+        return st.naisteraCatalog;
+    })().finally(() => { _naisteraModelsBusy = null; });
+    return _naisteraModelsBusy;
+}
+// The dropdown from the list; a picked model that is not in it stays shown.
+function slayNaisteraFillSelect() {
+    const sel = document.getElementById('slay_naistera_model');
+    if (!sel) return;
+    const st = getSettings();
+    const cur = naisteraFind(st.naisteraModel);
+    const shown = naisteraCatalogList().filter(m => m.visible !== false && !m.deprecated);
+    if (cur && !shown.includes(cur)) shown.push(cur);
+    sel.innerHTML = shown.map(m => `<option value="${sanitizeForHtml(m.id)}">${sanitizeForHtml(m.name)}${m.deprecated ? ' (устарела)' : ''}</option>`).join('')
+        + `<option value="${NAISTERA_MANUAL}">— вписать вручную —</option>`;
+    sel.value = cur ? cur.id : NAISTERA_MANUAL;
+    const inp = document.getElementById('slay_naistera_model_manual');
+    if (inp) inp.value = cur ? '' : String(st.naisteraModel || '');
+}
+// loud: the ↻ button (says what happened); quiet: the automatic check.
+function slayNaisteraRefresh(loud, onDone) {
+    const b = document.getElementById('slay_naistera_refresh');
+    b?.classList.add('loading');
+    return slayNaisteraLoadModels().then((c) => {
+        if (!c) { if (loud) toastr.info('Список моделей нужен только для Naistera', 'SLAY Images'); return; }
+        slayNaisteraFillSelect();
+        try { onDone?.(); } catch (_) { }
+        try { updateSectionStatusesSoon(); } catch (_) { }
+        if (loud) {
+            const n = c.models.filter(m => m.visible !== false && !m.deprecated).length;
+            toastr.success(`Моделей Naistera: ${n}${c.auth ? '' : ' (общий список: ключ не подошёл или не задан)'}`, 'SLAY Images', { timeOut: 3000 });
+        }
+    }).catch((e) => {
+        if (loud) toastr.error(`Список моделей Naistera не загрузился: ${e?.message || e}. Остаётся прежний.`, 'SLAY Images', { timeOut: 6000 });
+        else iigLog('WARN', 'naistera models:', e?.message || e);
+    }).finally(() => b?.classList.remove('loading'));
+}
 function shouldUseNaisteraVideoTest(model) { return naisteraModelSupportsRefs(model); }
 function normalizeNaisteraVideoFrequency(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, 999); }
 function normalizeImageContextCount(value) { const n = Number.parseInt(String(value ?? '').trim(), 10); if (!Number.isFinite(n) || n < 1) return 1; return Math.min(n, MAX_CONTEXT_IMAGES); }
@@ -5637,7 +5742,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
     const endpoint = getEffectiveEndpoint(settings);
     const url = endpoint.endsWith('/api/generate') ? endpoint : `${endpoint}/api/generate`;
     const aspectRatio = options.forceAspect || (settings.naisteraAspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.naisteraAspectRatio || '1:1'));
-    const model = normalizeNaisteraModel(options.model || settings.naisteraModel || 'grok');
+    const model = naisteraWireModel(options.model || settings.naisteraModel || 'grok');
     const referenceImages = options.referenceImages || [];
     const referenceLabels = options.referenceLabels || [];
     let labelPrefix = '';
@@ -7111,13 +7216,15 @@ function slayAskText(title, text, o = {}) {
                 <div class="slay-choose-t">${sanitizeForHtml(title)}</div>
                 ${text ? `<div class="slay-choose-x">${sanitizeForHtml(text)}</div>` : ''}
                 ${Array.isArray(o.chips) && o.chips.length ? `<div class="iig-lb-chips slay-ask-chips">${o.chips.map(c => `<button type="button" class="iig-lb-chip" data-chip="${sanitizeForHtml(c)}">${sanitizeForHtml(c)}</button>`).join('')}</div>` : ''}
-                <textarea class="text_pole slay-ask-ta" rows="3" placeholder="${sanitizeForHtml(o.placeholder || '')}"></textarea>
+                ${o.line
+        ? `<input type="text" class="text_pole slay-ask-in" autocomplete="off" spellcheck="false" placeholder="${sanitizeForHtml(o.placeholder || '')}">`
+        : `<textarea class="text_pole slay-ask-ta" rows="3" placeholder="${sanitizeForHtml(o.placeholder || '')}"></textarea>`}
                 <div class="slay-choose-btns">
                     <button class="slay-choose-b primary" data-k="y">${sanitizeForHtml(o.ok || 'Готово')}</button>
                     <button class="slay-choose-b ghost" data-k="">Отмена</button>
                 </div>
             </div>`;
-        const ta = ov.querySelector('textarea');
+        const ta = ov.querySelector('.slay-ask-ta, .slay-ask-in');
         ta.value = String(o.value || '');
         document.body.appendChild(ov);
         let done = false;
@@ -7140,7 +7247,7 @@ function slayAskText(title, text, o = {}) {
                 e.stopPropagation();
             });
         }
-        setTimeout(() => { try { ta.focus(); } catch (_) { } }, 0);
+        setTimeout(() => { try { ta.focus(); if (o.line) ta.select(); } catch (_) { } }, 0);
     });
 }
 // node: the form. o.ok: the main button. o.validate(): false keeps the box open
@@ -7166,7 +7273,10 @@ async function slayFormBox(node, o = {}) {
             if (ok && o.validate && o.validate() === false) return;
             done = true; ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(!!ok);
         };
-        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } };
+        const onKey = (e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); finish(false); }
+            else if (e.key === 'Enter' && !e.isComposing && ov.contains(e.target) && e.target.matches?.('input[type="text"]:not(.slk-search)')) { e.preventDefault(); e.stopPropagation(); finish(true); }
+        };
         document.addEventListener('keydown', onKey, true);
         // Clicks and keys stay inside: nothing reaches the chat's hotkeys or the
         // windows underneath. A click past the box does not close a filled form.
@@ -7183,6 +7293,14 @@ async function slayPromptInput(title, defaultValue = '') {
     // A leftover toast paints above the popup layer and covers the very
     // field the user is meant to type into. Clear the area before showing.
     try { toastr.clear(); } catch (_) {}
+    // SLAY's own box. Over an open ST dialog it would end up underneath (a
+    // dialog sits in the browser's top layer), so there ST's popup is used.
+    // «Название — подсказка» and «Вопрос? Подсказка» show as a title and a hint.
+    if (!document.querySelector('dialog[open]')) {
+        const q = String(title || '').trim();
+        const m = q.match(/^(.+?)\s+—\s+(.+)$/) || q.match(/^(.+?\?)\s+(.+)$/);
+        return slayAskText((m ? m[1] : q).replace(/:\s*$/, ''), m ? m[2] : '', { line: true, value: String(defaultValue ?? '') });
+    }
     const ctx = SillyTavern.getContext();
     try {
         if (typeof ctx.callGenericPopup === 'function') {
@@ -7250,7 +7368,6 @@ async function slayPromptSaveLook(typedNames, path) {
     // A leftover toast paints above the popup layer and covers the very
     // field the user is meant to type into. Clear the area before showing.
     try { toastr.clear(); } catch (_) {}
-    const ctx = SillyTavern.getContext();
     const chars = getSavedChars();
     const byPath = findSavedCharByPath(path);
     const match = byPath || findSavedCharByNames(typedNames);
@@ -7262,58 +7379,46 @@ async function slayPromptSaveLook(typedNames, path) {
     let folderId = findSavedFolder(_swFolderFilter) ? _swFolderFilter : null;
 
     try {
-        if (typeof ctx.callGenericPopup === 'function') {
-            const CONFIRM = ctx.POPUP_TYPE && ctx.POPUP_TYPE.CONFIRM ? ctx.POPUP_TYPE.CONFIRM : 2;
+        {
             const wrap = document.createElement('div');
-            wrap.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:4px;';
+            wrap.className = 'slk-save';
             wrap.innerHTML = `
-                <div style="font-size:15px;font-weight:600;color:#f472b6;margin-bottom:6px;" id="slk_title"></div>
-                ${match ? `<div style="display:flex;gap:8px;align-items:flex-start;background:rgba(244,114,182,.10);border:1px solid rgba(244,114,182,.28);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;margin-bottom:8px;">
-                    <span style="color:#f472b6;">\u2665</span>
-                    <div><b>${esc2(match.names)}</b> \u2014 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c, ${match.looks.length} \u043e\u0431\u0440\u0430\u0437(\u0430).<br>
-                    <span style="opacity:.6;">\u041f\u043e\u0445\u043e\u0436\u0435, \u044d\u0442\u043e \u0435\u0449\u0451 \u043e\u0434\u0438\u043d \u0435\u0433\u043e \u043e\u0431\u0440\u0430\u0437.</span></div>
+                <div class="slay-choose-t" id="slk_title"></div>
+                ${match ? `<div class="slk-match"><span class="slk-match-h">♥</span>
+                    <div><b>${esc2(match.names)}</b> — уже есть, ${match.looks.length} ${slayPlural(match.looks.length, 'образ', 'образа', 'образов')}.<br>
+                    <span class="slk-dim">Похоже, это ещё один его образ.</span></div>
                 </div>` : ''}
-                ${chars.length ? `<div style="display:flex;gap:4px;background:rgba(0,0,0,.25);padding:3px;border-radius:9px;margin-bottom:6px;">
-                    <button type="button" id="slk_new" style="flex:1;padding:6px;border:none;border-radius:7px;background:transparent;color:#bbb;font:inherit;font-size:12px;cursor:pointer;">\u041d\u043e\u0432\u044b\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436</button>
-                    <button type="button" id="slk_add" style="flex:1;padding:6px;border:none;border-radius:7px;background:transparent;color:#bbb;font:inherit;font-size:12px;cursor:pointer;">\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437</button>
+                ${chars.length ? `<div class="slay-studio-seg slk-seg">
+                    <button type="button" id="slk_new">Новый персонаж</button>
+                    <button type="button" id="slk_add">Добавить образ</button>
                 </div>` : ''}
                 <div id="slk_f_names">
-                    <label style="font-size:12px;opacity:.8;">\u0418\u043c\u0435\u043d\u0430 \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e</label>
-                    <input type="text" id="slk_names" class="text_pole" value="${esc2(typedNames)}" placeholder="\u0414\u0435\u043d, \u0414\u0435\u043d\u0438\u0441, \u0414\u0435\u043d\u0447\u0438\u043a">
-                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">\u043f\u043e \u043d\u0438\u043c \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435 \u0443\u0437\u043d\u0430\u0451\u0442 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430 \u0432 \u043f\u0440\u043e\u043c\u043f\u0442\u0435</div>
-                    ${folders.length ? `<label style="font-size:12px;opacity:.8;">Папка</label>
+                    <label class="slay-cs-l"><span>Имена через запятую</span><input type="text" id="slk_names" class="text_pole" value="${esc2(typedNames)}" placeholder="Ден, Денис, Денчик" autocomplete="off" spellcheck="false"></label>
+                    <div class="slk-hint">по ним расширение узнаёт персонажа в промпте</div>
+                    ${folders.length ? `<div class="slay-cs-l"><span>Папка</span></div>
                     <div class="iig-folder-chips iig-folder-chips-sm" id="slk_folder_chips">
                         <button type="button" class="iig-fchip${folderId ? '' : ' on'}" data-f=""><span class="iig-fchip-t">Без папки</span></button>
                         ${folders.map(f => `<button type="button" class="iig-fchip${folderId === f.id ? ' on' : ''}" data-f="${esc2(f.id)}" title="${esc2(f.name)}"><span class="iig-fchip-t">${esc2(f.name)}</span></button>`).join('')}
                     </div>
-                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">по умолчанию — папка, открытая сейчас; ещё папки — кнопкой 📁 у персонажа</div>` : ''}
+                    <div class="slk-hint">по умолчанию — папка, открытая сейчас; ещё папки — кнопкой 📁 у персонажа</div>` : ''}
                 </div>
-                <div id="slk_f_who" style="display:none;">
-                    <label style="font-size:12px;opacity:.8;">\u041a\u043e\u043c\u0443</label>
+                <div id="slk_f_who" hidden>
+                    <div class="slay-cs-l"><span>Кому</span></div>
                     <div id="slk_who_host"></div>
-                    <div style="font-size:11px;opacity:.55;margin-bottom:6px;">\u0438\u043c\u0435\u043d\u0430 \u0443\u0436\u0435 \u0437\u0430\u043f\u0438\u0441\u0430\u043d\u044b \u2014 \u0432\u043f\u0438\u0441\u044b\u0432\u0430\u0442\u044c \u0437\u0430\u043d\u043e\u0432\u043e \u043d\u0435 \u043d\u0443\u0436\u043d\u043e</div>
+                    <div class="slk-hint">имена уже записаны — вписывать заново не нужно</div>
                 </div>
-                <label style="font-size:12px;opacity:.8;">\u041e\u0431\u0440\u0430\u0437</label>
-                <input type="text" id="slk_label" class="text_pole" value="" placeholder="\u041c\u0430\u0444\u0438\u044f, \u041a\u043e\u043b\u0434\u043e\u0432\u0441\u0442\u0432\u043e\u0440\u0435\u0446, Basic">
-                <div style="font-size:11px;opacity:.55;">\u043f\u043e\u0434\u043f\u0438\u0441\u044c \u043f\u043e\u0434 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u043e\u0439, \u0432 \u043f\u0440\u043e\u043c\u043f\u0442 \u043d\u0435 \u043f\u043e\u043f\u0430\u0434\u0430\u0435\u0442</div>`;
+                <label class="slay-cs-l"><span>Образ</span><input type="text" id="slk_label" class="text_pole" value="" placeholder="Мафия, Колдовстворец, Basic" autocomplete="off" spellcheck="false"></label>
+                <div class="slk-hint">подпись под картинкой, в промпт не попадает</div>`;
 
             let mode = match ? 'add' : 'new';
             const bNew = wrap.querySelector('#slk_new'), bAdd = wrap.querySelector('#slk_add');
             const setMode = (m) => {
                 mode = m;
-                wrap.querySelector('#slk_f_names').style.display = m === 'new' ? '' : 'none';
-                wrap.querySelector('#slk_f_who').style.display = m === 'add' ? '' : 'none';
-                wrap.querySelector('#slk_title').textContent = m === 'add'
-                    ? '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0437'
-                    : '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430';
-                if (bNew && bAdd) {
-                    for (const [b, k] of [[bNew, 'new'], [bAdd, 'add']]) {
-                        const on = k === m;
-                        b.style.background = on ? 'rgba(244,114,182,.22)' : 'transparent';
-                        b.style.color = on ? '#f472b6' : '#bbb';
-                        b.style.fontWeight = on ? '600' : '400';
-                    }
-                }
+                wrap.querySelector('#slk_f_names').hidden = m !== 'new';
+                wrap.querySelector('#slk_f_who').hidden = m !== 'add';
+                wrap.querySelector('#slk_title').textContent = m === 'add' ? 'Добавить образ' : 'Сохранить персонажа';
+                bNew?.classList.toggle('on', m === 'new');
+                bAdd?.classList.toggle('on', m === 'add');
             };
             if (bNew) bNew.addEventListener('click', (e) => { e.preventDefault(); setMode('new'); });
             if (bAdd) bAdd.addEventListener('click', (e) => { e.preventDefault(); setMode('add'); });
@@ -7341,7 +7446,7 @@ async function slayPromptSaveLook(typedNames, path) {
                 if (cur) wrap.querySelector('#slk_label').value = cur.label || '';
             }
 
-            const okd = await ctx.callGenericPopup(wrap, CONFIRM);
+            const okd = await slayFormBox(wrap, { ok: 'Сохранить' });
             if (!okd) return null;
             const label = (wrap.querySelector('#slk_label').value || '').trim();
             if (mode === 'add' && whoSel) return { charId: whoSel.value, names: '', label };
@@ -7901,6 +8006,7 @@ let _slayFrameCat = '';
 function slayFramesLoad() {
     // The site lets the browser keep the file for ten minutes; so do we.
     if (!_slayFramesAll || Date.now() - _slayFramesAt > 600000) {
+        const prev = _slayFramesAll;
         _slayFramesAt = Date.now();
         _slayFramesAll = fetch(SLAY_STYLES_BASE + 'frames.json')
             .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -7913,7 +8019,7 @@ function slayFramesLoad() {
                 try { slayFramesRefreshUsed(data); } catch (e) { iigLog('WARN', 'frames refresh:', e?.message); }
                 return data;
             })
-            .catch(e => { _slayFramesAll = null; throw e; });
+            .catch(e => { _slayFramesAll = prev; if (prev) return prev; throw e; });
     }
     return _slayFramesAll;
 }
@@ -8289,9 +8395,10 @@ function slayFrameUiBind() {
         if (!b) return;
         const x = b.dataset.k ? (await slayFramesLoad()).frames.find(y => y.k === b.dataset.k) : null;
         const lvl = slayFrameLevel();
-        const f = slayFrameCfg(true);
         const key = x ? x.k : '';
-        if (key === (f.key || '') && (x || f.off || lvl === 'all')) { mark(); return; }
+        const was = slayFrameCfg();
+        if (key === (was.key || '') && (x || was.off || lvl === 'all')) { mark(); return; }
+        const f = slayFrameCfg(true);
         if (f.mode !== 'all') {
             // The pick so far stays with the pictures made under it.
             f.hist = [{ since: f.since || 0, key: f.key || '' }, ...(Array.isArray(f.hist) ? f.hist : [])].slice(0, 4);
@@ -10485,7 +10592,7 @@ function updateSectionStatuses() {
     // Подключение: «OpenAI · gpt-image-1 · ✓»
     {
         const typeLabel = { openai: 'OpenAI', gemini: 'Gemini', naistera: 'Naistera', custom: 'Custom', novelai: 'NovelAI' }[apiType] || apiType;
-        const model = apiType === 'novelai' ? novelModelLabel(getEffectiveNovelModel(settings)) : isNaistera ? (normalizeNaisteraModel(settings.naisteraModel) || '—') : (settings.model || '—');
+        const model = apiType === 'novelai' ? novelModelLabel(getEffectiveNovelModel(settings)) : isNaistera ? (naisteraModelLabel(settings.naisteraModel) || '—') : (settings.model || '—');
         const parts = [typeLabel, model];
         if (!settings.apiKey) parts.push(apiType === 'novelai' ? 'ключ из таверны' : 'нет ключа');
         else if (_slayTestOk) parts.push('✓');
@@ -10529,11 +10636,12 @@ function updateSectionStatuses() {
         if (swS.wardrobeEnabled === false) set('ward', 'выкл');
         else set('ward', `надето ${slayCountEquipped(swS)} · ${swS.sendOutfitDescription !== false ? 'описание в промпт' : 'описание выкл'}`);
     }
-    // Ещё: «видео выкл»
+    // Ещё: «extblocks выкл · студия · логи»
     {
         const parts = [];
         if (isNaistera) parts.push(`видео ${settings.naisteraVideoTest ? 'вкл' : 'выкл'}`);
         parts.push(settings.externalBlocks ? 'extblocks вкл' : 'extblocks выкл');
+        parts.push('студия');
         parts.push('логи');
         set('more', parts.join(' · '));
     }
@@ -10598,7 +10706,7 @@ function createSettingsUI() {
                         <p id="slay_novel_hint" class="hint ${settings.apiType === 'novelai' ? '' : 'iig-hidden'}">NovelAI: вставьте Persistent API Token (<i>pst-…</i>, NovelAI → Account Settings → Get Persistent API Token). Можно оставить пустым, если ключ уже вписан в настройках NovelAI самой таверны — но тогда несколько персонажей сливаются в один промпт.</p>
                         <div class="flex-row ${settings.apiType === 'naistera' ? 'iig-hidden' : ''}" id="slay_model_row"><label>Модель</label><select id="slay_model_select" class="text_pole flex1 ${settings.manualModel ? 'iig-hidden' : ''}"></select><input type="text" id="slay_model" class="text_pole flex1 ${settings.manualModel ? '' : 'iig-hidden'}" placeholder="название модели" value="${sanitizeForHtml(settings.model || '')}" autocomplete="off" spellcheck="false"><div id="slay_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список"><i class="fa-solid fa-sync"></i></div></div>
                         <label class="checkbox_label" id="slay_manual_model_row"><input type="checkbox" id="slay_manual_model" ${settings.manualModel ? 'checked' : ''}><span style="font-size:0.85em;opacity:0.85;">Ввести название модели вручную</span></label>
-                        <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"><option value="nano banana 2" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2' ? 'selected' : ''}>Nano Banana 2</option><option value="nano banana 2 lite" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana 2 lite' ? 'selected' : ''}>Nano Banana 2 Lite</option><option value="nano banana pro" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana pro' ? 'selected' : ''}>Nano Banana Pro</option><option value="novelai v4.5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v4.5' ? 'selected' : ''}>NovelAI V4.5</option><option value="novelai v5" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai v5' ? 'selected' : ''}>NovelAI V5</option><option value="grok" ${normalizeNaisteraModel(settings.naisteraModel) === 'grok' ? 'selected' : ''}>Grok</option><option value="nano banana" ${normalizeNaisteraModel(settings.naisteraModel) === 'nano banana' ? 'selected' : ''}>Nano Banana (старая)</option><option value="novelai" ${normalizeNaisteraModel(settings.naisteraModel) === 'novelai' ? 'selected' : ''}>NovelAI (старая)</option><option value="${NAISTERA_MANUAL}" ${!naisteraModelIsListed(settings.naisteraModel) ? 'selected' : ''}>— вписать вручную —</option></select></div>
+                        <div class="flex-row ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}" id="slay_naistera_model_row"><label>Модель Naistera</label><select id="slay_naistera_model" class="flex1"></select><div id="slay_naistera_refresh" class="menu_button iig-refresh-btn" title="Обновить список моделей с Naistera"><i class="fa-solid fa-sync"></i></div></div>
                         <div class="flex-row ${settings.apiType === 'naistera' && !naisteraModelIsListed(settings.naisteraModel) ? '' : 'iig-hidden'}" id="slay_naistera_manual_row"><label>Название модели</label><input type="text" id="slay_naistera_model_manual" class="text_pole flex1" placeholder="например nano-banana-2-lite" value="${sanitizeForHtml(naisteraModelIsListed(settings.naisteraModel) ? '' : (settings.naisteraModel || ''))}" autocomplete="off" spellcheck="false"></div>
                         <div id="slay_test_connection" class="menu_button iig-test-connection"><i class="fa-solid fa-wifi"></i> Тест</div>`;
 
@@ -10744,6 +10852,7 @@ function createSettingsUI() {
                         </div>
                         <div class="iig-subhead">Студия</div>
                         <label class="checkbox_label"><input type="checkbox" id="slay_studio_btn_show" ${settings.studioBtnHidden === true ? '' : 'checked'}><span>Кнопка студии (палитра) в окне чата</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="slay_studio_model_badge" ${settings.studioModelBadge === false ? '' : 'checked'}><span>Студия: плашка с моделью на картинках</span></label>
                         <label class="checkbox_label"><input type="checkbox" id="slay_studio_del_warn" ${settings.studioDelNoWarn === true ? '' : 'checked'}><span>Студия: предупреждать перед удалением картинки с диска</span></label>
                         <div id="slay_studio_open" class="menu_button" style="width:100%;"><i class="fa-solid fa-palette"></i> Открыть студию</div>
                         <div class="iig-subhead">Диск</div>
@@ -11459,17 +11568,14 @@ function renderSavedPortraits() {
         e.preventDefault(); e.stopPropagation();
         const others = chars.filter(c => c.id !== sel.id);
         if (!others.length) return;
-        const ctx2 = SillyTavern.getContext();
         const wrap = document.createElement('div');
-        wrap.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:6px;';
         wrap.innerHTML = `
-            <div style="font-size:15px;font-weight:600;color:#f472b6;">\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0438\u0442\u044c</div>
-            <div style="font-size:12px;opacity:.75;line-height:1.5;">\u041e\u0431\u0440\u0430\u0437\u044b <b>${sanitizeForHtml(sel.names)}</b> \u043f\u0435\u0440\u0435\u0435\u0434\u0443\u0442 \u043a \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u043c\u0443, \u0438\u043c\u0435\u043d\u0430 \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u044f\u0442\u0441\u044f.</div>
+            <div class="slay-choose-t">Объединить</div>
+            <div class="slay-choose-x">Образы <b>${sanitizeForHtml(sel.names)}</b> перейдут к выбранному, имена объединятся.</div>
             <div id="slk_merge_host"></div>`;
         const picker = swBuildCharPicker(others, { seed: '' });
         wrap.querySelector('#slk_merge_host').appendChild(picker.el);
-        const CONFIRM = ctx2.POPUP_TYPE && ctx2.POPUP_TYPE.CONFIRM ? ctx2.POPUP_TYPE.CONFIRM : 2;
-        const okd = await ctx2.callGenericPopup(wrap, CONFIRM);
+        const okd = await slayFormBox(wrap, { ok: 'Объединить' });
         if (!okd || !picker.value) return;
         const targetId = picker.value;
         if (mergeSavedChars(sel.id, targetId)) {
@@ -13801,6 +13907,7 @@ function bindSettingsEvents() {
 
     document.getElementById('slay_sw_find_orphans')?.addEventListener('click', () => { openSlayCleanup(); });
     document.getElementById('slay_cleanup_open')?.addEventListener('click', () => { openSlayCleanup(); });
+    document.getElementById('slay_studio_model_badge')?.addEventListener('change', (e) => { settings.studioModelBadge = e.target.checked; saveSettings(); try { _studioRedraw?.(); } catch (_) { } });
     document.getElementById('slay_studio_del_warn')?.addEventListener('change', (e) => { settings.studioDelNoWarn = !e.target.checked; saveSettings(); });
     document.getElementById('slay_studio_btn_show')?.addEventListener('change', (e) => { settings.studioBtnHidden = !e.target.checked; saveSettings(); slayInjectStudioBtn(); });
     document.getElementById('slay_studio_open')?.addEventListener('click', () => { openSlayStudio(); });
@@ -13898,7 +14005,7 @@ function bindSettingsEvents() {
         settings.customBodyFormat = p.customBodyFormat || 'chat';
         _slayTestOk = false;
         // Older profiles have no Naistera fields — leave the live ones alone then.
-        if (p.naisteraModel) settings.naisteraModel = normalizeNaisteraModel(p.naisteraModel);
+        if (p.naisteraModel) settings.naisteraModel = String(p.naisteraModel).trim();
         if (p.naisteraAspectRatio) settings.naisteraAspectRatio = p.naisteraAspectRatio;
         if (p.novelModel) { settings.novelModel = p.novelModel; settings.novelCustomModel = p.novelCustomModel || ''; }
         saveSettings();
@@ -13913,10 +14020,7 @@ function bindSettingsEvents() {
         if (modelInput) modelInput.value = settings.model;
         const fmtSel = document.getElementById('slay_custom_body_format');
         if (fmtSel) fmtSel.value = settings.customBodyFormat;
-        const nmSel = document.getElementById('slay_naistera_model');
-        if (nmSel) nmSel.value = naisteraModelIsListed(settings.naisteraModel) ? normalizeNaisteraModel(settings.naisteraModel) : NAISTERA_MANUAL;
-        const nmInp = document.getElementById('slay_naistera_model_manual');
-        if (nmInp) nmInp.value = naisteraModelIsListed(settings.naisteraModel) ? '' : (settings.naisteraModel || '');
+        slayNaisteraFillSelect();
         const naSel = document.getElementById('slay_naistera_aspect_ratio');
         if (naSel) naSel.value = settings.naisteraAspectRatio || 'auto';
         const nvSel = document.getElementById('slay_novel_model');
@@ -13981,6 +14085,7 @@ function bindSettingsEvents() {
             } catch (e) { /* unparseable endpoint — nothing useful to say */ }
         }
         settings.apiType = next; _slayTestOk = false; saveSettings(); updateVisibility();
+        if (next === 'naistera') slayNaisteraRefresh(false, updateVisibility);
         // custom / naistera have no model listing — hand the user the text field.
         iigSyncModelInputMode({ forceManual: next === 'custom' || next === 'naistera' });
         if (next !== 'custom' && next !== 'naistera' && next !== 'novelai' && !settings.manualModel && settings.endpoint && settings.apiKey) {
@@ -14127,6 +14232,10 @@ function bindSettingsEvents() {
     document.getElementById('slay_edits_fidelity')?.addEventListener('change', (e) => { settings.editsHighFidelity = e.target.checked; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
     document.getElementById('slay_image_size')?.addEventListener('change', (e) => { settings.imageSize = e.target.value; saveSettings(); });
+    slayNaisteraFillSelect();
+    document.getElementById('slay_naistera_refresh')?.addEventListener('click', () => slayNaisteraRefresh(true, updateVisibility));
+    // The list is asked for again twice a day at most.
+    if (settings.apiType === 'naistera' && !(Date.now() - (settings.naisteraCatalog?.at || 0) < 12 * 3600 * 1000)) slayNaisteraRefresh(false, updateVisibility);
     document.getElementById('slay_naistera_model')?.addEventListener('change', (e) => {
         const manualRow = document.getElementById('slay_naistera_manual_row');
         if (e.target.value === NAISTERA_MANUAL) {
@@ -14135,23 +14244,21 @@ function bindSettingsEvents() {
             return;   // wait for the typed name before saving anything
         }
         manualRow?.classList.add('iig-hidden');
-        settings.naisteraModel = normalizeNaisteraModel(e.target.value);
-        saveSettings(); updateVisibility();
+        settings.naisteraModel = e.target.value;
+        saveSettings(); updateVisibility(); updateSectionStatusesSoon();
     });
-    // Store the canonical spelling (see canonNaisteraModelName) while the user
-    // types; tidy the field itself and re-check the refs gate once they leave it.
+    // A typed name is kept as typed (dashes too): that is what the server gets.
     document.getElementById('slay_naistera_model_manual')?.addEventListener('input', (e) => {
-        const v = canonNaisteraModelName(e.target.value);
+        const v = String(e.target.value || '').trim();
         if (v) { settings.naisteraModel = v; saveSettings(); }
     });
     document.getElementById('slay_naistera_model_manual')?.addEventListener('change', (e) => {
-        const v = canonNaisteraModelName(e.target.value);
+        const v = String(e.target.value || '').trim();
         if (!v) return;
-        if (e.target.value !== v) e.target.value = v;
         // Typed a listed name? Then it belongs in the dropdown, not here.
-        const sel = document.getElementById('slay_naistera_model');
-        if (sel && naisteraModelIsListed(v)) { sel.value = v; e.target.value = ''; }
-        updateVisibility();
+        const hit = naisteraFind(v);
+        if (hit) { settings.naisteraModel = hit.id; saveSettings(); slayNaisteraFillSelect(); document.getElementById('slay_naistera_manual_row')?.classList.add('iig-hidden'); }
+        updateVisibility(); updateSectionStatusesSoon();
     });
     document.getElementById('slay_naistera_aspect_ratio')?.addEventListener('change', (e) => { settings.naisteraAspectRatio = e.target.value; saveSettings(); });
     // NovelAI
@@ -14648,6 +14755,17 @@ function slayStudioOnChatChanged() {
     try { slayStudioTakeLate(); } catch (e) { iigLog('WARN', 'studio late results:', e?.message); }
 }
 
+// «gemini-3-pro-image · 2K»: read when a job starts, so a model switched
+// while it runs does not relabel it.
+function slayStudioModelTag() {
+    const st = getSettings();
+    const model = st.apiType === 'novelai' ? novelModelLabel(getEffectiveNovelModel(st))
+        : st.apiType === 'naistera' ? naisteraModelLabel(st.naisteraModel)
+            : String(st.model || '');
+    const sized = st.apiType === 'gemini' || st.apiType === 'openai' || (st.apiType === 'custom' && (st.customBodyFormat || 'chat') === 'chat');
+    const size = sized ? (['1K', '2K', '4K'].includes(st.imageSize) ? st.imageSize : '1K') : '';
+    return [model, size].filter(Boolean).join(' · ').slice(0, 80);
+}
 function slayStudioItems(create = true) {
     const ctx = SillyTavern.getContext();
     const md = ctx.chatMetadata;
@@ -15105,11 +15223,11 @@ function slayApiStatus() {
         ok: true,
         apiType: s.apiType,
         provider: SLAY_API_PROVIDERS[s.apiType] || String(s.apiType || ''),
-        model: naistera ? canonNaisteraModelName(s.naisteraModel) : (s.apiType === 'novelai' ? s.novelModel : s.model) || '',
+        model: naistera ? naisteraWireModel(s.naisteraModel) : (s.apiType === 'novelai' ? s.novelModel : s.model) || '',
         refs,            // takes reference pictures
         edit: refs,      // «Правка» rides on refs
         ratios: VALID_ASPECT_RATIOS.slice(),
-        models: naistera ? NAISTERA_MODELS.slice() : [],   // per-request choice only for Naistera
+        models: naistera ? naisteraCatalogList().filter(m => m.visible !== false && !m.deprecated).map(m => m.id) : [],   // per-request choice only for Naistera
     };
 }
 
@@ -15485,9 +15603,21 @@ function openSlayStudio() {
         {
             const xr = slayStudioXRefs(false);
             $z('xrefs').innerHTML = xr.map(x => `<span class="slay-studio-xref${x.on ? ' on' : ''}" data-xref="${esc(x.id)}" title="${x.on ? 'Уйдёт рефом. Нажми — выключить' : 'Выключен. Нажми — включить'}"><img data-thumb="${esc(x.path)}" alt=""><span class="slay-studio-xref-n">${esc(x.name)}</span><button type="button" data-xact="name" title="Переименовать: это имя увидит модель">✎</button><button type="button" data-xact="del" title="Убрать">×</button></span>`).join('')
-                + '<button type="button" class="slay-studio-mini" data-act="addref" title="Своя картинка рефом: поза, вещь, место, человек">＋ Свой реф</button>';
+                + `<button type="button" class="slay-studio-mini${addMenu ? ' on' : ''}" data-act="addref" aria-expanded="${addMenu}" title="Своя картинка рефом: поза, вещь, место, человек">＋ Свой реф</button>`
+                + (addMenu ? (() => {
+                    const rec = getRecentRefs().slice(0, RECENT_REFS_MAX);
+                    return `<div class="slay-studio-addref">
+                        <div class="slay-studio-addref-row">
+                            <button type="button" class="slay-studio-mini" data-act="addfile"><i class="fa-solid fa-folder-open"></i> Файл</button>
+                            <button type="button" class="slay-studio-mini" data-act="addpaste"><i class="fa-solid fa-clipboard"></i> Вставить</button>
+                            ${rec.length ? `<button type="button" class="slay-studio-mini${addRecent ? ' on' : ''}" data-act="addrecent" aria-expanded="${addRecent}"><i class="fa-solid fa-clock-rotate-left"></i> Недавние <i class="fa-solid fa-chevron-${addRecent ? 'up' : 'down'}"></i></button>` : ''}
+                        </div>
+                        ${addRecent && rec.length ? `<div class="slay-studio-recent">${rec.map(r => `<button type="button" data-act="addrec" data-path="${esc(r.path)}" title="Взять рефом"><img data-thumb="${esc(r.path)}" alt=""></button>`).join('')}</div>` : ''}
+                    </div>`;
+                })() : '');
             for (const img of $z('xrefs').querySelectorAll('img[data-thumb]')) {
                 const p = img.dataset.thumb;
+                if (img.closest('.slay-studio-recent')) img.addEventListener('error', () => img.closest('button')?.remove(), { once: true });
                 slayThumb(p, () => img.isConnected).then((u) => { if (img.isConnected) img.src = u || p; });
             }
             const pl = slayStudioPickedPlace(opts, _studio.who);
@@ -15581,7 +15711,7 @@ function openSlayStudio() {
     const sizeApplies = (st) => st.apiType === 'gemini' || st.apiType === 'openai' || (st.apiType === 'custom' && (st.customBodyFormat || 'chat') === 'chat');
     function drawImgSummary() {
         const st = getSettings();
-        const model = st.apiType === 'naistera' ? normalizeNaisteraModel(st.naisteraModel) : st.apiType === 'novelai' ? '' : (st.model || '');
+        const model = st.apiType === 'naistera' ? naisteraModelLabel(st.naisteraModel) : st.apiType === 'novelai' ? '' : (st.model || '');
         const size = ['1K', '2K', '4K'].includes(st.imageSize) ? st.imageSize : '1K';
         $z('simg').textContent = [IMG_TYPES[st.apiType] || st.apiType, model || (st.apiType === 'novelai' ? '' : 'модель не выбрана'), sizeApplies(st) ? size : ''].filter(Boolean).join(' · ');
         $z('isizerow').hidden = !sizeApplies(st);
@@ -15595,6 +15725,9 @@ function openSlayStudio() {
     // How many results are drawn: the last 10, more by the button; pictures
     // made while this window is open are always all drawn.
     let shownN = 10;
+    // «＋ Свой реф» opens a small menu; the recent refs strip inside it opens
+    // only on its own button.
+    let addMenu = false, addRecent = false;
     const studioOpenedAt = Date.now();
     const inFilter = (x) => resFilter === 'hid' ? !!x.hidden : !x.hidden && (resFilter === 'all' || (resFilter === 'sent') === !!x.sent);
     const pickedIds = new Set();
@@ -15661,10 +15794,12 @@ function openSlayStudio() {
         const rest = Math.max(0, items.length - lim);
         const more = rest ? `<div class="slay-studio-more"><span>Показаны последние ${lim} из ${items.length}</span><button type="button" class="slay-studio-btn" data-act="more">Ещё ${Math.min(10, rest)}</button><button type="button" class="slay-studio-btn" data-act="moreall">Все ${items.length}</button></div>` : '';
         const hidView = resFilter === 'hid';
+        const showModel = getSettings().studioModelBadge !== false;
         $z('res').innerHTML = busy + items.slice(rest).reverse().map(it => `
             <div class="slay-studio-card" data-id="${esc(it.id)}">
               <div class="slay-studio-imgw">
                 <img decoding="async" alt="" data-full="${esc(it.path)}"${cardRatio(it)}>
+                ${showModel && it.model ? `<span class="slay-studio-model" title="Нарисовано: ${esc(it.model)}">${esc(it.model)}</span>` : ''}
                 <button type="button" class="sw-corner-btn sw-corner-hide${hidView ? ' sw-corner-active' : ''}" data-card="${hidView ? 'unhide' : 'hide'}" title="${hidView ? 'Вернуть в общий список' : 'Скрыть: убрать из списка, файл останется на диске'}"><i class="fa-solid fa-eye${hidView ? '-slash' : ''}"></i></button>
               </div>
               <div class="slay-studio-cap" title="${esc(it.prompt || '')}">${it.sent ? '✓ в чате · ' : ''}${esc(it.idea || it.prompt || '')}</div>
@@ -15673,7 +15808,7 @@ function openSlayStudio() {
                 <button type="button" data-card="ref">Сделать рефом</button>
                 ${slayCanEditImage() ? '<button type="button" data-card="edit"><i class="fa-solid fa-wand-magic-sparkles"></i> Правка</button>' : ''}
                 <button type="button" data-card="again" title="Нарисовать ещё раз по этому же промпту (платный запрос)"><i class="fa-solid fa-rotate-right"></i></button>
-                <button type="button" data-card="reuse" title="Вернуть идею и промпт в поля слева (и скопировать промпт)"><i class="fa-solid fa-copy"></i></button>
+                <button type="button" data-card="reuse" title="${/^🪄/.test(String(it.idea || '')) ? 'Скопировать текст правки' : 'Вернуть идею и промпт в поля слева (и скопировать промпт)'}"><i class="fa-solid fa-copy"></i></button>
                 <button type="button" data-card="dl" title="Скачать"><i class="fa-solid fa-download"></i></button>
                 <button type="button" class="del" data-card="del" title="Удалить из студии и с диска"><i class="fa-solid fa-trash"></i> Удалить</button>
               </div>
@@ -15700,13 +15835,14 @@ function openSlayStudio() {
         const chatKey = slayStudioChatKey();
         _studio.busyBy[chatKey] = (_studio.busyBy[chatKey] || 0) + n; drawResults();
         let late = 0;
+        const model = slayStudioModelTag();
         const jobs = Array.from({ length: n }, () => generateImageWithRetry(prompt, '', null, {
             studio: who, forceAspect: ar, aspectRatio: ar, noStyle, editSource, editText, extraRefs: slayStudioXRefsOn(), styleOverride,
         }).then(async (res) => {
             if (isGeneratedVideoResult(res)) throw new Error('пришло видео вместо картинки');
             const path = await iigSaveWithRetry(() => saveImageToFile(res), () => { });
             await slayThumbSeed(path, res, 480);
-            const item = { id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false };
+            const item = { id: swUid('st'), path, prompt, idea: idea || '', ar, who, at: Date.now(), sent: false, ...(model ? { model } : {}) };
             if (slayStudioChatKey() === chatKey) { slayStudioItems().push(item); slayStudioSave(); }
             else { (_studioLate[chatKey] = _studioLate[chatKey] || []).push(item); slayStudioLateSave(); late++; }
         }).finally(() => {
@@ -15751,6 +15887,39 @@ function openSlayStudio() {
         if (ok) slayStudioSave();
         if (ov.isConnected) drawLeft();
         if (fail) toastr.error(`Не добавилось ${list.length - ok} из ${list.length}: ${fail}`, 'Студия', { timeOut: 8000 });
+    };
+
+    // A picture from the clipboard: the same way as a file from the device.
+    const pasteRef = async () => {
+        if (!navigator.clipboard?.read) { toastr.warning('Браузер не даёт прочитать буфер обмена на этой странице. Возьми картинку кнопкой «Файл».', 'Студия', { timeOut: 6000 }); return; }
+        let blob = null;
+        try {
+            for (const item of await navigator.clipboard.read()) {
+                const type = item.types.find(x => x.startsWith('image/'));
+                if (type) { blob = await item.getType(type); break; }
+            }
+        } catch (err) { toastr.error(`Буфер не прочитался: ${err?.message || err}`, 'Студия'); return; }
+        if (!blob) { toastr.warning('В буфере нет картинки', 'Студия', { timeOut: 2500 }); return; }
+        await addRefs([blob]);
+    };
+    // A recent ref from the settings: the same file, no copy (lib), so × only
+    // takes it out of the Studio. The name is offered from the slot it is in.
+    const addRecentRef = async (path) => {
+        if (!path) return;
+        if (slayStudioXRefs(false).some(x => x.path === path)) { toastr.info('Этот реф уже в студии', 'Студия', { timeOut: 2000 }); return; }
+        let guess = '';
+        try {
+            const r = getCurrentCharacterRefs();
+            const slot = [r.charRef, r.userRef, ...(r.npcReferences || []), ...(r.locReferences || [])].find(x => x && x.imagePath === path && String(x.name || '').trim());
+            const owner = slot ? null : findSavedCharByPath(path);
+            guess = swNameList(slot ? slot.name : owner ? owner.names : '')[0] || '';
+        } catch (_) { }
+        const md = SillyTavern.getContext().chatMetadata;
+        const v = await slayPromptInput('Что на картинке? Это имя увидит модель (например: поза, кот, его куртка)', guess.slice(0, 60));
+        if (v === null || v === undefined || SillyTavern.getContext().chatMetadata !== md) return;
+        slayStudioXRefs().push({ id: swUid('sr'), path, name: (String(v).trim() || 'реф').slice(0, 60), on: true, lib: true });
+        slayStudioSave();
+        if (ov.isConnected) drawLeft();
     };
 
     // Many pictures at once: out of the Studio now, off the disk when the
@@ -15843,7 +16012,17 @@ function openSlayStudio() {
             if (t.dataset.pk !== 'none') for (const x of all.filter(inFilter)) if (t.dataset.pk === 'all' || !x.sent) pickedIds.add(x.id);
             drawResults(); return;
         }
-        if (t.dataset.act === 'addref') { $z('file').click(); return; }
+        if (t.dataset.act === 'addref') { addMenu = !addMenu; addRecent = false; drawLeft(); return; }
+        if (t.dataset.act === 'addrecent') { addRecent = !addRecent; drawLeft(); return; }
+        if (t.dataset.act === 'addfile' || t.dataset.act === 'addpaste' || t.dataset.act === 'addrec') {
+            addMenu = addRecent = false;
+            // The file picker and the clipboard need this very click: no await before them.
+            if (t.dataset.act === 'addfile') $z('file').click();
+            else if (t.dataset.act === 'addpaste') pasteRef();
+            else addRecentRef(t.dataset.path);
+            drawLeft();
+            return;
+        }
         if (t.dataset.xact || t.dataset.xref) {
             const id = t.closest('[data-xref]')?.dataset.xref;
             const list = slayStudioXRefs(false);
@@ -15852,7 +16031,7 @@ function openSlayStudio() {
             if (t.dataset.xact === 'del') {
                 list.splice(list.indexOf(x), 1);
                 slayStudioSave();
-                slayDeleteStoredImage(x.path).catch(() => { });
+                if (!x.lib) slayDeleteStoredImage(x.path).catch(() => { });
             } else if (t.dataset.xact === 'name') {
                 const v = await slayPromptInput('Что на картинке? Это имя увидит модель', x.name);
                 if (v !== null && v !== undefined && String(v).trim()) { x.name = String(v).trim().slice(0, 60); slayStudioSave(); }
@@ -15953,6 +16132,24 @@ function openSlayStudio() {
                 return;
             }
             if (act === 'reuse') {
+                // A picture made by «Правка»: its text is the edit, the prompt is the
+                // source picture's. Copy the edit and leave the fields alone.
+                if (/^🪄/.test(String(item.idea || ''))) {
+                    const edit = String(item.idea).replace(/^🪄\s*/, '').trim();
+                    let ok = false;
+                    try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(edit); ok = true; } } catch (_) { }
+                    if (!ok) {
+                        // No clipboard API (plain http): the old way.
+                        const ta = document.createElement('textarea');
+                        ta.value = edit; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;left:-9999px;opacity:0;';
+                        document.body.appendChild(ta); ta.select();
+                        try { ok = document.execCommand('copy'); } catch (_) { }
+                        ta.remove();
+                    }
+                    if (ok) toastr.success('Текст правки в буфере', 'Студия', { timeOut: 2000 });
+                    else toastr.warning('Браузер не дал скопировать', 'Студия', { timeOut: 3000 });
+                    return;
+                }
                 const idea = String(item.idea || '').replace(/^🪄\s*/, '');
                 const raw = !!item.prompt && item.prompt === item.idea;
                 _studio.raw = raw;
@@ -16453,7 +16650,7 @@ function updateHeaderStatusDot() {
                     for (const node of m.addedNodes) {
                         if (node.nodeType !== 1) continue;
                         // Our own wrappers and buttons need no second look.
-                        if (node.classList?.contains('iig-img-wrap') || node.classList?.contains('iig-regen-btn') || node.classList?.contains('slay-frame')) continue;
+                        if (node.classList?.contains('iig-img-wrap') || node.classList?.contains('iig-regen-btn') || node.classList?.contains('slay-frame') || node.hasAttribute?.('data-slay-home')) continue;
                         waiting.add(node.closest?.('.mes') || node);
                     }
                 }

@@ -4217,3 +4217,29 @@ button.slay-card-look { cursor: pointer; }
 [data-slay-home] { display: none; }
 /* A picture taken from a style block keeps that block's inline border: not inside a frame. */
 .slay-frame .iig-img-wrap > img, .slay-frame .iig-img-wrap > video { border: 0 !important; box-shadow: none !important; }
+
+/* Studio results: which model drew the picture. */
+.slay-studio-model { position: absolute; top: 6px; left: 6px; z-index: 2; max-width: calc(100% - 12px); box-sizing: border-box; padding: 2px 7px; border-radius: 6px; background: rgba(0, 0, 0, 0.62); color: rgba(255, 255, 255, 0.88); font-size: 10.5px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+
+/* One-line field of a SLAY question box (names, labels). */
+.slay-ask-in { display: block; width: 100%; box-sizing: border-box; margin: 0 0 12px; font-size: 14px; }
+/* Saving a portrait from a slot, in a SLAY box. */
+.slk-save .slk-seg { margin-bottom: 10px; }
+.slk-hint { font-size: 11px; opacity: 0.55; margin: -1px 0 8px; }
+.slk-match { display: flex; gap: 8px; align-items: flex-start; background: color-mix(in srgb, var(--slay-pink) 10%, transparent); border: 1px solid color-mix(in srgb, var(--slay-pink) 28%, transparent); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; margin-bottom: 8px; }
+.slk-match-h { color: var(--slay-pink); }
+.slk-dim { opacity: 0.6; }
+/* Studio «＋ Свой реф»: where the picture comes from. */
+.slay-studio-mini.on { border-color: var(--slay-pink); color: var(--slay-pink); }
+.slay-studio-addref { flex-basis: 100%; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; padding: 6px; border-radius: 9px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); }
+.slay-studio-addref-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.slay-studio-addref-row .slay-studio-mini { display: inline-flex; align-items: center; gap: 6px; }
+.slay-studio-recent { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.slay-studio-recent button { flex: none; width: 52px; height: 52px; padding: 0; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.25); cursor: pointer; }
+.slay-studio-recent button:hover { border-color: var(--slay-pink); }
+.slay-studio-recent img { display: block; width: 100%; height: 100%; object-fit: cover; }
+@media (pointer: coarse) {
+    .slay-ask-in, .slay-ask-ta { font-size: 16px; }
+    .slay-studio-addref-row .slay-studio-mini { min-height: 40px; }
+    .slay-studio-recent button { width: 60px; height: 60px; }
+}
